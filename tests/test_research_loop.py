@@ -1,4 +1,6 @@
 """研究回路编排器单测(P2 §2):纯函数 + 假 LLM/求值桥全链干跑。零网络零引擎数据。"""
+import pytest
+
 import guanlan_v2.research.loop as rl
 
 
@@ -31,6 +33,14 @@ def test_gate_requires_positive_sharpe():
     g = rl._gate({"rank_ic": 0.05, "oos_verdict": "robust", "sharpe": -0.9}, 0.02)
     assert g["passed"] is False and g["sharpe_required"] is True     # Sharpe 负 → 拦(今日教训)
     assert rl._gate({"rank_ic": 0.05, "oos_verdict": "robust"}, 0.02)["passed"] is False  # 缺 sharpe 拦
+
+
+def test_gate_sticky_audit_requirement_rejects_missing_audit_metrics():
+    pretty = {"rank_ic": 0.08, "oos_verdict": "robust", "sharpe": 2.0}
+    assert rl._gate(pretty, 0.02)["passed"] is True
+    gated = rl._gate(pretty, 0.02, audit_required=True)
+    assert gated["passed"] is False
+    assert gated["audit_required"] is True and gated["audit_passed"] is False
 
 
 # ── 全链干跑(假桥)────────────────────────────────────────────────────────
@@ -167,6 +177,46 @@ def test_loop_eval_fail_round_continues(monkeypatch, tmp_path):
     rows = rs.read_rounds(run_id="rr_test04", limit=10)
     assert rows[1]["failed"] is True and "缺少数据" in rows[1]["error"]
     assert rows[0]["gate"]["passed"] is True
+
+
+def test_loop_never_allows_critique_to_delete_sticky_audit(monkeypatch, tmp_path):
+    audited = {"nodes": [
+        {"id": "f", "type": "formula", "params": {"expr": "rank(pb)"}},
+        {"id": "bt", "type": "backtest", "params": {}},
+        {"id": "audit", "type": "overfit", "params": {}},
+    ], "edges": [
+        {"from": ["f", "out"], "to": ["bt", "factor"]},
+        {"from": ["bt", "result"], "to": ["audit", "result"]},
+    ]}
+    unaudited = {"nodes": [
+        {"id": "f2", "type": "formula", "params": {"expr": "rank(roe)"}},
+        {"id": "bt2", "type": "backtest", "params": {}},
+    ], "edges": [{"from": ["f2", "out"], "to": ["bt2", "factor"]}]}
+    constraints_seen = []
+
+    def delete_audit(goal, metrics, graph, constraints=""):
+        constraints_seen.append(constraints)
+        return {"ok": True, "diagnosis": "删审计换漂亮回测", "graph": unaudited, "source": "llm"}
+
+    _wire(
+        monkeypatch, tmp_path,
+        evals=[_ex_ok(rank_ic=0.08, sharpe=2.0, oos="robust")],
+        critique=delete_audit,
+        generate=lambda goal: {"ok": True, "graph": audited},
+    )
+    end = rl.run_research_loop(
+        "rr_audit_sticky", "带审计找因子", 3, 0.02,
+        "csi_fast", "month", None, None, progress=lambda **kw: None,
+    )
+
+    assert end["promoted"] is None
+    assert end["ok"] is False and "审计不变量" in end["error"]
+    assert end["n_rounds"] == 1 and len(constraints_seen) == 2
+    assert all("不得删除审计" in text for text in constraints_seen)
+    import guanlan_v2.research.store as rs
+    row = rs.read_rounds(run_id="rr_audit_sticky")[0]
+    assert row["metrics"]["audit_status"] == "INCOMPLETE"
+    assert row["gate"]["passed"] is False
 
 
 def test_loop_rule_critique_prefix(monkeypatch, tmp_path):
@@ -400,6 +450,287 @@ def test_product_route_model_save_failed_honest(monkeypatch, tmp_path):
     assert end["promoted"]["status"] == "save_failed"
     assert "暂不支持生产入库" in end["promoted"]["reason"]     # train_promote 诚实拒绝原样透出
     assert lessons and "入库失败" in lessons[0]
+
+
+def test_orthogonalized_product_is_saved_as_replayable_structured_draft(monkeypatch):
+    graph = {"nodes": [
+        {"id": "f", "type": "formula", "params": {"expr": "rank(pb)"}},
+        {"id": "orth", "type": "orthogonalize", "params": {"industry": "是"}},
+        {"id": "bt", "type": "backtest", "params": {}},
+    ], "edges": [
+        {"from": ["f", "out"], "to": ["orth", "signal"]},
+        {"from": ["orth", "factor"], "to": ["bt", "factor"]},
+    ]}
+
+    from guanlan_v2.factorlib.specs import factor_spec_digest
+
+    factor_spec = rl._structured_factor_spec_from_graph(graph)
+    expected_digest = factor_spec_digest(factor_spec)
+    seen = {}
+
+    def save_structured(run_id, k, spec, goal, diag, metrics):
+        seen["spec"] = spec
+        return {"ok": True, "registered": True, "name": "lib_orth",
+                "factor_spec_digest": expected_digest}
+
+    def must_not_save(*args, **kwargs):
+        raise AssertionError("正交变换不能走普通 expr/compose 保存通道")
+
+    monkeypatch.setattr(rl, "_save_draft", must_not_save)
+    monkeypatch.setattr(rl, "_save_compose_expr", must_not_save)
+    monkeypatch.setattr(rl, "_save_structured_draft", save_structured)
+    result = rl._route_product(
+        "rr_orth_guard", 0, graph, "正交价值因子", "达标",
+        {"rank_ic": 0.05},
+        {"kind": "backtest", "node_id": "bt",
+         "payload": {"factor_spec": factor_spec,
+                     "factor_spec_digest": expected_digest}},
+        "csi300_active",
+    )
+    assert result == {"name": "lib_orth", "status": "draft_structured",
+                      "factor_spec_digest": expected_digest}
+    assert seen["spec"]["schema"] == "guanlan.factor_spec.v1"
+    assert seen["spec"]["base_features"] == ["rank(pb)"]
+    assert seen["spec"]["transform"]["industry"] is True
+
+
+def test_direct_structured_factorlib_product_reuses_full_spec(monkeypatch):
+    import guanlan_v2.factorlib.store as store_module
+    from guanlan_v2.factorlib.specs import (
+        factor_spec_digest, pin_factor_spec_dependencies,
+    )
+
+    spec = pin_factor_spec_dependencies({
+        "schema": "guanlan.factor_spec.v1", "kind": "orthogonalized",
+        "base_features": ["rank(pb)"],
+        "transform": {"industry": True, "size": "total_mv"},
+    })
+    digest = factor_spec_digest(spec)
+
+    class FakeStore:
+        def list_factors(self, validate=False):
+            return [{"name": "lib_existing_structured", "expr": "rank(pb)",
+                     "factor_spec": spec, "factor_spec_digest": digest}]
+
+    graph = {"nodes": [
+        {"id": "lib", "type": "factorlib", "params": {
+            "name": "lib_existing_structured", "expr": "rank(pb)",
+            "factor_spec": spec, "factor_spec_digest": digest,
+        }},
+        {"id": "bt", "type": "backtest", "params": {}},
+    ], "edges": [
+        {"from": ["lib", "out"], "to": ["bt", "factor"]},
+    ]}
+    seen = {}
+
+    def save_reused(rid, k, value, goal, diag, metrics):
+        seen["spec"] = value
+        return {"ok": True, "registered": True, "name": "lib_reused",
+                "factor_spec_digest": digest}
+
+    monkeypatch.setattr(store_module, "LibraryFactorStore", FakeStore)
+    monkeypatch.setattr(rl, "_save_structured_draft", save_reused)
+    monkeypatch.setattr(
+        rl, "_save_draft",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("直接结构化 factorlib 不得走普通 expr 保存")),
+    )
+    monkeypatch.setattr(
+        rl, "_save_compose_expr",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("直接结构化 factorlib 不得走 compose 保存")),
+    )
+
+    result = rl._route_product(
+        "rr_direct_structured", 0, graph, "复验结构化因子", "达标",
+        {"rank_ic": 0.05},
+        {"kind": "backtest", "node_id": "bt",
+         "payload": {"factor_spec": spec, "factor_spec_digest": digest}},
+        "csi300_active",
+    )
+
+    assert result == {"name": "lib_reused", "status": "draft_structured",
+                      "factor_spec_digest": digest}
+    assert seen["spec"] == spec
+
+
+def test_direct_structured_factorlib_missing_record_never_downgrades(monkeypatch):
+    import guanlan_v2.factorlib.store as store_module
+    from guanlan_v2.factorlib.specs import (
+        factor_spec_digest, pin_factor_spec_dependencies,
+    )
+
+    spec = pin_factor_spec_dependencies({
+        "schema": "guanlan.factor_spec.v1", "kind": "orthogonalized",
+        "base_features": ["rank(pb)"],
+        "transform": {"industry": True, "size": "total_mv"},
+    })
+    digest = factor_spec_digest(spec)
+
+    class EmptyStore:
+        def list_factors(self, validate=False):
+            return []
+
+    graph = {"nodes": [
+        {"id": "lib", "type": "factorlib", "params": {
+            "name": "lib_deleted_structured", "expr": "rank(pb)",
+            "factor_spec": spec, "factor_spec_digest": digest,
+        }},
+        {"id": "bt", "type": "backtest", "params": {}},
+    ], "edges": [{"from": ["lib", "out"], "to": ["bt", "factor"]}]}
+    monkeypatch.setattr(store_module, "LibraryFactorStore", EmptyStore)
+    monkeypatch.setattr(
+        rl, "_save_structured_draft",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("缺失记录不得保存")),
+    )
+    monkeypatch.setattr(
+        rl, "_save_draft",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不得降级普通保存")),
+    )
+
+    result = rl._route_product(
+        "rr_direct_missing", 0, graph, "复验结构化因子", "达标",
+        {"rank_ic": 0.05},
+        {"kind": "backtest", "node_id": "bt", "payload": {"factor_spec": spec}},
+        "csi300_active",
+    )
+    assert result["status"] == "save_failed"
+    assert "已缺失或已降级" in result["reason"]
+
+
+def test_old_graph_cannot_flatten_structured_factorlib_by_adding_orthogonalize(monkeypatch):
+    import guanlan_v2.factorlib.store as store_module
+    from guanlan_v2.factorlib.specs import (
+        factor_spec_digest, pin_factor_spec_dependencies,
+    )
+
+    spec = pin_factor_spec_dependencies({
+        "schema": "guanlan.factor_spec.v1", "kind": "orthogonalized",
+        "base_features": ["rank(pb)"],
+        "transform": {"industry": True, "size": "total_mv"},
+    })
+
+    class FakeStore:
+        def list_factors(self, validate=False):
+            return [{"name": "lib_nested_old_graph", "expr": "rank(pb)",
+                     "factor_spec": spec,
+                     "factor_spec_digest": factor_spec_digest(spec)}]
+
+    graph = {"nodes": [
+        # Simulate an old canvas snapshot that predates factor_spec params but
+        # still caches the plain display expression.
+        {"id": "lib", "type": "factorlib", "params": {
+            "name": "lib_nested_old_graph", "expr": "rank(pb)",
+        }},
+        {"id": "orth", "type": "orthogonalize", "params": {"industry": "是"}},
+        {"id": "bt", "type": "backtest", "params": {}},
+    ], "edges": [
+        {"from": ["lib", "out"], "to": ["orth", "signal"]},
+        {"from": ["orth", "factor"], "to": ["bt", "factor"]},
+    ]}
+    monkeypatch.setattr(store_module, "LibraryFactorStore", FakeStore)
+    monkeypatch.setattr(
+        rl, "_save_structured_draft",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("嵌套结构不得保存")),
+    )
+    result = rl._route_product(
+        "rr_nested_old", 0, graph, "嵌套", "达标", {"rank_ic": 0.05},
+        {"kind": "backtest", "node_id": "bt", "payload": {}},
+        "csi300_active",
+    )
+    assert result["status"] == "save_failed"
+    assert "不支持嵌套结构化基础因子" in result["reason"]
+
+
+def test_orthogonalized_product_rejects_metrics_from_disconnected_terminal(monkeypatch):
+    graph = {"nodes": [
+        {"id": "f", "type": "formula", "params": {"expr": "rank(pb)"}},
+        {"id": "orth", "type": "orthogonalize", "params": {"industry": "是"}},
+        {"id": "other", "type": "formula", "params": {"expr": "rank(pe)"}},
+        {"id": "bt", "type": "backtest", "params": {}},
+    ], "edges": [
+        {"from": ["f", "out"], "to": ["orth", "signal"]},
+        {"from": ["other", "out"], "to": ["bt", "factor"]},
+    ]}
+    spec = rl._structured_factor_spec_from_graph(graph)
+    monkeypatch.setattr(
+        rl, "_save_structured_draft",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("不可达终点的结构化因子不得保存")),
+    )
+
+    result = rl._route_product(
+        "rr_orth_branch", 0, graph, "正交价值因子", "达标",
+        {"rank_ic": 0.05},
+        {"kind": "backtest", "node_id": "bt", "payload": {"factor_spec": spec}},
+        "csi300_active",
+    )
+
+    assert result["status"] == "save_failed"
+    assert "不可达本轮实际终点" in result["reason"]
+
+
+@pytest.mark.parametrize("tamper", ["spec", "digest"])
+def test_orthogonalized_product_rejects_terminal_spec_or_digest_mismatch(
+    monkeypatch, tamper,
+):
+    from copy import deepcopy
+    from guanlan_v2.factorlib.specs import factor_spec_digest
+
+    graph = {"nodes": [
+        {"id": "f", "type": "formula", "params": {"expr": "rank(pb)"}},
+        {"id": "orth", "type": "orthogonalize", "params": {"industry": "是"}},
+        {"id": "bt", "type": "backtest", "params": {}},
+    ], "edges": [
+        {"from": ["f", "out"], "to": ["orth", "signal"]},
+        {"from": ["orth", "factor"], "to": ["bt", "factor"]},
+    ]}
+    spec = rl._structured_factor_spec_from_graph(graph)
+    payload_spec = deepcopy(spec)
+    declared_digest = factor_spec_digest(spec)
+    if tamper == "spec":
+        payload_spec["base_features"] = ["rank(pe)"]
+    else:
+        declared_digest = "0" * 64
+    monkeypatch.setattr(
+        rl, "_save_structured_draft",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("定义不一致的结构化因子不得保存")),
+    )
+
+    result = rl._route_product(
+        "rr_orth_tamper", 0, graph, "正交价值因子", "达标",
+        {"rank_ic": 0.05},
+        {"kind": "backtest", "node_id": "bt",
+         "payload": {"factor_spec": payload_spec,
+                     "factor_spec_digest": declared_digest}},
+        "csi300_active",
+    )
+
+    assert result["status"] == "save_failed"
+    assert "不一致" in result["reason"]
+
+
+def test_orthogonalized_model_product_stays_workflow_only(monkeypatch):
+    graph = {"nodes": [
+        {"id": "f", "type": "formula", "params": {"expr": "rank(pb)"}},
+        {"id": "orth", "type": "orthogonalize", "params": {"industry": "是"}},
+        {"id": "fe", "type": "feature", "params": {}},
+        {"id": "m", "type": "rf", "params": {}},
+    ], "edges": [
+        {"from": ["f", "out"], "to": ["orth", "signal"]},
+        {"from": ["orth", "factor"], "to": ["fe", "feat"]},
+        {"from": ["fe", "fe"], "to": ["m", "fe"]},
+    ]}
+    monkeypatch.setattr(rl, "_save_structured_draft",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("模型指标不能发布成单一结构化因子")))
+    result = rl._route_product(
+        "rr_orth_ml", 0, graph, "正交模型", "达标", {"rank_ic": 0.05},
+        {"kind": "analysis", "payload": {}}, "csi300_active",
+    )
+    assert result["status"] == "workflow_only"
+    assert "模型/复合产物" in result["reason"]
 
 
 def test_loop_save_failed_lesson_honest(monkeypatch, tmp_path):

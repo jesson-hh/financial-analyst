@@ -19,6 +19,8 @@ def make_splits(dates, n_groups: int = 6, k: int = 2, purge: int = 5, embargo: i
     """有序唯一交易日切 n_groups 连续段,枚举 C(n_groups,k) 组合当测试段;每个测试段做
     purge(挖其前 purge 个交易日:训练样本 horizon 标签窗会探入测试段)+ embargo(剔其后 embargo 个)。
     返回 [(train_dates:list, test_dates:list), ...]。"""
+    if n_groups < 2 or k < 1 or k >= n_groups or purge < 0 or embargo < 0:
+        raise ValueError("CPCV requires 1 <= k < n_groups and nonnegative purge/embargo")
     uniq = list(pd.DatetimeIndex(sorted(pd.Index(pd.to_datetime(pd.Series(dates))).unique())))
     n = len(uniq)
     if n < n_groups * 2:
@@ -38,6 +40,54 @@ def make_splits(dates, n_groups: int = 6, k: int = 2, purge: int = 5, embargo: i
         train = [uniq[i] for i in range(n) if i not in drop]
         out.append((train, sorted(test)))
     return out
+
+
+def _observation_label_ends(observation_index, label_span):
+    """Latest actual per-code label endpoint for each signal date.
+
+    Use the original label observation rows, before any feature dropna. A NaT
+    per-code endpoint cannot have a mature forward label and is ignored by the
+    date maximum; a wholly immature date remains NaT and cannot enter fitting.
+    """
+    if (not isinstance(observation_index, pd.MultiIndex)
+            or not {"datetime", "code"}.issubset(observation_index.names)
+            or observation_index.has_duplicates):
+        raise ValueError("CPCV needs unique original (datetime, code) observations")
+    observed = pd.Series(observation_index.get_level_values("datetime"),
+                         index=observation_index).sort_index()
+    return observed.groupby(level="code").shift(-int(label_span)).groupby(level="datetime").max()
+
+
+def _purge_label_intervals(train_dates, test_dates, label_ends, calendar, embargo):
+    """Remove intersecting train/test label intervals, retaining later blocks.
+
+    The interval starts conservatively at the signal (also safe for v4 t+1
+    entry). Embargo sessions follow each test label's actual endpoint. Merge
+    overlapping test intervals before filtering to keep large panels cheap.
+    """
+    days = pd.DatetimeIndex(calendar).drop_duplicates().sort_values()
+    intervals = []
+    for signal in sorted(pd.DatetimeIndex(test_dates)):
+        endpoint = label_ends.get(signal, pd.NaT)
+        if pd.isna(endpoint):
+            endpoint = signal  # no scored label, still exclude the test signal
+        end_pos = int(days.searchsorted(endpoint, side="right")) - 1
+        end_pos = min(len(days) - 1, max(0, end_pos) + int(embargo))
+        endpoint = days[end_pos]
+        if intervals and signal <= intervals[-1][1]:
+            intervals[-1] = (intervals[-1][0], max(intervals[-1][1], endpoint))
+        else:
+            intervals.append((signal, endpoint))
+    candidates = pd.DatetimeIndex(train_dates)
+    ends = label_ends.reindex(candidates)
+    keep = ends.notna().to_numpy(copy=True)
+    for start, end in intervals:
+        keep &= (ends.lt(start).to_numpy() | (candidates > end))
+    kept = list(candidates[keep])
+    return kept, {"n_train_dates_before": len(candidates), "n_train_dates_after": len(kept),
+                  "additional_purged_dates": int((~keep).sum()),
+                  "test_label_intervals_with_embargo": [
+                      [str(start.date()), str(end.date())] for start, end in intervals]}
 
 
 def decile_metrics(panel: pd.DataFrame, decile: float = 0.1) -> Dict[str, Any]:
@@ -160,6 +210,36 @@ def _registry_trials() -> int:
         return 2
 
 
+def crossfit_return_diagnostics(samples, all_dates, horizon, n_trials):
+    """One mean cross-fit return per date, then non-overlapping calendar rows.
+
+    Never concatenate repeated test dates into a longer imaginary track record.
+    This is a cross-fit diagnostic, NOT a reconstructed tradable CPCV path, and
+    registry size is not a certified count of the complete experiment family.
+    """
+    if not samples:
+        return {"n_raw_test_returns": 0, "n_unique_dates": 0, "n_nonoverlap": 0,
+                "diagnostic_dsr": None, "returns": [], "dates": []}
+    frame = pd.DataFrame(samples, columns=["date", "ret"])
+    frame["date"] = pd.to_datetime(frame["date"])
+    daily = frame.groupby("date")["ret"].mean().sort_index()
+    calendar = pd.DatetimeIndex(sorted(set(pd.to_datetime(all_dates))))
+    selected, previous_position = [], -10**12
+    for day, value in daily.items():
+        position = int(calendar.searchsorted(day))
+        if position >= len(calendar) or calendar[position] != day or not np.isfinite(value):
+            continue
+        if position - previous_position >= max(1, int(horizon)):
+            selected.append((day, float(value)))
+            previous_position = position
+    returns = [r for _, r in selected]
+    return {"n_raw_test_returns": int(len(frame)), "n_unique_dates": int(len(daily)),
+            "n_nonoverlap": len(selected), "dates": [str(d.date()) for d, _ in selected],
+            "returns": returns, "diagnostic_sharpe": sharpe(returns, (252.0 / max(1, horizon)) ** .5),
+            "diagnostic_dsr": deflated_sharpe(returns, n_trials),
+            "method": "date_mean_then_nonoverlap_not_a_tradable_path"}
+
+
 def quick_validate(model_id: Optional[str] = None, n_trials: Optional[int] = None) -> Dict[str, Any]:
     """读 model_health 冻结快照 → 多头超额夏普 + DSR + RankIC 分布。秒级零看未来;不足→ready=False。
     仅 prod 当前积累快照;变体暂无 → ready=False(诚实)。"""
@@ -188,10 +268,15 @@ def quick_validate(model_id: Optional[str] = None, n_trials: Optional[int] = Non
             ic_dist = [float(x) for x in v["ic"].tolist()]
     return {"ready": True, "model_id": model_id or "prod", "n_oos_days": n_days,
             "sharpe": sharpe(m["long_excess_ret"]),
-            "dsr": deflated_sharpe(m["long_excess_ret"], n_trials=n_trials),
+            "dsr": None,
+            "diagnostic_dsr_overlap": deflated_sharpe(m["long_excess_ret"], n_trials=n_trials),
             "ic_mean": (float(np.mean(ic_dist)) if ic_dist else None),
             "ic_dist": [round(x, 4) for x in ic_dist], "n_trials": n_trials,
-            "note": "快速档:复用已积累真OOS快照(零看未来);PBO跨变体需严格档"}
+            "deployment_ready": False, "snapshot_provenance_verified": False,
+            "trial_count_source": "registry_count_not_complete_trial_family",
+            "metric_scope": "gross_top_decile_excess_overlapping_5day_snapshot_returns",
+            "note": "快速档仅为已积累快照的已实现毛超额统计；日期可能重叠，快照首次产生时间未认证。"
+                    "ready仅表示观测数充足，不是实盘放行；正式DSR缺席，重叠口径仅列诊断。"}
 
 
 def retrain_core(kind, panel_ctx, train_mask, test_dates):
@@ -243,6 +328,8 @@ def _materialize_panel(model_id, universe, start, end):
         from guanlan_v2.strategy.compute.v4 import (build_feature_panel, add_ind_turnover,
                                                     add_breadth_resid, _select_mf)
         ld = QlibBinaryLoader(DEFAULT_PROVIDER)
+        recipe = meta.get("recipe") or {}
+        universe = recipe.get("universe") or meta.get("universe") or universe
         codes = ([str(c) for c in resolve_universe_codes(universe)]
                  if universe not in ("all", "", None) else list_all_instruments(DEFAULT_PROVIDER))
         data = add_breadth_resid(add_ind_turnover(build_feature_panel(ld, codes, start, end),
@@ -251,8 +338,23 @@ def _materialize_panel(model_id, universe, start, end):
             return kind, None
         if "instrument" in (data.index.names or []) and "code" not in (data.index.names or []):
             data = data.rename_axis(index={"instrument": "code"})
-        mf = _select_mf(list(data.columns), None)
-        return kind, {"_fe": data[mf], "_label": data["label"], "params": {}}
+        if model_id not in (None, "", "prod"):
+            from guanlan_v2.strategy.compute.model_train import evaluate_library_factors, resolve_feature_cols
+            fids = list(recipe.get("factor_ids") or meta.get("factor_ids") or [])
+            extra, unsupported = evaluate_library_factors(codes, fids, start, end,
+                                                          definitions=recipe.get("factor_definitions"))
+            if unsupported:
+                raise ValueError(f"验证不能静默丢弃模型特征: {unsupported}")
+            if len(extra.columns):
+                extra = extra.rename_axis(index={"instrument": "code"})
+                data = data.join(extra, how="left")
+            mf = resolve_feature_cols(data.columns, list(recipe.get("base_features") or
+                                                        meta.get("base_features") or []), fids)
+        else:
+            mf = _select_mf(list(data.columns), None)
+        return kind, {"_fe": data[mf], "_label": data["label"], "params": {},
+                      "_observation_index": data.index,
+                      "label_span": 6, "horizon": 5}
     recipe = meta.get("recipe") or {}
     if not recipe.get("features"):
         return kind, None
@@ -271,33 +373,57 @@ def _materialize_panel(model_id, universe, start, end):
     if "instrument" in (fe_df.index.names or []) and "code" not in (fe_df.index.names or []):
         fe_df = fe_df.rename_axis(index={"instrument": "code"})
         label_s = label_s.rename_axis(index={"instrument": "code"})
-    return kind, {"_fe": fe_df, "_label": label_s, "params": dict(recipe.get("params") or {})}
+    token = str(recipe.get("label") or "fwd_ret").strip().lower()
+    known_forward = token in {"", "ic", "fwd_ret", "fwd", "forward", "forward_return", "return", "ret"}
+    if not known_forward and not recipe.get("label_span"):
+        raise ValueError("自定义标签缺少 label_span，不能保证 CPCV purge")
+    return kind, {"_fe": fe_df, "_label": label_s, "params": dict(recipe.get("params") or {}),
+                  "_observation_index": getattr(getattr(_p, "df", None), "index", label_s.index),
+                  "label_span": max(int(recipe.get("fwd_days") or 5), int(recipe.get("label_span") or 0)),
+                  "horizon": int(recipe.get("fwd_days") or 5)}
 
 
 def strict_validate(model_id=None, n_groups=6, k=2, purge=5, embargo=5,
                     universe="all", start="2022-01-01", horizon=5, n_trials=None, progress=None):
     """全历史 retrain-CPCV:面板物化一次 → 15 路径各 retrain_core → 多头超额组合 → 分布+DSR。
     retrainable=False / 物化失败 → ready=False(诚实)。"""
-    from guanlan_v2.screen.model_registry import variant_meta
+    from guanlan_v2.screen.model_registry import variant_meta, current_model_version
     mid = model_id or "prod"
     if mid != "prod" and not variant_meta(mid).get("retrainable", False):
         return {"ready": False, "model_id": mid, "note": "不可重训(无 recipe)→ 只可快速档"}
     from guanlan_v2.strategy.compute.regen import _latest_trade_date
     from guanlan_v2.strategy.compute.model_train import DEFAULT_PROVIDER
+    version_start = current_model_version(mid)
     end = _latest_trade_date(DEFAULT_PROVIDER)
-    kind, ctx = _materialize_panel(mid, universe, start, end)
+    try:
+        kind, ctx = _materialize_panel(mid, universe, start, end)
+    except Exception as exc:
+        return {"ready": False, "model_id": mid, "model_version": version_start,
+                "note": f"面板物化失败: {type(exc).__name__}: {exc}"}
     if ctx is None:
         return {"ready": False, "model_id": mid, "note": "面板物化失败"}
     fe, label = ctx["_fe"], ctx["_label"]
     dts = pd.DatetimeIndex(sorted(set(fe.index.get_level_values("datetime"))))
-    eff_purge = max(int(purge), int(horizon) + 1)   # 修:purge 须 ≥ 标签前向跨度(v4 标签 shift(-1)..shift(-6)=6 bar),否则 tp-6 训练行标签探入测试段
+    horizon = max(1, int(ctx.get("horizon", horizon)))
+    label_span = max(horizon, int(ctx.get("label_span", horizon + 1)))
+    eff_purge = max(int(purge), label_span)
+    try:
+        observation_index = ctx.get("_observation_index", label.index)
+        label_ends = _observation_label_ends(observation_index, label_span)
+        observation_calendar = observation_index.get_level_values("datetime").unique()
+    except Exception as exc:
+        return {"ready": False, "measurement_ready": False, "model_id": mid,
+                "model_version": version_start,
+                "note": f"无法核验实际标签区间: {type(exc).__name__}: {exc}"}
     splits = make_splits(dts, n_groups, k, eff_purge, embargo)
     if not splits:
         return {"ready": False, "model_id": mid, "note": "交易日不足以切分"}
-    paths, all_excess = [], []
+    paths, sampled_returns = [], []
     for i, (train_dates, test_dates) in enumerate(splits):
         if progress:
             progress(i + 1, len(splits))
+        train_dates, interval_audit = _purge_label_intervals(
+            train_dates, test_dates, label_ends, observation_calendar, embargo)
         train_mask = pd.Index(fe.index.get_level_values("datetime")).isin(set(train_dates))
         pred = retrain_core(kind, ctx, train_mask, test_dates)
         if pred.empty:
@@ -306,24 +432,50 @@ def strict_validate(model_id=None, n_groups=6, k=2, purge=5, embargo=5,
                               "code": pred.index.get_level_values("code"),
                               "lgb_pct": pd.Series(pred.values).rank(pct=True).values,
                               "fwd": label.reindex(pred.index).values})
-        rb = sorted(panel["date"].unique())[::horizon]            # 非重叠 5 日换仓
+        # Use one GLOBAL calendar schedule, not a different stride per test
+        # subset. This keeps gaps between disjoint test groups honest.
+        rb = set(dts[::horizon])
         m = decile_metrics(panel[panel["date"].isin(rb)])
+        if m["n"] == 0:
+            continue
         paths.append({"test_groups": i, "sharpe": sharpe(m["long_excess_ret"]),
-                      "ic": m["rank_ic_mean"], "n": m["n"]})
-        all_excess += m["long_excess_ret"]
+                      "ic": m["rank_ic_mean"], "n": m["n"], "interval_purge": interval_audit})
+        sampled_returns.extend(zip(m["dates"], m["long_excess_ret"]))
     sps = [p["sharpe"] for p in paths if p["sharpe"] is not None]
     ics = [p["ic"] for p in paths if p["ic"] is not None]
     n_trials = n_trials or _registry_trials()
+    diagnostics = crossfit_return_diagnostics(sampled_returns, dts, horizon, n_trials)
+    version_end = current_model_version(mid)
+    version_matches = version_start is not None and version_end == version_start
 
     def _dist(xs):
         a = np.asarray(xs, dtype="float64")
         return ({"median": float(np.median(a)), "std": float(a.std(ddof=1)) if len(a) > 1 else 0.0,
                  "p05": float(np.percentile(a, 5)), "p95": float(np.percentile(a, 95))} if len(a) else None)
-    return {"ready": True, "model_id": mid, "kind": kind, "n_paths": len(paths), "paths": paths,
+    if not paths or diagnostics["n_nonoverlap"] == 0:
+        return {"ready": False, "model_id": mid, "kind": kind, "n_paths": 0,
+                "paths": [], "dsr": None, "model_version": version_start,
+                "note": "没有有效的测试收益路径，不能报告验证完成"}
+    from guanlan_v2.strategy.compute.training_runtime import frame_digest, date_bounds
+    return {"ready": version_matches, "model_id": mid, "kind": kind, "n_paths": len(paths), "paths": paths,
+            "measurement_ready": version_matches, "deployment_ready": False,
+            "paths_kind": "combinatorial_test_splits_not_independent_cpcv_paths",
             "sharpe_dist": _dist(sps), "ic_dist": _dist(ics),
-            "dsr": deflated_sharpe(all_excess, n_trials=n_trials),
+            "dsr": None, "diagnostic_dsr": diagnostics["diagnostic_dsr"],
+            "deduplicated_diagnostics": diagnostics,
             "n_trials": n_trials, "asof": str(end),
-            "note": "严格档:全历史 retrain-CPCV(purge+embargo);DSR 按 registry 变体数 deflate"}
+            "trial_count_source": "registry_or_caller_count_not_verified_complete_family",
+            "model_version": version_start, "model_version_matches": version_matches,
+            "evidence_status": "bound" if version_matches else "unbound_or_changed",
+            "purge": eff_purge, "embargo": int(embargo), "label_span": label_span,
+            "label_interval_policy": "per_code_actual_endpoint_overlap_v1",
+            "embargo_anchor": "actual_test_label_endpoint",
+            "data_evidence": {"features": date_bounds(fe.index), "strict_pit": False,
+                              "feature_snapshot_sha256": frame_digest(fe),
+                              "label_snapshot_sha256": frame_digest(label)},
+            "note": "净化组合交叉验证的研究测量，非可交易独立路径。重复测试收益已按日期去重，"
+                    "正式DSR缺席（未重建独立路径/完整试验家族未认证）；diagnostic_dsr仅诊断。"
+                    "ready不是实盘通过，收益未模拟完整成交约束。"}
 
 
 DL_GATE_DSR = 0.5        # 激活建议门槛:DSR ≥ 0.5(真夏普>噪声基准概率过半)
@@ -373,6 +525,8 @@ def validate_dl_source(path, score_col: str = "pred_ret_5d", n_trials: int = DL_
 
 if __name__ == "__main__":   # python -m guanlan_v2.strategy.compute.cpcv <spec.json>(严格档子进程)
     import json, sys
+    from guanlan_v2.strategy.compute.training_runtime import bootstrap_training_engine
+    bootstrap_training_engine()
     spec = json.loads(open(sys.argv[1], encoding="utf-8").read())
     print(f"[cpcv] strict validate model={spec.get('model_id')} ...", flush=True)
     res = strict_validate(**spec)

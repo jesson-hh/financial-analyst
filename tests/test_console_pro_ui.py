@@ -129,11 +129,12 @@ def test_console_html_bumps_every_changed_jsx_asset():
     html = _read("观澜 · 帷幄.html")
     assert "console-report-card.jsx?v=20260813d" in html
     assert 'console-rail.jsx?v=20260819a1' in html
-    assert 'console-workspace-dock.jsx?v=20260815d1' in html
+    assert 'console-memory.jsx?v=20260823memory5' in html
+    assert 'console-workspace-dock.jsx?v=20260905agent1' in html
     for asset in ("console-data.jsx", "console-thread.jsx"):
-        assert f'{asset}?v=20260819a1' in html
-    assert 'console-app.jsx?v=20260819a1' in html
-    assert 'console-bench.jsx?v=20260813w5' in html
+        assert f'{asset}?v=20260905agent1' in html
+    assert 'console-app.jsx?v=20260905agent1' in html
+    assert 'console-bench.jsx?v=20260905agent1' in html
 
 
 def test_console_moves_session_plan_to_the_thread_task_panel():
@@ -176,6 +177,58 @@ def test_console_workspace_tree_and_session_scoping_contract():
     assert "activeWorkspaceId" in app and "workspace={activeWorkspace}" in app
 
 
+def test_console_memory_center_has_scoped_governance_and_safe_mutations():
+    html = _read("观澜 · 帷幄.html")
+    memory = _read("console-memory.jsx")
+    dock = _read("console-workspace-dock.jsx")
+    app = _read("console-app.jsx")
+    assert "console-memory.jsx" in html
+    assert "['memory', '记忆']" in dock and "研究 · 记忆" in dock
+    assert "<WwMemoryCenter workspaceId={wid} sessionId={sessionId}" in dock
+    assert "sessionId={state.sid}" in app
+    assert "'/console/memories?'" in memory
+    assert "workspace_id: wid" in memory and "session_id: sid" in memory
+    assert all(label in memory for label in ("全局", "当前研究空间", "本会话", "归档"))
+    assert "搜索内容或主题键" in memory
+    assert "记忆主题键" in memory and "记忆内容" in memory
+    assert "确认删除？" in memory and "永久删除" in memory
+    assert "pinned: !item.pinned" in memory
+    assert "不会被自动收敛到归档" in memory and "旧标的" in memory
+    assert "'/copy'" in memory and "复制到全局" in memory and "复制到研究空间" in memory and "复制到本会话" in memory
+    archive_card = memory.split("function WwMemoryCard", 1)[1].split("function WwMemoryCenter", 1)[0]
+    assert "!item.readOnly" in archive_card and "只读原件" in archive_card
+    assert "归档原件不可编辑、置顶或删除" in archive_card
+    assert "item.editable" in archive_card and "item.deletable" in archive_card and "item.canPin" in archive_card
+    assert "if (!item.canCopy) return null" in memory
+    scope_normalizer = memory.split("function wwMemoryScope", 1)[1].split("function wwMemoryRows", 1)[0]
+    assert "raw === 'global_archive'" in scope_normalizer and "row && row.archived" in scope_normalizer
+    assert "row.read_only" not in scope_normalizer
+    assert "etag: item.etag || undefined" in memory
+
+
+def test_console_memory_insights_are_explainable_reversible_and_non_destructive():
+    memory = _read("console-memory.jsx")
+    assert "'/console/memory-insights?'" in memory
+    assert "'/console/memory-insights/'" in memory and "'/dismiss?'" in memory
+    assert "include_archived: 'true'" in memory and "include_dismissed: '1'" in memory
+    assert all(text in memory for text in ("记忆健康", "需处理", "建议关注", "可优化"))
+    assert "证据与影响范围" in memory and "impactDescription" in memory
+    assert "定位" in memory and "已高亮建议关联的" in memory
+    assert "记忆体检暂不可用，不影响下方记忆管理" in memory
+    assert "正在积累使用证据，不会误判长期未使用" in memory
+    assert "治理建议只辅助核对，不会自动改写或删除记忆" in memory
+    assert "已忽略" in memory and "恢复建议" in memory
+    assert "dismissed: dismissed !== false" in memory
+    assert "reloadInsights();" in memory
+    assert "hasOpenSeverityCounts" in memory
+    assert "setConfirmDeleteId(memoryId)" in memory
+    insight_action = memory.split("const onInsightAction", 1)[1].split("const visibleRows", 1)[0]
+    assert "method: 'DELETE'" not in insight_action
+    assert "onPin(item)" in insight_action and "onCopy(item, targetScope)" in insight_action
+    insight_panel = memory.split("function WwMemoryInsightsPanel", 1)[1].split("function WwMemoryCard", 1)[0]
+    assert "showDismissed" in insight_panel and "onDismiss(insight, false)" in insight_panel
+
+
 def test_console_session_archive_restore_is_soft_and_visible():
     data = _read("console-data.jsx")
     rail = _read("console-rail.jsx")
@@ -216,6 +269,16 @@ def test_console_workspace_dock_is_honest_and_stage_keeps_tree():
     assert "<WwRail" in app and "<WwWorkspaceStage" in app
     assert "const wsId = workspaceId || state.sid || 'rw_general'" in bench
     assert "GL.handoff(art.channel, art.payload, wsId)" in bench
+
+
+def test_embedded_workflow_can_return_to_the_current_conversation():
+    dock = _read("console-workspace-dock.jsx")
+    bench = _read("console-bench.jsx")
+    event = "guanlan:ww:back-to-conversation"
+    assert event in bench and "if (onClose) onClose()" in bench
+    assert "frame.contentWindow === event.source" in bench
+    assert event in dock and "if (onBack) onBack()" in dock
+    assert "frameRef.current.contentWindow !== event.source" in dock
 
 
 def test_console_workspace_watch_projection_is_scoped_and_compact():

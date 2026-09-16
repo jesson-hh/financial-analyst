@@ -31,6 +31,8 @@ from pydantic import BaseModel, Field
 
 # 工作流持久化 store(顶部 import,纯本地 JSON、无引擎依赖,安全)。
 from guanlan_v2.workflow.store import WorkflowStore
+from guanlan_v2.workflow.run_store import WorkflowRunStore
+from guanlan_v2.workflow.migrations import migrate_graph
 
 # 标签留空 / 这些 token → 用前向收益(不是真公式标签)。前端 feature 节点 params.tag
 # 取值 IC / fwd_ret,直接映射到本端点 label;故这些 token 一并触发收益分支。
@@ -365,7 +367,7 @@ _UNIVERSE_CATALOG = [
     ("csi500", "中证500"),
     ("csi800", "中证800"),
     ("csi1000", "中证1000"),
-    ("all", "全市场A股"),
+    ("all", "旧版指数成分并集（非全A）"),
     ("csi_fast", "快速测试池(100只)"),
     ("sample30", "样本30(演示)"),
     ("etf", "ETF 池"),
@@ -449,8 +451,8 @@ _FACTOR_CATALOG = [
     ("跳空高开", "(open/delay(close,1)-1)>0.05", "消息面", "事件", "高开>5%=隔夜消息代理→事件研究CAR"),
     ("放量异动", "(volume/ts_mean(volume,20)>3)*(abs(returns)>0.03)", "消息面", "事件", "成交量>3倍20日均量且涨跌>3%=催化代理→事件研究CAR"),
     # —— 技术(精算字段:引擎已暴露 rsi_14/macd_signal/amihud_20/mom_*,无需重构) ——
-    ("RSI14", "rsi_14", "技术", "反向", "Wilder RSI14 精算字段(超卖<30 超买>70;低 RSI=超卖反弹倾向)"),
-    ("MACD信号", "macd_signal", "技术", "正向", "MACD 信号线精算字段(>0 多头动能)"),
+    ("RSI14", "rsi_14", "技术", "反向", "EMA span14 RSI(非Wilder平滑；低RSI表示相对弱势)"),
+    ("MACD差值", "macd_signal", "技术", "正向", "兼容字段名：EMA12-EMA26(DIF)，不是9日信号线"),
     ("Amihud非流动性精算", "amihud_20", "流动性", "正向", "Amihud 20日非流动性精算字段(非流动性溢价)"),
     ("中期动量精算", "rank(mom_120)", "动量反转", "正向", "120日动量精算字段(≈ts_sum(returns,120) 但精算)"),
     # —— 共振(个股 vs 大盘/行业/龙头,连续关系因子,配「个股时序IC」;需 source 设对标指数/龙头) ——
@@ -542,6 +544,12 @@ class ModelTrainIn(BaseModel):
     winsorize: bool = True
     winsorize_q: float = 0.01
     standardize: bool = True
+    # 可重放因子变换规范。首期由「因子正交化」节点生成；不保存浏览器内存数值，
+    # 而是在分析/组合/回测物化同一基因子后，按该规范逐日截面残差化。
+    orthogonalization: Optional[Dict[str, Any]] = None
+    # ML/PCA/Spearman/mf 等拟合节点的不可变真实信号。下游优先消费该
+    # content-addressed artifact；留空时保持公式/因子库旧路径完全兼容。
+    factor_artifact: Optional[Dict[str, Any]] = None
     # —— 训练控制 ——
     train_frac: float = 0.7              # 时序 split,前 70% 调仓日训练,余测试
     params: Dict[str, Any] = Field(default_factory=dict)  # 前端超参(见 _build_model)
@@ -565,6 +573,49 @@ def _fail_model(universe: str, reason: str, **extra: Any) -> JSONResponse:
     }
     payload.update(extra)
     return JSONResponse(payload)
+
+
+def _materialize_structured_base(registered: Any, panel: Any):
+    """Verify a registered structured spec and materialise its pinned base."""
+    from guanlan_v2.factorlib.specs import (
+        materialize_factor_dependency, verify_factor_spec_dependencies,
+    )
+
+    raw_spec = getattr(registered.compute, "__guanlan_factor_spec__", None)
+    if not isinstance(raw_spec, dict):
+        raise ValueError("注册因子没有结构化 factor_spec")
+    marker_base = str(getattr(
+        registered.compute, "__guanlan_base_expr__",
+        (raw_spec.get("base_features") or [""])[0],
+    ) or "").strip()
+    canonical = verify_factor_spec_dependencies(raw_spec, fallback_expr=marker_base)
+    base_expr = canonical["base_features"][0]
+    if marker_base != base_expr:
+        raise ValueError("注册因子的 base_expr marker 与 factor_spec 不一致")
+    series = materialize_factor_dependency(
+        base_expr, canonical["dependencies"]["base_feature"], panel,
+    )
+    return series, canonical
+
+
+def _pin_explicit_orthogonalized_factor(
+    features: List[str], raw_transform: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Canonicalise a one-factor unsaved transform before data execution.
+
+    Multi-feature orthogonalisation operates on a runtime composite and cannot
+    be represented by the deliberately one-base v1 schema.  It keeps the
+    historical execution path but is not advertised as a persistable v1 factor.
+    """
+    if not raw_transform or len(features) != 1:
+        return None
+    from guanlan_v2.factorlib.specs import pin_factor_spec_dependencies
+
+    return pin_factor_spec_dependencies({
+        "schema": "guanlan.factor_spec.v1", "kind": "orthogonalized",
+        "base_features": [str(features[0]).strip()],
+        "transform": raw_transform,
+    })
 
 
 def _materialize_xy(body: "ModelTrainIn", universe: str, features: List[str], start: str, end: str):
@@ -622,11 +673,22 @@ def _materialize_xy(body: "ModelTrainIn", universe: str, features: List[str], st
 
     feat_series: List[pd.Series] = []
     feature_names: List[str] = []
+    factor_spec_replays: List[Dict[str, Any]] = []
     for i, expr in enumerate(features):
         name = f"f{i + 1}"
+        structured_spec = None
         try:
             try:
-                s = _get_alpha(expr).compute(panel)
+                registered = _get_alpha(expr)
+                structured_spec = getattr(registered.compute, "__guanlan_factor_spec__", None)
+                if isinstance(structured_spec, dict):
+                    # Preserve the established backtest/portfolio order:
+                    # base materialisation -> winsorize/zscore -> transform.
+                    # Calling the generic AlphaSpec closure here would apply
+                    # the transform before endpoint-specific preprocessing.
+                    s, structured_spec = _materialize_structured_base(registered, panel)
+                else:
+                    s = registered.compute(panel)
             except KeyError:
                 validate_expr(expr)
                 s = compile_factor(expr)(panel)
@@ -640,6 +702,22 @@ def _materialize_xy(body: "ModelTrainIn", universe: str, features: List[str], st
             s = winsorize(s, body.winsorize_q)
         if body.standardize:
             s = zscore(s)
+        if isinstance(structured_spec, dict):
+            try:
+                s, replay_audit = _orthogonalize_from_spec(
+                    s, panel, structured_spec.get("transform"),
+                    dependency_bindings=(structured_spec.get("dependencies") or {}).get(
+                        "existing_factors"
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 — structured replay is fail-closed
+                return _fail_model(
+                    universe, f"factor_spec_replay_error[{expr}]: {type(exc).__name__}: {exc}",
+                    start=start, end=end,
+                )
+            factor_spec_replays.append({
+                "name": expr, "factor_spec": structured_spec, "audit": replay_audit,
+            })
         feat_series.append(s.rename(name))
         feature_names.append(name)
 
@@ -666,8 +744,123 @@ def _materialize_xy(body: "ModelTrainIn", universe: str, features: List[str], st
                            start=start, end=end)
 
     fe_df = pd.concat(feat_series, axis=1)
+    if factor_spec_replays:
+        # DataFrame.attrs is carried only alongside this in-process materialised
+        # matrix; it is response evidence, never an alternative source of truth.
+        fe_df.attrs["factor_spec_replays"] = factor_spec_replays
     label_s = label_s.rename("__label__")
     return panel, fe_df, label_s, feature_names
+
+
+def _artifact_factor_for_panel(raw_artifact: Any, panel: Any):
+    """Verify and align an immutable fitted signal to the loaded runtime panel.
+
+    Artifacts may be sparse (ML contains OOS rows only), but may never introduce
+    rows outside the selected panel.  This makes a changed universe/window fail
+    visibly instead of silently falling back to ``fe.features``.
+    """
+    import pandas as pd
+    from guanlan_v2.workflow.factor_artifact import (
+        materialize_factor_artifact, verify_factor_artifact,
+    )
+
+    artifact = verify_factor_artifact(raw_artifact)
+    signal = materialize_factor_artifact(artifact)
+    panel_index = getattr(getattr(panel, "df", None), "index", None)
+    if not isinstance(panel_index, pd.MultiIndex):
+        raise ValueError("runtime panel 缺少 MultiIndex")
+    # Canonicalise index names/codes before comparing.  Timestamp and string
+    # code are also the canonical representation used by the artifact encoder.
+    signal.index = pd.MultiIndex.from_arrays(
+        [pd.to_datetime(signal.index.get_level_values(0)),
+         signal.index.get_level_values(1).astype(str)],
+        names=list(panel_index.names),
+    )
+    canonical_panel_index = pd.MultiIndex.from_arrays(
+        [pd.to_datetime(panel_index.get_level_values(0)),
+         panel_index.get_level_values(1).astype(str)],
+        names=list(panel_index.names),
+    )
+    outside = signal.index.difference(canonical_panel_index)
+    if len(outside):
+        raise ValueError(
+            f"factor artifact 有 {len(outside)} 条观测不属于当前面板；"
+            "universe/start/end 与产物身份不一致"
+        )
+    aligned = signal.reindex(canonical_panel_index).dropna()
+    if aligned.empty:
+        raise ValueError("factor artifact 与当前面板没有有效交集")
+    aligned.index = panel_index[canonical_panel_index.isin(aligned.index)]
+    # The selection above follows panel order; reindex once more to restore the
+    # exact signal values against those original index objects.
+    values = signal.reindex(canonical_panel_index).dropna().to_numpy(dtype="float64")
+    aligned = pd.Series(values, index=aligned.index, dtype="float64",
+                        name=str(artifact.get("label") or "artifact"))
+    return aligned, artifact
+
+
+def _panel_content_snapshot(panel: Any) -> Dict[str, Any]:
+    """Content-bind the exact runtime panel used by a governed backtest.
+
+    Query parameters are not a data snapshot: the same date range can be
+    revised underneath a long research run.  Hash the canonical, sorted panel
+    values plus index/column/dtype metadata so TrialLedger family sealing can
+    reject mixed vintages.  This is a runtime-content binding (not a claim of
+    strict PIT/vendor-vintage support).
+    """
+    import hashlib
+    import pandas as pd
+    from guanlan_v2.orchestration.digest import content_digest
+
+    df = getattr(panel, "df", None)
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        raise ValueError("runtime panel is empty; cannot create data snapshot")
+    frame = df
+    if not frame.index.is_monotonic_increasing:
+        frame = frame.sort_index()
+    # Sort by *position*, not label lookup.  Selecting duplicate labels through
+    # ``loc[:, labels]`` repeats every matching column and would change the
+    # evidence being hashed.
+    column_order = sorted(
+        range(len(frame.columns)), key=lambda pos: (str(frame.columns[pos]), pos),
+    )
+    frame = frame.iloc[:, column_order]
+    ordered_columns = list(frame.columns)
+    row_hashes = pd.util.hash_pandas_object(
+        frame, index=True, categorize=True,
+    ).to_numpy(dtype="uint64", copy=False)
+    values_digest = hashlib.sha256(row_hashes.tobytes(order="C")).hexdigest()
+    index_names = [str(x or "") for x in frame.index.names]
+    dates = frame.index.get_level_values("datetime") \
+        if "datetime" in frame.index.names else frame.index
+    codes = (frame.index.get_level_values("code")
+             if "code" in frame.index.names else [])
+    projection = {
+        "domain": "workflow-runtime-panel-content-v1",
+        "values_digest": values_digest,
+        "n_rows": int(len(frame)),
+        "n_columns": int(len(ordered_columns)),
+        "columns": [str(x) for x in ordered_columns],
+        # Read dtypes positionally.  A vendor panel can legally contain
+        # duplicate display column names; ``frame[name]`` would then return a
+        # DataFrame and make the supposedly fail-closed snapshot crash.
+        "dtypes": [str(x) for x in frame.dtypes.tolist()],
+        "index_names": index_names,
+        "date_start": str(pd.Timestamp(min(dates)).date()) if len(dates) else None,
+        "date_end": str(pd.Timestamp(max(dates)).date()) if len(dates) else None,
+        "n_codes": int(pd.Index(codes).nunique()) if len(codes) else None,
+    }
+    snapshot = {
+        "version": "workflow-runtime-panel-content-v1",
+        "authority": "runtime_panel_content",
+        "strict_pit": False,
+        **projection,
+    }
+    # The digest binds both values and the provenance claims.  In particular,
+    # no caller may flip ``strict_pit`` or relabel the authority while keeping
+    # a valid content identity.
+    snapshot["digest"] = content_digest(snapshot)
+    return snapshot
 
 
 def _combine_alpha(fe_df, feature_names, panel, fwd_days, method="equal",
@@ -679,7 +872,7 @@ def _combine_alpha(fe_df, feature_names, panel, fwd_days, method="equal",
       ic     按**样本内** rank-IC 加权(保号:负 IC 的因子自动反向参与)
       icir   按**样本内** rank-ICIR 加权(IC 均值/标准差,惩罚 IC 不稳定的因子)
     ic/icir 的权重只用样本内(前 ``train_frac`` 的调仓日)各列 vs 前向收益的 rank-IC 估出,
-    估完即固定、应用到全样本 → **不引入未来函数**;样本内 IC≈0(无信号)→ 诚实回退等权。
+    训练标签终点净化后估权，固定权重只应用到尾段 OOS；样本内 IC≈0 则尾段回退等权。
     返回 ``(alpha: pd.Series, weights: list[dict], note: str|None)``;weights 用
     ``member_labels`` 把内部列名(f1/f2…)显示回原表达式。"""
     import numpy as np
@@ -696,10 +889,10 @@ def _combine_alpha(fe_df, feature_names, panel, fwd_days, method="equal",
 
     method = (method or "equal").strip().lower()
 
-    def _equal():
+    def _equal(frame=fe_df):
         comp = None
         for nm in cols:
-            comp = fe_df[nm] if comp is None else comp.add(fe_df[nm], fill_value=0.0)
+            comp = frame[nm] if comp is None else comp.add(frame[nm], fill_value=0.0)
         return (comp / float(len(cols))).dropna().rename("alpha")
 
     if method not in ("ic", "icir"):
@@ -713,7 +906,12 @@ def _combine_alpha(fe_df, feature_names, panel, fwd_days, method="equal",
     dts = fe_df.index.get_level_values("datetime")
     uniq = pd.DatetimeIndex(sorted(set(dts)))
     k = max(1, int(round(len(uniq) * float(train_frac or 0.6))))
-    train_dates = set(uniq[:k])
+    from guanlan_v2.workflow.temporal_split import purged_dates
+    train_dates, split_info = purged_dates(panel.dates(), uniq[:k], uniq[k:], max(1, int(fwd_days or 21)), observation_index=panel.df.index)
+    test_mask = pd.Index(dts).isin(set(uniq[k:]))
+    test_df = fe_df[test_mask]
+    if not train_dates or test_df.empty:
+        return pd.Series(dtype=float, name="alpha"), [], "IC估权净化后的训练/测试段不足"
     train_mask = pd.Index(dts).isin(train_dates)
 
     raw: Dict[str, float] = {}
@@ -737,34 +935,281 @@ def _combine_alpha(fe_df, feature_names, panel, fwd_days, method="equal",
     if denom <= 1e-12:   # 样本内全无信号 → 诚实回退等权
         for i, nm in enumerate(cols):
             weights[i]["weight"] = round(1.0 / len(cols), 4)
-        return _equal(), weights, f"{method} 估权样本内 IC≈0,已退回等权(诚实)"
+        comp = _equal(test_df)
+        comp.attrs["weight_calibration"] = {**split_info, "prediction_scope": "purged_oos"}
+        return comp, weights, f"{method} 估权样本内 IC≈0,仅样本外段退回等权"
 
     comp = None
     for nm in cols:
-        term = fe_df[nm] * (raw[nm] / denom)
-        comp = term if comp is None else comp.add(term, fill_value=0.0)
+        term = test_df[nm] * (raw[nm] / denom)
+        comp = term if comp is None else comp + term
     for i, nm in enumerate(cols):
         weights[i]["weight"] = round(raw[nm] / denom, 4)
-    return comp.dropna().rename("alpha"), weights, None
+    comp = comp.dropna().rename("alpha")
+    comp.attrs["weight_calibration"] = {**split_info, "prediction_scope": "purged_oos"}
+    return comp, weights, "IC/ICIR权重只用净化后的训练段估计，信号仅包含未参与估权的样本外段"
+
+
+def _orthogonalize_from_spec(factor_s, panel, raw_spec, *, dependency_bindings=None):
+    """Materialise a replayable orthogonalisation spec against one runtime panel.
+
+    The canvas stores only this whitelist spec; every downstream consumer calls
+    this same adapter after rebuilding the base factor.  No arbitrary Python or
+    browser-memory series is accepted.  ``dependency_bindings`` contains the
+    persisted definitions of named control factors; when supplied, registry
+    drift/missing dependencies fail closed before regression.  The algorithm is
+    as-of-row, but the current industry source is not vendor-vintage strict PIT.
+    Returns ``(residual, audit_info)``.
+    """
+    import hashlib
+    import json
+    import numpy as np
+    import pandas as pd
+
+    if not raw_spec:
+        return factor_s, {"requested": False, "applied": False}
+    if not isinstance(raw_spec, dict):
+        raise ValueError("orthogonalization 必须是对象")
+    if not isinstance(factor_s, pd.Series) or not isinstance(factor_s.index, pd.MultiIndex):
+        raise ValueError("正交化要求 (datetime,code) MultiIndex 因子序列")
+
+    industry_value = raw_spec.get("industry", True)
+    industry_on = industry_value not in (False, 0, "0", "false", "False", "否", "不控制", "")
+    size = str(raw_spec.get("size") or "total_mv").strip().lower()
+    if size in ("none", "否", "不控制", ""):
+        size = "none"
+    if size not in ("none", "total_mv", "circ_mv"):
+        raise ValueError(f"不支持的规模控制: {size}")
+    styles_raw = raw_spec.get("styles") or []
+    if isinstance(styles_raw, str):
+        styles_raw = [x.strip() for x in styles_raw.replace("，", ",").split(",") if x.strip()]
+    if not isinstance(styles_raw, list):
+        raise ValueError("styles 必须是列表或逗号分隔文本")
+    aliases = {"beta": "beta", "β": "beta", "vol": "volatility",
+               "volatility": "volatility", "波动": "volatility",
+               "liquidity": "liquidity", "流动性": "liquidity",
+               "momentum": "momentum", "动量": "momentum"}
+    styles = []
+    for item in styles_raw:
+        key = aliases.get(str(item).strip().lower())
+        if key is None:
+            raise ValueError(f"不支持的风格控制: {item}")
+        if key not in styles:
+            styles.append(key)
+    old_raw = raw_spec.get("existing_factors") or raw_spec.get("old_factors") or []
+    if isinstance(old_raw, str):
+        old_text = old_raw.strip()
+        old_raw = [x.strip() for x in old_text.replace("；", ";").replace("\r", "\n").replace(";", "\n").split("\n") if x.strip()]
+        # Backward compatibility for the old comma-separated name list, without
+        # corrupting legal DSL such as correlation(close,volume,20).
+        if len(old_raw) == 1 and "(" not in old_text and ")" not in old_text:
+            old_raw = [x.strip() for x in old_text.replace("，", ",").split(",") if x.strip()]
+    if not isinstance(old_raw, list):
+        raise ValueError("existing_factors 必须是列表或逗号分隔文本")
+    existing_exprs = list(dict.fromkeys(str(x).strip() for x in old_raw if str(x).strip()))
+    if len(existing_exprs) > 12:
+        raise ValueError("一次最多控制 12 个已有因子")
+    raw_min_obs = raw_spec.get("min_obs")
+    min_obs = int(20 if raw_min_obs in (None, "") else raw_min_obs)
+    if min_obs < 5 or min_obs > 500:
+        raise ValueError("min_obs 必须在 5..500 之间")
+    raw_max_condition = raw_spec.get("max_condition_number")
+    max_condition = float(1.0e8 if raw_max_condition in (None, "") else raw_max_condition)
+    if not np.isfinite(max_condition) or max_condition <= 1.0:
+        raise ValueError("max_condition_number 必须是大于 1 的有限数")
+    if not industry_on and size == "none" and not styles and not existing_exprs:
+        raise ValueError("正交化至少需要一个行业/规模/风格/已有因子控制项")
+
+    # Resolve names now and bind the actual definition to the transform digest.
+    # Hashing only a registry name would let a later hot-reload silently change a
+    # supposedly replayable experiment while keeping the same artifact id.
+    from guanlan_v2.factorlib.specs import (
+        FactorSpecError, materialize_factor_dependency, resolve_factor_dependency,
+    )
+
+    resolved_existing: List[Dict[str, Any]] = []
+    if dependency_bindings is not None:
+        if not isinstance(dependency_bindings, list) \
+                or len(dependency_bindings) != len(existing_exprs):
+            raise FactorSpecError(
+                "factor_spec existing_factors 与依赖封存数量不一致"
+            )
+        # ``materialize_factor_dependency`` repeats this comparison while
+        # holding the resolved callable.  Resolving here makes the transform
+        # digest describe the pinned definitions before any regression work.
+        for expr, expected in zip(existing_exprs, dependency_bindings):
+            current = resolve_factor_dependency(expr)
+            if current != expected:
+                raise FactorSpecError(f"结构化控制因子依赖 '{expr}' 的定义已漂移")
+            resolved_existing.append(dict(expected))
+    else:
+        resolved_existing = [resolve_factor_dependency(expr) for expr in existing_exprs]
+
+    normalized = {
+        "version": "orthogonalization-v1", "method": "ols",
+        "industry": industry_on, "size": size, "styles": styles,
+        "existing_factors": existing_exprs, "min_obs": min_obs,
+        "max_condition_number": max_condition,
+        "resolved_existing_factors": resolved_existing,
+    }
+    digest = hashlib.sha256(json.dumps(
+        normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+
+    idx = factor_s.index
+    df = panel.df.reindex(idx)
+    controls = pd.DataFrame(index=idx)
+    if size != "none":
+        if size not in df.columns:
+            controls[f"log_{size}"] = np.nan
+        else:
+            values = pd.to_numeric(df[size], errors="coerce")
+            controls[f"log_{size}"] = np.log(values.where(values > 0))
+
+    returns = None
+    if styles:
+        # Rolling style controls must be formed on the complete point-in-time
+        # panel, then reindexed to the (possibly sparse) candidate factor.  Doing
+        # rolling math after ``alpha.dropna()`` compresses missing days and changes
+        # the meaning of 20/60-day windows.
+        full_df = panel.df.sort_index()
+        if "returns" in full_df.columns:
+            returns = pd.to_numeric(full_df["returns"], errors="coerce")
+        elif "close" in full_df.columns:
+            close = pd.to_numeric(full_df["close"], errors="coerce")
+            returns = close.groupby(level=1, sort=False).pct_change(fill_method=None)
+        else:
+            returns = pd.Series(np.nan, index=full_df.index, dtype=float)
+        market = returns.groupby(level=0, sort=False).mean()
+        style_parts = {name: [] for name in styles}
+        for _, sub in returns.groupby(level=1, sort=False):
+            sub = sub.sort_index(level=0)
+            dates = sub.index.get_level_values(0)
+            mkt = pd.Series(market.reindex(dates).to_numpy(dtype=float), index=sub.index)
+            if "beta" in style_parts:
+                cov = sub.rolling(60, min_periods=20).cov(mkt)
+                var = mkt.rolling(60, min_periods=20).var()
+                style_parts["beta"].append((cov / var.where(var.abs() > 1e-15)).rename("beta_60"))
+            if "volatility" in style_parts:
+                style_parts["volatility"].append(sub.rolling(20, min_periods=10).std().rename("volatility_20"))
+            if "momentum" in style_parts:
+                style_parts["momentum"].append(sub.rolling(20, min_periods=10).sum().rename("momentum_20"))
+        for name, parts in style_parts.items():
+            if name == "liquidity":
+                amount = (pd.to_numeric(full_df.get("amount"), errors="coerce")
+                          if "amount" in full_df.columns else None)
+                if amount is None and {"close", "volume"}.issubset(full_df.columns):
+                    amount = (pd.to_numeric(full_df["close"], errors="coerce")
+                              * pd.to_numeric(full_df["volume"], errors="coerce"))
+                controls["log_liquidity"] = (
+                    np.log(amount.where(amount > 0)).reindex(idx)
+                    if amount is not None else np.nan
+                )
+            else:
+                controls[{"beta": "beta_60", "volatility": "volatility_20",
+                          "momentum": "momentum_20"}[name]] = (
+                    pd.concat(parts).reindex(idx) if parts else np.nan
+                )
+
+    existing = pd.DataFrame(index=idx)
+    if existing_exprs:
+        for i, expr in enumerate(existing_exprs):
+            series = materialize_factor_dependency(
+                expr, resolved_existing[i], panel,
+            )
+            if not isinstance(series, pd.Series):
+                raise ValueError(f"控制因子 '{expr}' 没有返回 Series")
+            existing[f"old_{i + 1}:{expr}"] = pd.to_numeric(series.reindex(idx), errors="coerce")
+
+    industry = panel.industry.reindex(idx) if industry_on else None
+    from guanlan_v2.workflow.factor_orthogonalize import orthogonalize_factor
+    result = orthogonalize_factor(
+        pd.to_numeric(factor_s, errors="coerce"),
+        industry=industry,
+        continuous_controls=(controls if len(controls.columns) else None),
+        existing_factors=(existing if len(existing.columns) else None),
+        min_obs=min_obs,
+        max_condition_number=max_condition,
+    )
+    diag = result.diagnostics.reset_index()
+    if not diag.empty:
+        diag.iloc[:, 0] = diag.iloc[:, 0].map(lambda x: str(pd.Timestamp(x).date()))
+    reasons = result.diagnostics["reason"].dropna().astype(str).value_counts().to_dict()
+    exposure_summary: List[Dict[str, Any]] = []
+    if not result.exposures.empty:
+        exp = result.exposures.copy()
+        for col in ("correlation_before", "correlation_after"):
+            exp[col] = pd.to_numeric(exp[col], errors="coerce")
+        for (name, kind), group in exp.groupby(["exposure", "kind"], sort=False):
+            before = group["correlation_before"].abs().dropna()
+            after = group["correlation_after"].abs().dropna()
+            exposure_summary.append({
+                "exposure": str(name), "kind": str(kind),
+                "n_dates": int(group["date"].nunique()),
+                "n_used": int(group["used"].fillna(False).astype(bool).sum()),
+                "mean_abs_before": float(before.mean()) if len(before) else None,
+                "mean_abs_after": float(after.mean()) if len(after) else None,
+                "max_abs_before": float(before.max()) if len(before) else None,
+                "max_abs_after": float(after.max()) if len(after) else None,
+            })
+        exposure_summary.sort(
+            key=lambda row: float(row.get("mean_abs_before") or -1.0), reverse=True,
+        )
+    info = {
+        "requested": True,
+        "applied": bool(result.summary.get("n_ok_dates")),
+        "artifact": {
+            "schema": "guanlan.factor_spec.v1", "kind": "orthogonalized",
+            "transform_digest": digest, "transform": normalized,
+        },
+        "summary": result.summary,
+        "reason_counts": {str(k): int(v) for k, v in reasons.items()},
+        # Bounded audit proof: aggregate every named exposure while avoiding the
+        # unbounded per-date long table in ordinary workflow responses.
+        "exposure_summary": exposure_summary[:32],
+        "diagnostics_tail": diag.tail(12).to_dict(orient="records"),
+        "note": (
+            f"正交化完成:可用 {result.summary.get('n_ok_dates', 0)}/"
+            f"{result.summary.get('n_dates', 0)} 日,输出覆盖率 "
+            f"{result.summary.get('output_coverage')}。"
+        ),
+    }
+    return result.residual.rename(factor_s.name), _jsonable(info)
 
 
 def _build_model(kind: str, params: Dict[str, Any]):
-    """kind + 前端 node.params → 实例化对应 sklearn-API 回归器(延迟 import 各库)。
+    """Instantiate estimators from canonical API keys or legacy canvas aliases.
 
     超参映射对齐前端 SPECS(workflow.jsx:22-25):
       xgb  {trees,depth,lr,sub} → n_estimators/max_depth/learning_rate/subsample
       lgbm {leaves,lr}         → num_leaves/learning_rate
       svm  {c}                 → SVR(C=…)
       rf   {trees}             → RandomForestRegressor(n_estimators=…)
-    未知 params 键忽略;缺省走库/前端默认。返回 (model, hyper_dict)(hyper_dict 回显真用超参)。
+    The UI/executor already map canvas names to estimator names; canonical
+    names take precedence, while direct callers using old short names remain
+    compatible. Returned hyper_dict reflects the actual estimator arguments.
     """
     p = params or {}
+    canonical_keys = {
+        "xgboost": {"trees": "n_estimators", "depth": "max_depth",
+                    "lr": "learning_rate", "sub": "subsample"},
+        "lightgbm": {"trees": "n_estimators", "leaves": "num_leaves",
+                     "lr": "learning_rate"},
+        "rf": {"trees": "n_estimators"},
+        "svm": {"c": "C"},
+    }.get(kind, {})
+
+    def _value(key: str):
+        canonical = canonical_keys.get(key)
+        if canonical and canonical in p and p[canonical] not in (None, ""):
+            return p[canonical]
+        return p.get(key)
 
     def _i(key: str, default: int) -> int:
-        v = _num(p.get(key)); return int(v) if v is not None else int(default)
+        v = _num(_value(key)); return int(v) if v is not None else int(default)
 
     def _f(key: str, default: float) -> float:
-        v = _num(p.get(key)); return float(v) if v is not None else float(default)
+        v = _num(_value(key)); return float(v) if v is not None else float(default)
 
     if kind == "xgboost":
         from xgboost import XGBRegressor
@@ -964,6 +1409,17 @@ def _oos_model_response(body: "ModelTrainIn", kind: str, libname: str, universe:
         "standardize": bool(body.standardize),
     }
 
+    from guanlan_v2.workflow.factor_artifact import build_factor_artifact
+    factor_artifact = build_factor_artifact(
+        pred_s, kind="ml_prediction", label=f"model[{kind}]",
+        source={
+            "fe": fe_spec,
+            "model": {"kind": kind, "lib": libname, "hyperparams": hyper},
+            "split": {"train_frac": train_frac, "prediction_scope": "oos",
+                      "n_train_dates": n_train_dates, "n_test_dates": n_test_dates},
+        },
+    )
+
     out: Dict[str, Any] = {
         "ok": True,
         "kind": kind,
@@ -982,6 +1438,7 @@ def _oos_model_response(body: "ModelTrainIn", kind: str, libname: str, universe:
         "warnings": warnings,
         "status": "ok",
         "fe": fe_spec,
+        "factor_artifact": factor_artifact,
     }
     out.update(_report_blocks(report))   # #2:meta/ic/quantile/portfolio/characteristics/report/composite
     return JSONResponse(out)
@@ -1004,9 +1461,12 @@ def _walkforward_refit(body, kind, panel, fe_df, label_s, feature_names, fwd, re
     dt_level = fe_df.index.get_level_values("datetime")
     seg: List[Dict[str, Any]] = []
     oos_parts: List[Any] = []
+    from guanlan_v2.workflow.temporal_split import label_horizon, purged_dates
+    horizon = label_horizon(body)
     for i in range(1, folds + 1):
         tr_end, te_end = bounds[i], bounds[i + 1]
         train_dates = set(reb[:tr_end]); test_dates = set(reb[tr_end:te_end])
+        train_dates, split = purged_dates(panel.dates(), train_dates, test_dates, horizon, observation_index=panel.df.index)
         if not train_dates or not test_dates:
             continue
         train_df = fe_df[dt_level.isin(train_dates)].join(label_s).dropna()
@@ -1022,22 +1482,24 @@ def _walkforward_refit(body, kind, panel, fe_df, label_s, feature_names, fwd, re
             model, _h = _build_model(kind, body.params)
             model.fit(Xtr, ytr)
             pred = np.asarray(model.predict(test_feat[feature_names].fillna(0.0).to_numpy("float64")), dtype="float64")
-        except Exception:  # noqa: BLE001 — 单折失败跳过,不阻断整体
-            continue
+        except Exception as exc:
+            raise ValueError(f"滚动重训第 {i} 折失败: {exc}") from exc
         ps = pd.Series(pred, index=test_feat.index)
         oos_parts.append(ps)
         icr = ic_analysis(ps, fwd.reindex(ps.index))
-        seg.append({"fold": i, "train_end": str(pd.Timestamp(reb[tr_end - 1]).date()),
+        seg.append({"fold": i, **split,
                     "rank_ic": _num(icr.rank_ic_mean), "n_test_dates": len(test_dates)})
     if not oos_parts:
         return {"enabled": False, "reason": "滚动重训无有效折(各折训练/测试段为空)"}
+    if len(oos_parts) != folds:
+        return {"enabled": False, "reason": f"请求 {folds} 折但仅 {len(oos_parts)} 折有样本；请扩大窗口"}
     stitched = pd.concat(oos_parts)
     stitched = stitched[~stitched.index.duplicated(keep="last")]
     ic_all = ic_analysis(stitched, fwd.reindex(stitched.index))
     ics = [s["rank_ic"] for s in seg if s["rank_ic"] is not None]
     pos = sum(1 for v in ics if v > 0)
     return {
-        "enabled": True, "refit": True, "folds": len(seg),
+        "enabled": True, "refit": True, "folds": len(seg), "_signal": stitched,
         "stitched_oos_rank_ic": _num(ic_all.rank_ic_mean),
         "stitched_oos_rank_icir": _num(ic_all.rank_icir),
         "mean_fold_rank_ic": _num(float(np.mean(ics)) if ics else float("nan")),
@@ -1112,6 +1574,11 @@ def _train_eval(body: "ModelTrainIn", kind: str) -> JSONResponse:
     n_train = int(np.floor(train_frac * n_reb))
     train_dates = set(reb[:n_train])
     test_dates = set(reb[n_train:])
+    from guanlan_v2.workflow.temporal_split import label_horizon, purged_dates
+    try:
+        train_dates, split_info = purged_dates(panel.dates(), train_dates, test_dates, label_horizon(body), observation_index=panel.df.index)
+    except ValueError as exc:
+        return _fail_model(universe, str(exc), kind=kind)
     n_train_dates = len(train_dates)
     n_test_dates = len(test_dates)
     if n_train_dates == 0:
@@ -1173,6 +1640,19 @@ def _train_eval(body: "ModelTrainIn", kind: str) -> JSONResponse:
                            kind=kind, start=start, end=end)
     pred_s = pd.Series(pred, index=test_feat.index, name="pred")
 
+    wf_refit_block: Dict[str, Any] = {"enabled": False}
+    if getattr(body, "wf_refit", False):
+        try:
+            wf_refit_block = _walkforward_refit(body, kind, panel, fe_df, label_s,
+                feature_names, fwd, reb, folds=getattr(body, "wf_folds", 4))
+            if not wf_refit_block.get("enabled"):
+                raise ValueError(wf_refit_block.get("reason") or "滚动重训未产出信号")
+            pred_s = wf_refit_block.pop("_signal").rename("pred")
+            test_dates = set(pred_s.index.get_level_values("datetime"))
+            n_test_dates = len(test_dates)
+        except Exception as exc:
+            return _fail_model(universe, f"walkforward_refit_error: {exc}", kind=kind)
+
     # —— 8. OOS 评测:reindex 全面板 → build_report;ic_analysis 取 headline;OOS R² ——
     pred_full = pred_s.reindex(panel.df.index)
     cfg = EvalConfig(
@@ -1210,6 +1690,8 @@ def _train_eval(body: "ModelTrainIn", kind: str) -> JSONResponse:
         }
     except Exception:  # noqa: BLE001 —— IS 体检失败不阻断主流程
         ml_oos = {"enabled": False}
+    if body.wf_refit:
+        ml_oos = {"enabled": False, "reason": "滚动预测由多个模型生成，不与固定切分模型的样本内成绩混比；请查看逐折证据"}
 
     # OOS R²:predict vs 真标签(test 行,标签口径,可与 fwd 不同)
     lbl_oos = label_s.reindex(pred_s.index)
@@ -1278,15 +1760,20 @@ def _train_eval(body: "ModelTrainIn", kind: str) -> JSONResponse:
         "standardize": bool(body.standardize),
     }
 
-    # W7 真滚动前进重训(可选,K× 成本;默认关)。逐折 expanding-train 重训新模型 → 预测下段 OOS。
-    wf_refit_block: Dict[str, Any] = {"enabled": False}
-    if getattr(body, "wf_refit", False):
-        try:
-            wf_refit_block = _walkforward_refit(body, kind, panel, fe_df, label_s,
-                                                feature_names, fwd, reb,
-                                                folds=getattr(body, "wf_folds", 4))
-        except Exception as exc:  # noqa: BLE001 — 滚动重训失败不阻断主流程
-            wf_refit_block = {"enabled": False, "reason": f"{type(exc).__name__}: {exc}"}
+    from guanlan_v2.workflow.factor_artifact import build_factor_artifact
+    factor_artifact = build_factor_artifact(
+        pred_s, kind="ml_prediction", label=f"model[{kind}]",
+        source={
+            "fe": fe_spec,
+            "model": {"kind": kind, "lib": libname, "hyperparams": hyper},
+            "split": {**({"policy": "purged_expanding_walkforward",
+                          "test_start": str(pd.Timestamp(min(test_dates)).date()),
+                          "initial_holdout": split_info} if body.wf_refit else split_info),
+                      "train_frac": train_frac, "prediction_scope": "purged_walkforward_oos" if body.wf_refit else "purged_oos",
+                      "segments": wf_refit_block.get("segments", []),
+                      "n_train_dates": n_train_dates, "n_test_dates": n_test_dates},
+        },
+    )
 
     _out: Dict[str, Any] = {
         "ok": True,
@@ -1294,7 +1781,7 @@ def _train_eval(body: "ModelTrainIn", kind: str) -> JSONResponse:
         "universe": universe,
         "model": {"kind": kind, "lib": libname, "hyperparams": hyper},
         "n_train": int(Xtr.shape[0]),
-        "n_test": int(Xte.shape[0]),
+        "n_test": int(len(pred_s)),
         "n_train_dates": n_train_dates,
         "n_test_dates": n_test_dates,
         "n_features": len(feature_names),
@@ -1308,6 +1795,7 @@ def _train_eval(body: "ModelTrainIn", kind: str) -> JSONResponse:
         "warnings": warnings,
         "status": "ok",
         "fe": fe_spec,
+        "factor_artifact": factor_artifact,
     }
     _out.update(_report_blocks(report))   # #2:完整 OOS 报告顶层块(模型节点单独可在「因子分析」出整张报告)
     return JSONResponse(_out)
@@ -1378,6 +1866,13 @@ def _lstm_eval(body: "ModelTrainIn", kind: str = "lstm") -> JSONResponse:
     n_train_reb = int(np.floor(train_frac * n_reb))
     train_dates = set(reb[:n_train_reb])
     test_dates = set(reb[n_train_reb:])
+    from guanlan_v2.workflow.temporal_split import label_horizon, purged_dates
+    try:
+        train_dates, _split_info = purged_dates(panel.dates(), train_dates, test_dates, label_horizon(body), observation_index=panel.df.index)
+    except ValueError as exc:
+        return _fail_model(universe, str(exc), kind=kind)
+    if body.wf_refit:
+        return _fail_model(universe, "LSTM 尚未实现逐折重训，请关闭滚动重训或使用树模型", kind=kind)
     n_train_dates = len(train_dates)
     n_test_dates = len(test_dates)
     if n_train_dates == 0:
@@ -1512,10 +2007,26 @@ def _jsonable(obj: Any) -> Any:
     ``asdict`` 后过此函数,得到与 /factor/report 完全同形的可序列化嵌套字典。"""
     try:
         import numpy as _np
+        # datetime64[ns].item() is an integer nanosecond epoch on some NumPy
+        # versions, unlike day/us units. Handle every unit before the generic
+        # scalar conversion so the public JSON contract is consistently ISO.
+        if isinstance(obj, _np.datetime64):
+            if _np.isnat(obj):
+                return None
+            return _np.datetime_as_string(obj, unit="auto")
         if isinstance(obj, _np.generic):
             obj = obj.item()
     except Exception:  # noqa: BLE001  —— numpy 缺失不影响纯 Python 分支
         pass
+    # pandas.Timestamp inherits datetime. Orthogonalization diagnostics are date-indexed,
+    # so treating temporal scalars explicitly prevents a successful calculation
+    # from failing only while JSONResponse serializes the audit payload.
+    from datetime import date as _date, datetime as _datetime
+    if isinstance(obj, (_datetime, _date)):
+        try:
+            return None if obj != obj else obj.isoformat()
+        except (TypeError, ValueError):
+            return str(obj)
     if isinstance(obj, float):
         return None if (math.isnan(obj) or math.isinf(obj)) else obj
     if isinstance(obj, dict):
@@ -1749,6 +2260,13 @@ def _pca_factor(body: "PCAFactorIn") -> JSONResponse:
     panel, fe_df, _label_s, feature_names = mat
 
     X_df = fe_df[feature_names].dropna()             # PCA 需稠密无 NaN
+    dates = sorted(X_df.index.get_level_values("datetime").unique())
+    cut = max(1, int(len(dates) * 0.7))
+    fit_df = X_df[X_df.index.get_level_values("datetime").isin(dates[:cut])]
+    X_df = X_df[X_df.index.get_level_values("datetime").isin(dates[cut:])]
+    split_info = {"prediction_scope": "oos", "train_frac": 0.7,
+                  "train_end": str(dates[cut - 1]) if dates else None,
+                  "test_start": str(dates[cut]) if len(dates) > cut else None}
     if X_df.shape[0] < 2 or X_df.shape[1] < 1:
         return _fail_factor(universe, "PCA 输入为空 (特征矩阵 dropna 后行/列不足)",
                             method="pca", start=start, end=end, feature_names=feature_names)
@@ -1761,9 +2279,11 @@ def _pca_factor(body: "PCAFactorIn") -> JSONResponse:
     from sklearn.preprocessing import StandardScaler
 
     try:
-        Xs = StandardScaler().fit_transform(X_df.to_numpy("float64"))   # X 已 zscore,再标准化保险
+        scaler = StandardScaler()
+        Xs = scaler.fit_transform(fit_df.to_numpy("float64"))
         pca = PCA(n_components=k, random_state=0)
-        scores = pca.fit_transform(Xs)               # (n_rows, k)
+        pca.fit(Xs)
+        scores = pca.transform(scaler.transform(X_df.to_numpy("float64")))
     except Exception as exc:  # noqa: BLE001
         return _fail_factor(universe, f"pca_error: {type(exc).__name__}: {exc}",
                             method="pca", start=start, end=end, feature_names=feature_names)
@@ -1775,14 +2295,44 @@ def _pca_factor(body: "PCAFactorIn") -> JSONResponse:
     loadings = np.asarray(pca.components_[comp_idx], dtype="float64")
     if loadings.size and loadings[int(np.argmax(np.abs(loadings)))] < 0:
         comp_scores = -comp_scores
+        loadings = -loadings
 
     pred_s = pd.Series(comp_scores, index=X_df.index, name="pca")
     label = f"PCA[PC{comp_idx + 1}/{k}]({'+'.join(features)})"
+    from guanlan_v2.workflow.factor_artifact import build_factor_artifact
+    factor_artifact = build_factor_artifact(
+        pred_s, kind="pca", label=label,
+        source={
+            "fe": {
+                "features": features, "feature_names": feature_names,
+                "label": None if (body.label or "").strip().lower() in _LABEL_FWD_TOKENS
+                else (body.label or "").strip(),
+                "fwd_days": fwd_days, "universe": universe,
+                "start": start, "end": end, "freq": freq,
+                "winsorize": bool(body.winsorize),
+                "winsorize_q": float(body.winsorize_q),
+                "standardize": bool(body.standardize),
+            },
+            "transform": {
+                "method": "pca", "k": k, "component": comp_idx + 1,
+                "split": split_info,
+                "scaler_mean": [float(x) for x in scaler.mean_],
+                "scaler_scale": [float(x) for x in scaler.scale_],
+                "loadings": [float(x) for x in loadings],
+                "explained_variance_ratio": evr,
+            },
+        },
+    )
     extra = {
         "k": k,
         "component": comp_idx + 1,
         "n_features": n_feat,
         "explained_variance_ratio": evr,
+        "pca_loadings": [
+            {"feature": feature_names[i], "expr": features[i], "loading": _num(loadings[i])}
+            for i in range(min(len(loadings), len(feature_names), len(features)))
+        ],
+        "factor_artifact": factor_artifact,
         "features_exprs": features,
     }
     return _factor_eval(body, universe, panel, pred_s, feature_names, start, end,
@@ -1828,6 +2378,14 @@ def _spearman_factor(body: "SpearmanFactorIn") -> JSONResponse:
     fwd = forward_simple_returns(panel, fwd_days)
 
     have_scipy = _ilu.find_spec("scipy") is not None
+    from guanlan_v2.workflow.temporal_split import purged_dates
+    dates = sorted(fe_df.index.get_level_values("datetime").unique())
+    cut = max(1, int(len(dates) * 0.7))
+    fit_dates, split_info = purged_dates(panel.dates(), dates[:cut], dates[cut:], fwd_days, observation_index=panel.df.index)
+    fit_df = fe_df[fe_df.index.get_level_values("datetime").isin(fit_dates)]
+    test_df = fe_df[fe_df.index.get_level_values("datetime").isin(dates[cut:])]
+    if fit_df.empty or test_df.empty:
+        return _fail_factor(universe, "Spearman 净化后的训练/测试窗口不足", method="spearman")
 
     def _spearman_ic(f: pd.Series, r: pd.Series) -> Optional[float]:
         """单特征 vs 前向收益的全样本 Spearman rank-IC。scipy 优先,退 pandas rank+corr。"""
@@ -1846,7 +2404,10 @@ def _spearman_factor(body: "SpearmanFactorIn") -> JSONResponse:
     weights: List[float] = []
     weight_rows: List[Dict[str, Any]] = []
     for nm, expr in zip(feature_names, features):
-        w = _spearman_ic(fe_df[nm], fwd)
+        daily_ic = [_spearman_ic(group, fwd.reindex(group.index))
+                    for _, group in fit_df[nm].groupby(level="datetime")]
+        valid_ic = [v for v in daily_ic if v is not None]
+        w = float(np.mean(valid_ic)) if valid_ic else None
         wv = float(w) if w is not None else 0.0
         weights.append(wv)
         weight_rows.append({"feature": nm, "expr": expr, "rank_ic": w})
@@ -1861,8 +2422,8 @@ def _spearman_factor(body: "SpearmanFactorIn") -> JSONResponse:
     # 复合因子 = Σ w_i · f_i(特征已 z-score;负 IC 特征自动负权 → 方向与未来收益对齐)
     comp = None
     for nm, wv in zip(feature_names, w_norm):
-        term = fe_df[nm] * wv
-        comp = term if comp is None else comp.add(term, fill_value=0.0)
+        term = test_df[nm] * wv
+        comp = term if comp is None else comp + term
     comp = comp.dropna()
     if comp.empty:
         return _fail_factor(universe, "Spearman 复合因子为空 (加权后全 NaN)",
@@ -1873,10 +2434,30 @@ def _spearman_factor(body: "SpearmanFactorIn") -> JSONResponse:
     for i, r in enumerate(weight_rows):
         r["weight"] = _num(w_norm[i])
     label = f"Spearman({'+'.join(features)})"
+    from guanlan_v2.workflow.factor_artifact import build_factor_artifact
+    factor_artifact = build_factor_artifact(
+        pred_s, kind="spearman", label=label,
+        source={
+            "fe": {
+                "features": features, "feature_names": feature_names,
+                "label": None if (body.label or "").strip().lower() in _LABEL_FWD_TOKENS
+                else (body.label or "").strip(),
+                "fwd_days": fwd_days, "universe": universe,
+                "start": start, "end": end, "freq": freq,
+                "winsorize": bool(body.winsorize),
+                "winsorize_q": float(body.winsorize_q),
+                "standardize": bool(body.standardize),
+            },
+            "transform": {"method": "spearman", "weights": weight_rows,
+                          "split": {**split_info, "prediction_scope": "purged_oos"}},
+            "weights": weight_rows,
+        },
+    )
     extra = {
         "n_features": len(feature_names),
         "spearman_weights": weight_rows,
         "scipy": bool(have_scipy),
+        "factor_artifact": factor_artifact,
         "features_exprs": features,
     }
     return _factor_eval(body, universe, panel, pred_s, feature_names, start, end,
@@ -2164,7 +2745,7 @@ def _topn_portfolio(alpha_r, fwd_r, topn: int, ppy: int,
 
     成本**分腿**真算:由相邻两期权重向量差 Δw 拆 买入腿 Σmax(0,Δw) 与 卖出腿 Σmax(0,-Δw),
     买入腿扣 佣金+滑点,卖出腿额外扣 **印花税**(A股仅卖出收,修旧版按对称换手双计的偏差)。
-    首期建仓不计成本(同旧口径)。``long_short=True`` 时空腿仍按等权(加权只作用多头,诚实标注),
+    首期建仓也计买入成本。``long_short=True`` 时空腿仍按等权(加权只作用多头,诚实标注),
     成本×2 代理双腿。换手回显 = 各期 (买入腿+卖出腿)/2 均值。复用 ``portfolio_stats`` 算指标。
 
     ``inv_vol/risk_parity`` 的波动用**截至各调仓日**的滚动窗口(``vol_lookback`` 日)估,无前视。
@@ -2173,7 +2754,9 @@ def _topn_portfolio(alpha_r, fwd_r, topn: int, ppy: int,
     import pandas as pd
     from financial_analyst.factors.eval.portfolio import PortfolioResult, portfolio_stats
 
-    joined = pd.concat([alpha_r.rename("a"), fwd_r.rename("f")], axis=1).dropna()
+    joined = pd.concat([alpha_r.rename("a"), fwd_r.rename("f")], axis=1).dropna(subset=["a"])
+    mature_dates = set(fwd_r.dropna().index.get_level_values("datetime"))
+    joined = joined[joined.index.get_level_values("datetime").isin(mature_dates)]
     if joined.empty:
         return PortfolioResult(), [], float("nan"), 0.0
 
@@ -2215,6 +2798,8 @@ def _topn_portfolio(alpha_r, fwd_r, topn: int, ppy: int,
             continue
         n = max(1, min(int(topn), len(sl)))
         top = sl.nlargest(n, "a")
+        if top["f"].isna().any():
+            raise ValueError(f"{d}: 已选持仓缺退出行情，不能按未来收益可用性换选其他股票")
         codes = list(top.index)
         if use_weight:
             vol_asof = None
@@ -2237,8 +2822,10 @@ def _topn_portfolio(alpha_r, fwd_r, topn: int, ppy: int,
             r_gross = float(top["f"].mean())
         if long_short:
             bot = sl.nsmallest(n, "a")
+            if bot["f"].isna().any():
+                raise ValueError(f"{d}: 空头持仓缺退出行情")
             r_gross = r_gross - float(bot["f"].mean())
-        # 分腿换手:相邻期权重向量差(首期=建仓,不计成本,同旧口径)。
+        # 分腿换手:相邻期目标权重差；首期从现金建仓并计买入成本。
         if len(prev_w):
             allc = prev_w.index.union(w.index)
             dw = w.reindex(allc).fillna(0.0) - prev_w.reindex(allc).fillna(0.0)
@@ -2247,8 +2834,8 @@ def _topn_portfolio(alpha_r, fwd_r, topn: int, ppy: int,
             cost = (buy_turn * buy_rate + sell_turn * sell_rate) * (2 if long_short else 1)
             turn_disp = (buy_turn + sell_turn) / 2.0
         else:
-            cost = 0.0
-            turn_disp = 0.0
+            cost = buy_rate * (2 if long_short else 1)
+            turn_disp = 0.5 * (2 if long_short else 1)
         r = r_gross - cost
         rets.append(r)
         gross_rets.append(r_gross)
@@ -2262,6 +2849,12 @@ def _topn_portfolio(alpha_r, fwd_r, topn: int, ppy: int,
             "enter": sorted(str(c) for c in (cur - prev_codes)),
             "exit": sorted(str(c) for c in (prev_codes - cur)),
             "hold_n": len(cur),
+            # Exact realised period evidence.  NAV starts after the first realised
+            # return, so pct_change(NAV) necessarily loses that first observation;
+            # the audit path must consume this explicit series instead.
+            "period_return": float(r),
+            "gross_return": float(r_gross),
+            "period_cost": float(cost),
         })
         prev_w = w
 
@@ -2360,7 +2953,10 @@ def _rank_ic_series(fac, fwd) -> "List[Any]":
             continue
         c = sub["a"].rank().corr(sub["f"].rank())
         if c == c:   # 非 NaN
-            out.append([str(pd.Timestamp(d).date()), round(float(c), 4)])
+            # Keep full finite precision here: the trusted TrialLedger connector
+            # uses this exact series as the governed selection objective.  The UI
+            # may format it, but evidence must never be rounded before sealing.
+            out.append([str(pd.Timestamp(d).date()), float(c)])
     return out
 
 
@@ -2379,7 +2975,13 @@ def _inject_rank_ic_series(ic_block, fac, fwd, panel=None, freq=None) -> None:
         except Exception:  # noqa: BLE001 — 限制失败则退回原生粒度
             f, fw = fac, fwd
     try:
-        ic_block["rank_ic_series"] = _rank_ic_series(f, fw)
+        series = _rank_ic_series(f, fw)
+        ic_block["rank_ic_series"] = series
+        if series:
+            # One canonical objective: the headline used by research selection
+            # is exactly the arithmetic mean of the same unrounded period scores
+            # later sealed for conditional CSCV/PBO.
+            ic_block["rank_ic_mean"] = math.fsum(float(row[1]) for row in series) / len(series)
     except Exception:  # noqa: BLE001
         pass
 
@@ -2641,9 +3243,30 @@ def _backtest_vector(body: "BacktestVectorIn") -> JSONResponse:
     universe = (body.universe or "csi_fast").strip() or "csi_fast"
 
     features = _normalize_features(body)  # type: ignore[arg-type]
+    raw_factor_artifact = getattr(body, "factor_artifact", None)
+    if not features and raw_factor_artifact:
+        try:
+            from guanlan_v2.workflow.factor_artifact import artifact_features
+            features = artifact_features(raw_factor_artifact)
+        except Exception as exc:
+            return _fail_factor(
+                universe, f"factor_artifact_error: {type(exc).__name__}: {exc}",
+                method="backtest_vector",
+            )
     if not features:
         return _fail_factor(universe, "回测因子不能为空 (上游需提供因子表达式或复合因子标签)",
                             method="backtest_vector")
+    try:
+        explicit_factor_spec = (
+            None if raw_factor_artifact else _pin_explicit_orthogonalized_factor(
+                features, getattr(body, "orthogonalization", None),
+            )
+        )
+    except Exception as exc:
+        return _fail_factor(
+            universe, f"factor_spec_validation_error: {type(exc).__name__}: {exc}",
+            method="backtest_vector",
+        )
 
     freq = (body.freq or "day").strip() or "day"
     end = (body.end or "").strip() or date.today().isoformat()
@@ -2681,22 +3304,120 @@ def _backtest_vector(body: "BacktestVectorIn") -> JSONResponse:
     #    面板始终按**日频**加载(qlib 仅有 day provider;week/month 是调仓重采样而非 loader 频率,
     #    同引擎 report.py:196 硬编 freq="day")。故喂 _materialize_xy 一个 freq="day" 的 body 副本
     #    (不改原 body、不动共享 _materialize_xy),用户 freq 仅驱动下方 rebalance_dates/EvalConfig。
-    load_body = body.model_copy(update={"freq": "day"})
+    load_body = body.model_copy(update={
+        "freq": "day",
+        **({"orthogonalization": explicit_factor_spec["transform"]}
+           if explicit_factor_spec is not None else {}),
+    })
     mat = _materialize_xy(load_body, universe, features, start, end)
     if isinstance(mat, JSONResponse):
         return mat  # 物化阶段诚实失败(_fail_model 形已带 ok:False/reason)
     panel, fe_df, _label_s, feature_names = mat
+    if explicit_factor_spec is not None:
+        try:
+            from guanlan_v2.factorlib.specs import verify_factor_spec_dependencies
+            explicit_factor_spec = verify_factor_spec_dependencies(explicit_factor_spec)
+        except Exception as exc:
+            return _fail_factor(
+                universe, f"factor_spec_replay_error: {type(exc).__name__}: {exc}",
+                method="backtest_vector", start=start, end=end,
+                feature_names=feature_names,
+            )
+    try:
+        data_snapshot = _panel_content_snapshot(panel)
+    except Exception as exc:  # noqa: BLE001 - governed evidence must fail closed
+        return _fail_factor(
+            universe, f"data_snapshot_error: {type(exc).__name__}: {exc}",
+            method="backtest_vector", start=start, end=end,
+            feature_names=feature_names,
+        )
 
     combine_method = (getattr(body, "combine", "equal") or "equal").strip().lower()
-    _labels = {feature_names[i]: features[i] for i in range(min(len(feature_names), len(features)))}
-    alpha, combine_weights, combine_note = _combine_alpha(
-        fe_df, feature_names, panel, fwd_days, method=combine_method,
-        train_frac=getattr(body, "combine_train_frac", 0.6), member_labels=_labels)
+    materialized_factor_artifact = None
+    if raw_factor_artifact:
+        try:
+            alpha, materialized_factor_artifact = _artifact_factor_for_panel(
+                raw_factor_artifact, panel,
+            )
+            from guanlan_v2.workflow.factor_artifact import artifact_weights
+            combine_weights = artifact_weights(materialized_factor_artifact)
+            artifact_source = materialized_factor_artifact.get("source") or {}
+            combine_method = str(
+                artifact_source.get("method") or artifact_source.get("method_requested")
+                or materialized_factor_artifact.get("kind") or "artifact"
+            )
+            combine_note = (
+                f"已按不可变因子产物 {materialized_factor_artifact['id']} "
+                "重放真实拟合信号，未按原始 features 重新等权。"
+            )
+        except Exception as exc:  # noqa: BLE001 - artifacts fail closed
+            return _fail_factor(
+                universe, f"factor_artifact_error: {type(exc).__name__}: {exc}",
+                method="backtest_vector", start=start, end=end,
+                feature_names=feature_names,
+            )
+    else:
+        _labels = {feature_names[i]: features[i] for i in range(min(len(feature_names), len(features)))}
+        alpha, combine_weights, combine_note = _combine_alpha(
+            fe_df, feature_names, panel, fwd_days, method=combine_method,
+            train_frac=getattr(body, "combine_train_frac", 0.6), member_labels=_labels)
     alpha = alpha.rename("alpha")
     if alpha.empty:
         return _fail_factor(universe, "回测因子物化后为空 (特征全 NaN)",
                             method="backtest_vector", start=start, end=end,
                             feature_names=feature_names)
+
+    factor_spec_replays = list(fe_df.attrs.get("factor_spec_replays") or [])
+    if raw_factor_artifact and getattr(body, "orthogonalization", None):
+        return _fail_factor(
+            universe,
+            "factor artifact 已是最终拟合信号，不能再叠加 orthogonalization",
+            method="backtest_vector", start=start, end=end,
+            feature_names=feature_names,
+        )
+    if factor_spec_replays and getattr(body, "orthogonalization", None):
+        return _fail_factor(
+            universe,
+            "factor_spec 注册因子已自带正交化变换，不能再叠加 orthogonalization",
+            method="backtest_vector", start=start, end=end,
+            feature_names=feature_names,
+        )
+    orthogonalize_info: Dict[str, Any] = {"requested": False, "applied": False}
+    if len(factor_spec_replays) == 1:
+        orthogonalize_info = dict(factor_spec_replays[0].get("audit") or {})
+        orthogonalize_info.setdefault("artifact", {})["factorlib_name"] = factor_spec_replays[0].get("name")
+    elif factor_spec_replays:
+        orthogonalize_info = {
+            "requested": True,
+            "applied": all(bool((x.get("audit") or {}).get("applied")) for x in factor_spec_replays),
+            "source": "factorlib",
+            "note": f"已按因子库规范重放 {len(factor_spec_replays)} 个结构化因子。",
+            "replays": factor_spec_replays,
+        }
+    if getattr(body, "orthogonalization", None):
+        try:
+            alpha, orthogonalize_info = _orthogonalize_from_spec(
+                alpha, panel,
+                (explicit_factor_spec["transform"]
+                 if explicit_factor_spec is not None else body.orthogonalization),
+                dependency_bindings=(
+                    (explicit_factor_spec.get("dependencies") or {}).get("existing_factors")
+                    if explicit_factor_spec is not None else None
+                ),
+            )
+            orthogonalize_info["artifact"]["base_features"] = list(features)
+        except Exception as exc:  # noqa: BLE001 - requested transform fails closed
+            return _fail_factor(
+                universe, f"orthogonalize_error: {type(exc).__name__}: {exc}",
+                method="backtest_vector", start=start, end=end,
+                feature_names=feature_names,
+            )
+        if alpha.dropna().empty:
+            return _fail_factor(
+                universe, "正交化后没有可用截面；请检查控制项覆盖率/共线性/最小样本数",
+                method="backtest_vector", start=start, end=end,
+                feature_names=feature_names, orthogonalization=orthogonalize_info,
+            )
 
     # —— 3. 因子视图报告(诚实 IC/分位/characteristics + 基准)——
     alpha_full = alpha.reindex(panel.df.index)
@@ -2716,41 +3437,55 @@ def _backtest_vector(body: "BacktestVectorIn") -> JSONResponse:
         report_err = report_err or f"report_{report.status}: {getattr(report, 'error', '') or '评测退化'}"
         report = None
 
-    # —— 4. TopN 组合(真账户)。在调仓日截面上逐期 nlargest(topn) 等权 ——
+    # —— 4. 研究级 TopN 组合：收盘信号，下个交易日开盘成交，实际下一调仓日退出。
     reb = rebalance_dates(list(panel.dates()), rebalance)
     fwd = forward_simple_returns(panel, fwd_days)
     alpha_r = _restrict(alpha, reb)
     fwd_r = _restrict(fwd, reb)
+    from guanlan_v2.workflow.temporal_split import next_open_period_returns
+    execution_returns = next_open_period_returns(panel, reb)
     ppy = cfg.periods_per_year()
-    pf, trades, gross_ann, total_cost = _topn_portfolio(
-        alpha_r, fwd_r, topn, ppy, long_short=long_short,
-        cost_bps=float(body.cost_bps or 0.0), stamp_tax=stamp_tax,
-        commission=commission, slippage_bps=slippage,
-        weighting=bt_weighting, panel_df=panel.df,
-        max_weight=bt_max_weight, industry_neutral=bt_industry_neutral,
-        vol_forecast=bt_vol_forecast)
+    try:
+        pf, trades, gross_ann, total_cost = _topn_portfolio(
+            alpha_r, execution_returns, topn, ppy, long_short=long_short,
+            cost_bps=float(body.cost_bps or 0.0), stamp_tax=stamp_tax,
+            commission=commission, slippage_bps=slippage,
+            weighting=bt_weighting, panel_df=panel.df,
+            max_weight=bt_max_weight, industry_neutral=bt_industry_neutral,
+            vol_forecast=bt_vol_forecast)
+    except ValueError as exc:
+        return _fail_factor(universe, str(exc), method="backtest_vector")
     if not pf.nav_series:
         return _fail_factor(universe,
                             "TopN 组合为空 (调仓日截面无可选标的或前向收益全 NaN)",
                             method="backtest_vector", start=start, end=end,
                             feature_names=feature_names, topn=topn)
     # 基准:优先 build_report 的等权全池基准;无报告 → 独立 _benchmark_nav 兜底。
-    pf.benchmark_nav = (report.portfolio.benchmark_nav
-                        if (report is not None and report.portfolio is not None
-                            and report.portfolio.benchmark_nav)
-                        else _benchmark_nav(fwd_r))
+    realised_dates = {pd.Timestamp(row[0]) for row in pf.nav_series}
+    pf.benchmark_nav = _benchmark_nav(execution_returns[
+        execution_returns.index.get_level_values("datetime").isin(realised_dates)])
 
     # —— 5. 组装 /factor/report 兼容顶层 + 回测专有 ——
     pf_dict = _jsonable(_asdict(pf))
+    pf_dict["execution_assumptions"] = {
+        "version": "next_open_rebalance_v1", "research_only": True,
+        "deployment_ready": False, "initial_cost_charged": True,
+        "entry": "next_session_open", "exit": "next_rebalance_next_session_open",
+        "limitations": ["未模拟涨跌停/停牌成交拒绝", "未模拟成交量容量/整手/资金约束", "非真实券商撮合账本", "换手使用目标权重差，未含持仓市值漂移"],
+    }
     pf_dict["gross_ann"] = _num(gross_ann)   # 扣成本前年化
     pf_dict["net_ann"] = _num(pf.ann_return)  # 扣成本后年化(= ann_return)
     pf_dict["total_cost"] = _num(total_cost)  # 累计成本拖累(各期成本之和)
     # W6 绩效补全:Sortino / 信息比率 / 真沪深300 基准净值(从净值序列 + B2 沪深300 真算,不动引擎)。
     _w6 = _w6_perf(pf.nav_series, pf.ann_return, ppy, start, end)
     pf_dict["sortino"] = _num(_w6["sortino"])
-    pf_dict["information_ratio"] = _num(_w6["information_ratio"])
-    pf_dict["bench300_nav"] = _w6["bench300_nav"]   # [date, nav] 对,归一首日=1;空=取不到真指数
+    pf_dict["information_ratio"] = None
+    pf_dict["information_ratio_unavailable_reason"] = "沪深300 close 基准与次日开盘持有期未对齐，暂不报告 IR"
+    pf_dict["bench300_nav"] = []  # Close-only benchmark is not aligned to this next-open execution ledger.
     pf_dict["risk"] = _risk_block(pf.nav_series, ppy)  # VaR/CVaR/EVT/Kupiec(白捡进回测抽屉;短序列诚实空)
+    pf_dict["return_series"] = [
+        [str(row["date"]), float(row["period_return"])] for row in trades
+    ]
     # W7 样本外体检:回测净值切尾段 → IS/OOS Sharpe·年化并排 + 衰减判定(不动引擎)。
     bt_oos = _oos_perf_block(pf.nav_series, ppy, getattr(body, "oos_frac", 0.0))
     bt_wf = _wf_perf(pf.nav_series, ppy)          # W7-2 walk-forward:逐段 Sharpe + 汇总
@@ -2762,8 +3497,11 @@ def _backtest_vector(body: "BacktestVectorIn") -> JSONResponse:
     n_periods = len(pf.nav_series)
     nav_end = pf.nav_series[-1][1] if pf.nav_series else None
     warnings: List[str] = list(report.warnings) if (report is not None and report.warnings) else []
+    warnings.append("研究级回测：次日开盘执行并计首期成本，但尚未模拟涨跌停、停牌可成交性、容量与整手约束，不构成实盘就绪证明。")
     if report_err:
         warnings.append(f"因子视图报告退化(IC/分位缺失): {report_err}")
+    if orthogonalize_info.get("requested"):
+        warnings.append(str(orthogonalize_info.get("note") or "已应用因子正交化。"))
     if n_periods < 12:
         warnings.append(f"回测有效调仓期太短 ({n_periods} < 12), 净值/指标不稳健。")
     if pf.ann_return is not None and pf.ann_return == pf.ann_return and pf.ann_return < 0:
@@ -2782,7 +3520,8 @@ def _backtest_vector(body: "BacktestVectorIn") -> JSONResponse:
         "volatility": _num(pf.volatility),
         "turnover": _num(pf.turnover),
         "win_rate": _num(pf.win_rate),
-        "information_ratio": _num(_w6["information_ratio"]),   # W6 对标真沪深300 的信息比率
+        "information_ratio": pf_dict["information_ratio"],
+        "information_ratio_unavailable_reason": pf_dict["information_ratio_unavailable_reason"],
         "gross_ann": _num(gross_ann),
         "net_ann": _num(pf.ann_return),
         "total_cost": _num(total_cost),
@@ -2802,6 +3541,11 @@ def _backtest_vector(body: "BacktestVectorIn") -> JSONResponse:
         "winsorize": bool(body.winsorize),
         "winsorize_q": float(body.winsorize_q),
         "standardize": bool(body.standardize),
+        "orthogonalization": (
+            explicit_factor_spec["transform"] if explicit_factor_spec is not None
+            else getattr(body, "orthogonalization", None)
+        ),
+        "factor_artifact": materialized_factor_artifact,
     }
 
     label = f"TopN[{topn}]" + ("(多空)" if long_short else "") + f"({'+'.join(features)})"
@@ -2816,6 +3560,16 @@ def _backtest_vector(body: "BacktestVectorIn") -> JSONResponse:
         "combine": combine_method,
         "combine_weights": combine_weights,
         "combine_note": combine_note,
+        "factor_artifact": materialized_factor_artifact,
+        "factor_artifact_id": (
+            materialized_factor_artifact.get("id")
+            if isinstance(materialized_factor_artifact, dict) else None
+        ),
+        "orthogonalization": orthogonalize_info,
+        # Exact content identity of the panel used for this backtest.  The
+        # TrialLedger connector requires every candidate column to carry the
+        # same digest; query-parameter hashes are never accepted as evidence.
+        "data_snapshot": data_snapshot,
         # —— /factor/report 同形顶层块(前端 ResultsDrawer 直接消费)——
         #    portfolio 用真 TopN 账户覆盖;ic/quantile/characteristics 仍是诚实因子视图(可空)。
         "meta": (rep_dict.get("meta") if rep_dict else None),
@@ -2855,7 +3609,17 @@ def _backtest_vector(body: "BacktestVectorIn") -> JSONResponse:
     }
     if rep_dict is not None:
         out["report"] = rep_dict
-    return JSONResponse(out)
+    if explicit_factor_spec is not None:
+        from guanlan_v2.factorlib.specs import factor_spec_digest
+        out["factor_spec"] = explicit_factor_spec
+        out["factor_spec_digest"] = factor_spec_digest(explicit_factor_spec)
+    elif len(factor_spec_replays) == 1:
+        replay_spec = factor_spec_replays[0].get("factor_spec")
+        if isinstance(replay_spec, dict):
+            from guanlan_v2.factorlib.specs import factor_spec_digest
+            out["factor_spec"] = replay_spec
+            out["factor_spec_digest"] = factor_spec_digest(replay_spec)
+    return JSONResponse(_jsonable(out))
 
 
 def _portfolio_risk_attr(df, asof, codes, weights, lookback: int = 250, min_obs: int = 60):
@@ -2926,6 +3690,16 @@ def _portfolio_build(body: "PortfolioBuildIn") -> JSONResponse:
 
     universe = (body.universe or "csi_fast").strip() or "csi_fast"
     features = _normalize_features(body)  # type: ignore[arg-type]
+    raw_factor_artifact = getattr(body, "factor_artifact", None)
+    if not features and raw_factor_artifact:
+        try:
+            from guanlan_v2.workflow.factor_artifact import artifact_features
+            features = artifact_features(raw_factor_artifact)
+        except Exception as exc:
+            return _fail_factor(
+                universe, f"factor_artifact_error: {type(exc).__name__}: {exc}",
+                method="portfolio_build",
+            )
     if not features:
         return _fail_factor(universe, "组合因子不能为空 (上游需提供因子表达式或复合因子标签)",
                             method="portfolio_build")
@@ -2950,15 +3724,85 @@ def _portfolio_build(body: "PortfolioBuildIn") -> JSONResponse:
     panel, fe_df, _label_s, feature_names = mat
 
     combine_method = (getattr(body, "combine", "equal") or "equal").strip().lower()
-    _labels = {feature_names[i]: features[i] for i in range(min(len(feature_names), len(features)))}
-    alpha, combine_weights, combine_note = _combine_alpha(
-        fe_df, feature_names, panel, 21, method=combine_method,
-        train_frac=getattr(body, "combine_train_frac", 0.6), member_labels=_labels)
+    materialized_factor_artifact = None
+    if raw_factor_artifact:
+        try:
+            alpha, materialized_factor_artifact = _artifact_factor_for_panel(
+                raw_factor_artifact, panel,
+            )
+            from guanlan_v2.workflow.factor_artifact import artifact_weights
+            combine_weights = artifact_weights(materialized_factor_artifact)
+            artifact_source = materialized_factor_artifact.get("source") or {}
+            combine_method = str(
+                artifact_source.get("method") or artifact_source.get("method_requested")
+                or materialized_factor_artifact.get("kind") or "artifact"
+            )
+            combine_note = (
+                f"已按不可变因子产物 {materialized_factor_artifact['id']} "
+                "重放真实拟合信号，未按原始 features 重新等权。"
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _fail_factor(
+                universe, f"factor_artifact_error: {type(exc).__name__}: {exc}",
+                method="portfolio_build", start=start, end=end,
+                feature_names=feature_names,
+            )
+    else:
+        _labels = {feature_names[i]: features[i] for i in range(min(len(feature_names), len(features)))}
+        alpha, combine_weights, combine_note = _combine_alpha(
+            fe_df, feature_names, panel, 21, method=combine_method,
+            train_frac=getattr(body, "combine_train_frac", 0.6), member_labels=_labels)
     alpha = alpha.rename("alpha")
     if alpha.empty:
         return _fail_factor(universe, "组合因子物化后为空 (特征全 NaN)",
                             method="portfolio_build", start=start, end=end,
                             feature_names=feature_names)
+
+    factor_spec_replays = list(fe_df.attrs.get("factor_spec_replays") or [])
+    if raw_factor_artifact and getattr(body, "orthogonalization", None):
+        return _fail_factor(
+            universe,
+            "factor artifact 已是最终拟合信号，不能再叠加 orthogonalization",
+            method="portfolio_build", start=start, end=end,
+            feature_names=feature_names,
+        )
+    if factor_spec_replays and getattr(body, "orthogonalization", None):
+        return _fail_factor(
+            universe,
+            "factor_spec 注册因子已自带正交化变换，不能再叠加 orthogonalization",
+            method="portfolio_build", start=start, end=end,
+            feature_names=feature_names,
+        )
+    orthogonalize_info: Dict[str, Any] = {"requested": False, "applied": False}
+    if len(factor_spec_replays) == 1:
+        orthogonalize_info = dict(factor_spec_replays[0].get("audit") or {})
+        orthogonalize_info.setdefault("artifact", {})["factorlib_name"] = factor_spec_replays[0].get("name")
+    elif factor_spec_replays:
+        orthogonalize_info = {
+            "requested": True,
+            "applied": all(bool((x.get("audit") or {}).get("applied")) for x in factor_spec_replays),
+            "source": "factorlib",
+            "note": f"已按因子库规范重放 {len(factor_spec_replays)} 个结构化因子。",
+            "replays": factor_spec_replays,
+        }
+    if getattr(body, "orthogonalization", None):
+        try:
+            alpha, orthogonalize_info = _orthogonalize_from_spec(
+                alpha, panel, body.orthogonalization,
+            )
+            orthogonalize_info["artifact"]["base_features"] = list(features)
+        except Exception as exc:  # noqa: BLE001
+            return _fail_factor(
+                universe, f"orthogonalize_error: {type(exc).__name__}: {exc}",
+                method="portfolio_build", start=start, end=end,
+                feature_names=feature_names,
+            )
+        if alpha.dropna().empty:
+            return _fail_factor(
+                universe, "正交化后没有可用最新截面；请检查控制项覆盖率/共线性/最小样本数",
+                method="portfolio_build", start=start, end=end,
+                feature_names=feature_names, orthogonalization=orthogonalize_info,
+            )
 
     # —— 3. 最新截面 → nlargest(topn) ——
     try:
@@ -2978,6 +3822,8 @@ def _portfolio_build(body: "PortfolioBuildIn") -> JSONResponse:
 
     df = panel.df
     warnings: List[str] = []
+    if orthogonalize_info.get("requested"):
+        warnings.append(str(orthogonalize_info.get("note") or "已应用因子正交化。"))
 
     def _latest_col(col: str):
         if col not in df.columns:
@@ -3034,6 +3880,8 @@ def _portfolio_build(body: "PortfolioBuildIn") -> JSONResponse:
         "winsorize": bool(body.winsorize),
         "winsorize_q": float(body.winsorize_q),
         "standardize": bool(body.standardize),
+        "orthogonalization": getattr(body, "orthogonalization", None),
+        "factor_artifact": materialized_factor_artifact,
     }
 
     out: Dict[str, Any] = {
@@ -3053,6 +3901,12 @@ def _portfolio_build(body: "PortfolioBuildIn") -> JSONResponse:
         "combine": combine_method,
         "combine_weights": combine_weights,
         "combine_note": combine_note,
+        "factor_artifact": materialized_factor_artifact,
+        "factor_artifact_id": (
+            materialized_factor_artifact.get("id")
+            if isinstance(materialized_factor_artifact, dict) else None
+        ),
+        "orthogonalization": orthogonalize_info,
         "holdings": holdings,
         "risk_attr": risk_attr,        # #4 组合层风险归因(欧拉分解;Σ over ≤asof;失败 None)
         "warnings": warnings,
@@ -3061,7 +3915,7 @@ def _portfolio_build(body: "PortfolioBuildIn") -> JSONResponse:
         "composite": True,
         "fe": fe_spec,
     }
-    return JSONResponse(out)
+    return JSONResponse(_jsonable(out))
 
 
 class FactorReport2In(BaseModel):
@@ -3084,6 +3938,8 @@ class FactorReport2In(BaseModel):
     winsorize_q: float = 0.01
     standardize: bool = True
     neutralize: bool = False         # #1 截面行业+市值中性化:对原始因子逐日 OLS 残差化(残差替代原值)
+    orthogonalization: Optional[Dict[str, Any]] = None  # 独立正交化节点的可重放 factor-spec
+    factor_artifact: Optional[Dict[str, Any]] = None    # 拟合/复合因子的真实不可变信号
 
 
 class FactorComposeIn(ModelTrainIn):
@@ -3160,6 +4016,24 @@ def _factor_compose(body: "FactorComposeIn") -> JSONResponse:
     if direction < 0:
         alpha = -alpha
 
+    from guanlan_v2.workflow.factor_artifact import build_factor_artifact
+    factor_artifact = build_factor_artifact(
+        alpha.rename("composite"), kind="linear_composite",
+        label=(" + ".join(members))[:120],
+        source={
+            "fe": {
+                "features": members, "feature_names": feature_names,
+                "fwd_days": fwd_days, "universe": universe,
+                "start": start, "end": end, "freq": freq,
+                "winsorize": bool(body.winsorize),
+                "winsorize_q": float(body.winsorize_q),
+                "standardize": bool(body.standardize),
+            },
+            "method": method, "weights": weights, "direction": direction,
+            "weight_calibration": dict(alpha.attrs.get("weight_calibration") or {}),
+        },
+    )
+
     alpha_full = alpha.reindex(panel.df.index)
     cfg = EvalConfig(universe=universe, freq=freq, start=start, end=end, fwd_days=fwd_days,
                      n_groups=n_groups, winsorize_q=float(body.winsorize_q or 0.0),
@@ -3229,10 +4103,13 @@ def _factor_compose(body: "FactorComposeIn") -> JSONResponse:
         "characteristics": rep_dict.get("characteristics") or {},
         "oos": oos_block, "walkforward": wf_block, "pbo": pbo_block,
         "warnings": warnings, "report": rep_dict,
+        "factor_artifact": factor_artifact,
     }
     return JSONResponse({"ok": True, "universe": universe, "method": "compose",
-                         "members": members, "combine": method, "weights": weights,
-                         "n_dates": n_dates, "pbo": pbo_block, "composite": composite})
+                          "members": members, "combine": method, "weights": weights,
+                          "n_dates": n_dates, "pbo": pbo_block,
+                          "factor_artifact": factor_artifact,
+                          "composite": composite})
 
 
 def _factor_report2(body: "FactorReport2In") -> JSONResponse:
@@ -3247,7 +4124,8 @@ def _factor_report2(body: "FactorReport2In") -> JSONResponse:
 
     universe = (body.universe or "csi_fast").strip() or "csi_fast"
     expr = (body.expr_or_name or "").strip()
-    if not expr:
+    raw_factor_artifact = getattr(body, "factor_artifact", None)
+    if not expr and not raw_factor_artifact:
         return _fail_factor(universe, "因子表达式/名称不能为空", method="report2")
 
     freq = (body.freq or "month").strip() or "month"
@@ -3290,22 +4168,87 @@ def _factor_report2(body: "FactorReport2In") -> JSONResponse:
     panel, _ref_warn = _inject_market_refs(panel, getattr(body, "benchmark", None),
                                            getattr(body, "leader", None), start, end, "day")
 
-    # —— 编译因子(注册名优先,否则 zoo 表达式)+ 方向 ——
-    try:
-        from financial_analyst.factors.zoo.expr import compile_factor, validate_expr
-        from financial_analyst.factors.zoo.registry import get as _get_alpha
+    # —— 物化因子。拟合 artifact 优先；否则保持注册名/公式旧路径。——
+    registered_factor_spec = None
+    registered_replay_audit = None
+    materialized_factor_artifact = None
+    if raw_factor_artifact:
+        if getattr(body, "orthogonalization", None):
+            return _fail_factor(
+                universe, "factor artifact 已是最终拟合信号，不能再叠加 orthogonalization",
+                method="report2", start=start, end=end,
+            )
         try:
-            factor_s = _get_alpha(expr).compute(panel)
-        except KeyError:
-            validate_expr(expr)
-            factor_s = compile_factor(expr)(panel)
-    except Exception as exc:  # noqa: BLE001
-        return _fail_factor(universe, f"{type(exc).__name__}: {exc}", method="report2", start=start, end=end)
+            factor_s, materialized_factor_artifact = _artifact_factor_for_panel(
+                raw_factor_artifact, panel,
+            )
+            expr = str(materialized_factor_artifact.get("label") or
+                       materialized_factor_artifact.get("id") or "fitted factor")
+        except Exception as exc:  # noqa: BLE001 - artifacts fail closed
+            return _fail_factor(
+                universe, f"factor_artifact_error: {type(exc).__name__}: {exc}",
+                method="report2", start=start, end=end,
+            )
+    else:
+        try:
+            from financial_analyst.factors.zoo.expr import compile_factor, validate_expr
+            from financial_analyst.factors.zoo.registry import get as _get_alpha
+            try:
+                registered = _get_alpha(expr)
+                registered_factor_spec = getattr(
+                    registered.compute, "__guanlan_factor_spec__", None,
+                )
+                if isinstance(registered_factor_spec, dict):
+                    if getattr(body, "orthogonalization", None):
+                        return _fail_factor(
+                            universe,
+                            "factor_spec 注册因子已自带正交化变换，不能再叠加 orthogonalization",
+                            method="report2", start=start, end=end,
+                        )
+                    factor_s, registered_factor_spec = _materialize_structured_base(
+                        registered, panel,
+                    )
+                    factor_s, registered_replay_audit = _orthogonalize_from_spec(
+                        factor_s, panel, registered_factor_spec.get("transform"),
+                        dependency_bindings=(
+                            registered_factor_spec.get("dependencies") or {}
+                        ).get("existing_factors"),
+                    )
+                    registered_replay_audit.setdefault("artifact", {})["factorlib_name"] = expr
+                else:
+                    factor_s = registered.compute(panel)
+            except KeyError:
+                validate_expr(expr)
+                factor_s = compile_factor(expr)(panel)
+        except Exception as exc:  # noqa: BLE001
+            return _fail_factor(universe, f"{type(exc).__name__}: {exc}", method="report2", start=start, end=end)
     if not isinstance(factor_s, pd.Series):
         return _fail_factor(universe, f"因子求值返回 {type(factor_s).__name__}, 期望 pd.Series",
                             method="report2", start=start, end=end)
     if direction < 0:
         factor_s = -factor_s
+
+    orthogonalize_info: Dict[str, Any] = (
+        registered_replay_audit if isinstance(registered_replay_audit, dict)
+        else {"requested": False, "applied": False}
+    )
+    if getattr(body, "orthogonalization", None):
+        try:
+            factor_s, orthogonalize_info = _orthogonalize_from_spec(
+                factor_s, panel, body.orthogonalization,
+            )
+            orthogonalize_info["artifact"]["base_features"] = [expr]
+        except Exception as exc:  # noqa: BLE001 - explicit node must fail closed
+            return _fail_factor(
+                universe, f"orthogonalize_error: {type(exc).__name__}: {exc}",
+                method="report2", start=start, end=end,
+            )
+        if factor_s.dropna().empty:
+            return _fail_factor(
+                universe, "正交化后没有可用截面；请检查控制项覆盖率/共线性/最小样本数",
+                method="report2", start=start, end=end,
+                orthogonalization=orthogonalize_info,
+            )
 
     # —— #1 因子中性化(行业 + 市值):请求时对原始因子做逐日截面 OLS 残差化,残差替代原值。
     #    残差既流入 build_report(报告 ic/分层/多空)又喂外层 headline/ic_decay → 两处口径天然一致。
@@ -3314,7 +4257,9 @@ def _factor_report2(body: "FactorReport2In") -> JSONResponse:
         "requested": bool(getattr(body, "neutralize", False)),
         "applied": False, "by": None, "kept": None, "raw": None, "note": None,
     }
-    if neutralize_info["requested"]:
+    if neutralize_info["requested"] and orthogonalize_info.get("requested"):
+        neutralize_info["note"] = "上游已有独立正交化规范，已跳过分析节点的快捷中性化，避免重复残差化。"
+    elif neutralize_info["requested"]:
         try:
             from guanlan_v2.workflow.factor_neutralize import neutralize_factor
             _mv = panel.total_mv
@@ -3377,6 +4322,8 @@ def _factor_report2(body: "FactorReport2In") -> JSONResponse:
     warnings.extend(_ref_warn or [])   # B2:对标指数/龙头取数告警(如某宽基无真实指数→引导用 csmean 代理)
     if neutralize_info.get("note"):    # #1 中性化结果/降级显形(应用成功或诚实跳过都进 warnings)
         warnings.append(neutralize_info["note"])
+    if orthogonalize_info.get("requested"):
+        warnings.append(str(orthogonalize_info.get("note") or "已应用因子正交化。"))
     if n_dates < 12:
         warnings.append(f"OOS 有效调仓期太短 ({n_dates} < 12), 结论不稳健。")
     # W7 样本外体检:IS/OOS RankIC 并排 + 衰减判定(尾段法;oos_frac>0 才切)。
@@ -3390,7 +4337,10 @@ def _factor_report2(body: "FactorReport2In") -> JSONResponse:
     out: Dict[str, Any] = {
         "ok": True, "universe": universe, "method": "report2",
         "expr_or_name": expr, "freq": freq, "n_groups": n_groups, "fwd_days": fwd_days, "direction": direction,
+        "factor_spec": (registered_factor_spec if isinstance(registered_factor_spec, dict) else None),
+        "factor_artifact": materialized_factor_artifact,
         "neutralize": neutralize_info,   # #1 中性化:requested/applied/by(行业/市值)/kept/raw/note
+        "orthogonalization": orthogonalize_info,
         "n_dates": n_dates, "n_codes": int(report.meta.n_codes),
         "oos": oos_block,   # W7 样本外体检块(enabled/is/oos/decay_ratio/verdict/note)
         "walkforward": wf_block,   # W7-2 walk-forward 逐段 RankIC + 汇总
@@ -3407,7 +4357,446 @@ def _factor_report2(body: "FactorReport2In") -> JSONResponse:
         "report": rep_dict, "composite": True,
         "_label": expr, "_universe": universe,
     }
-    return JSONResponse(out)
+    return JSONResponse(_jsonable(out))
+
+
+class OverfitAuditIn(BaseModel):
+    """Strict workflow overfit-audit evidence contract.
+
+    ``trial_returns`` is always T×N and ``n_trials`` must come from TrialLedger.
+    Both may be absent for a manual one-off backtest; that yields INCOMPLETE,
+    never a fabricated pass.
+    """
+
+    selected_returns: Optional[List[float]] = None
+    return_series: Optional[List[List[Any]]] = None
+    nav_series: Optional[List[List[Any]]] = None
+    trial_returns: Optional[List[List[float]]] = None
+    trial_dates: Optional[List[str]] = None
+    selection_score_matrix: Optional[List[List[float]]] = None
+    selection_dates: Optional[List[str]] = None
+    eligible_column_indices: Optional[List[int]] = None
+    selected_column_index: Optional[int] = None
+    selection_objective: Optional[str] = None
+    selection_score_source: Optional[str] = None
+    selection_eligibility_scope: Optional[str] = None
+    selection_rule_digest: Optional[str] = None
+    n_trials: Optional[int] = None
+    family_id: Optional[str] = None
+    selected_trial_id: Optional[str] = None
+    # Only this opaque, server-resolved handle may unlock trusted evidence.
+    # Raw matrix/family fields above remain diagnostic/backward-compatible and
+    # can never self-attest a PASS.
+    audit_context_id: Optional[str] = None
+    periods_per_year: float = 12.0
+    benchmark_sharpe: float = 0.0
+    confidence: float = 0.95
+    n_blocks: int = 8
+    min_observations: int = 16
+    dsr_min: float = 0.95
+    psr_min: float = 0.95
+    adjusted_psr_min: float = 0.95
+    pbo_max: float = 0.30
+    overlapping_returns: bool = False
+
+
+def _strict_dated_values(rows, *, name: str, positive: bool) -> "tuple[List[float], List[str]]":
+    """Validate dated observations without sorting, filling or dropping rows."""
+    import numpy as np
+    import pandas as pd
+
+    if not isinstance(rows, list) or not rows:
+        raise ValueError(f"{name} 至少需要 1 个 [date,value] 点")
+    parsed = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            raise ValueError(f"{name} 每项必须是 [date,value]")
+        ts = pd.Timestamp(row[0])
+        if pd.isna(ts):
+            raise ValueError(f"{name} 日期不能为空/NaT")
+        value = float(row[1])
+        if not np.isfinite(value) or (positive and value <= 0):
+            rule = "有限正数" if positive else "有限数"
+            raise ValueError(f"{name} 数值必须为{rule}")
+        parsed.append((ts, value))
+    dates = [item[0] for item in parsed]
+    if any(right <= left for left, right in zip(dates, dates[1:])):
+        raise ValueError(f"{name} 日期必须严格递增，系统不会静默排序")
+    return [float(item[1]) for item in parsed], [str(d.date()) for d in dates]
+
+
+def _returns_from_nav(nav_series) -> "tuple[List[float], List[str]]":
+    """Strictly convert dated NAV observations to realised period returns.
+
+    This is a compatibility fallback for imported reports.  Native Guanlan
+    backtests expose ``portfolio.return_series`` so the first realised period is
+    not lost by NAV percentage change.
+    """
+    import numpy as np
+
+    if not isinstance(nav_series, list) or len(nav_series) < 2:
+        raise ValueError("nav_series 至少需要 2 个 [date,nav] 点")
+    nav, dates = _strict_dated_values(nav_series, name="nav_series", positive=True)
+    values = np.asarray(nav, dtype="float64")
+    returns = values[1:] / values[:-1] - 1.0
+    if not np.isfinite(returns).all():
+        raise ValueError("nav_series 生成了非有限收益")
+    return returns.astype(float).tolist(), dates[1:]
+
+
+def _overfit_audit(
+    body: "OverfitAuditIn", *, evidence_store: Any = None,
+    _runtime_candidate_hash: Optional[str] = None,
+    _runtime_data_snapshot: Any = None,
+) -> JSONResponse:
+    """Run the strict audit with a server-only current-execution binding.
+
+    An opaque context authenticates the historical TrialLedger family, but is
+    not a bearer token that may bless an arbitrary current graph.  Formal PASS
+    additionally requires the executor-computed candidate hash and the current
+    backtest's verified panel snapshot.  Neither value exists on
+    :class:`OverfitAuditIn`, so the public HTTP endpoint cannot self-attest them.
+    """
+    selected = body.selected_returns
+    selected_dates: List[str] = []
+    source = "selected_returns"
+    if selected is None and body.return_series is not None:
+        selected, selected_dates = _strict_dated_values(
+            body.return_series, name="return_series", positive=False,
+        )
+        source = "return_series"
+    elif selected is None and body.nav_series is not None:
+        selected, selected_dates = _returns_from_nav(body.nav_series)
+        source = "nav_series"
+
+    trusted = None
+    binding_reasons: List[str] = []
+    expected_candidate_hash: Optional[str] = None
+    runtime_candidate_verified = False
+    runtime_snapshot_digest: Optional[str] = None
+    runtime_snapshot_authority: Optional[str] = None
+    runtime_snapshot_strict_pit: Optional[bool] = None
+    runtime_snapshot_verified = False
+    runtime_snapshot = None
+    runtime_snapshot_error: Optional[str] = None
+    selection_tie_break_keys = None
+    # The executor-provided snapshot is useful diagnostic provenance even when
+    # there is no sealed TrialLedger family yet.  Verify its self-digest before
+    # displaying it, but never let that alone upgrade evidence_verified/PASS.
+    if _runtime_data_snapshot is not None:
+        from guanlan_v2.workflow.trial_audit_connector import _verified_backtest_snapshot
+        try:
+            runtime_snapshot = _verified_backtest_snapshot(_runtime_data_snapshot)
+        except Exception as exc:  # noqa: BLE001 - malformed live provenance stays unbound
+            runtime_snapshot_error = f"{type(exc).__name__}: {exc}"
+        else:
+            runtime_snapshot_digest = str(runtime_snapshot.get("digest") or "")
+            runtime_snapshot_authority = str(runtime_snapshot.get("authority") or "")
+            runtime_snapshot_strict_pit = bool(runtime_snapshot.get("strict_pit"))
+    if body.audit_context_id:
+        from guanlan_v2.workflow.trial_audit_connector import default_trial_audit_store
+        trusted = (evidence_store or default_trial_audit_store()).resolve(
+            str(body.audit_context_id)
+        )
+        # The current workflow result must be the exact dated return path bound
+        # to selected_trial_id.  A valid old context cannot bless a new/different
+        # backtest merely because its headline metrics look similar.
+        if body.return_series is None:
+            binding_reasons.append("可信审计上下文要求当前回测提供原生 return_series")
+            live_values, live_dates = [], []
+        else:
+            live_values, live_dates = _strict_dated_values(
+                body.return_series, name="return_series", positive=False,
+            )
+        matrix = trusted.get("trial_returns")
+        trial_dates_ctx = list(trusted.get("trial_dates") or [])
+        selected_id_ctx = str(trusted.get("selected_trial_id") or "")
+        selected_col = trusted.get("selected_column_index")
+        columns = trusted.get("columns")
+        if not (isinstance(matrix, list) and matrix
+                and isinstance(columns, list) and columns
+                and isinstance(selected_col, int) and 0 <= selected_col < len(columns)):
+            raise ValueError("可信审计上下文缺完整矩阵/列绑定")
+        if str((columns[selected_col] or {}).get("trial_id") or "") != selected_id_ctx:
+            raise ValueError("可信审计上下文 selected_trial_id 与列索引不一致")
+        selection_tie_break_keys = [
+            (str((column or {}).get("trial_created_at") or ""),
+             str((column or {}).get("trial_id") or ""))
+            for column in columns
+        ]
+        expected_candidate_hash = str(
+            (columns[selected_col] or {}).get("candidate_hash") or ""
+        )
+        if not _runtime_candidate_hash:
+            binding_reasons.append("缺服务端整图执行生成的当前 candidate_hash 绑定")
+        elif str(_runtime_candidate_hash) != expected_candidate_hash:
+            binding_reasons.append(
+                "当前工作流图/研究参数与 selected_trial_id 的 candidate_hash 不一致"
+            )
+        else:
+            runtime_candidate_verified = True
+
+        if _runtime_data_snapshot is None:
+            binding_reasons.append("缺服务端当前回测 data_snapshot 绑定")
+        elif runtime_snapshot is None:
+            binding_reasons.append(
+                "当前回测 data_snapshot 无法验证: "
+                + (runtime_snapshot_error or "未知错误")
+            )
+        else:
+            if runtime_snapshot_digest != str(
+                trusted.get("data_snapshot_digest") or ""
+            ):
+                binding_reasons.append(
+                    "当前回测 data_snapshot 与 TrialLedger 封存快照不一致"
+                )
+            elif (
+                runtime_snapshot_authority
+                != trusted.get("data_snapshot_authority")
+                or runtime_snapshot_strict_pit
+                != trusted.get("data_snapshot_strict_pit")
+            ):
+                # Digest equality already binds these claims.  Keep an
+                # explicit defensive comparison so a future envelope
+                # migration cannot silently weaken the current contract.
+                binding_reasons.append(
+                    "当前回测 data_snapshot 权威/PIT 声明与封存上下文不一致"
+                )
+            else:
+                runtime_snapshot_verified = True
+        try:
+            selected_ctx = [float(row[selected_col]) for row in matrix]
+        except (TypeError, ValueError, IndexError) as exc:
+            raise ValueError("可信审计上下文 T×N 矩阵形状无效") from exc
+        declared_selected = [float(v) for v in (trusted.get("selected_returns") or [])]
+        if selected_ctx != declared_selected:
+            raise ValueError("可信审计上下文的 selected_returns 不是所声明试验列")
+        if live_dates != trial_dates_ctx:
+            binding_reasons.append("当前回测日期与 TrialLedger 试验矩阵不逐项一致")
+        from guanlan_v2.orchestration.digest import content_digest
+        live_digest = content_digest({
+            "domain": "trial-return-series-v1",
+            "frequency": trusted.get("frequency"),
+            "dates": live_dates,
+            "returns": live_values,
+        }) if live_dates and live_values else None
+        if live_digest != trusted.get("selected_return_series_digest"):
+            binding_reasons.append("当前回测收益与 selected_trial_id 对应矩阵列不逐项一致")
+        selected = selected_ctx
+        selected_dates = trial_dates_ctx
+        source = "server_trial_ledger_context"
+
+    trial_returns = trusted.get("trial_returns") if trusted is not None else body.trial_returns
+    n_trials = trusted.get("n_trials") if trusted is not None else body.n_trials
+    family_id = trusted.get("family_id") if trusted is not None else body.family_id
+    selected_trial_id = (trusted.get("selected_trial_id") if trusted is not None
+                         else body.selected_trial_id)
+    trial_dates_input = (trusted.get("trial_dates") if trusted is not None
+                         else body.trial_dates)
+    selection_score_matrix = (
+        trusted.get("selection_score_matrix") if trusted is not None
+        else body.selection_score_matrix
+    )
+    selection_dates_input = (
+        trusted.get("selection_dates") if trusted is not None else body.selection_dates
+    )
+    eligible_column_indices = (
+        trusted.get("eligible_column_indices") if trusted is not None
+        else body.eligible_column_indices
+    )
+    selected_column_index = (
+        trusted.get("selected_column_index") if trusted is not None
+        else body.selected_column_index
+    )
+    selection_objective = (
+        trusted.get("selection_objective") if trusted is not None
+        else body.selection_objective
+    )
+    selection_score_source = (
+        trusted.get("selection_score_source") if trusted is not None
+        else body.selection_score_source
+    )
+    selection_eligibility_scope = (
+        trusted.get("selection_eligibility_scope") if trusted is not None
+        else body.selection_eligibility_scope
+    )
+    selection_rule_digest = (
+        trusted.get("selection_rule_digest") if trusted is not None
+        else body.selection_rule_digest
+    )
+    policy = trusted.get("audit_policy") if trusted is not None else None
+    if trusted is not None and not isinstance(policy, dict):
+        raise ValueError("可信审计上下文缺服务端 Governor 策略")
+    from guanlan_v2.workflow.overfit_audit import audit_overfit
+    report = audit_overfit(
+        selected,
+        trial_returns,
+        n_trials,
+        selection_score_matrix=selection_score_matrix,
+        eligible_column_indices=eligible_column_indices,
+        selected_column_index=selected_column_index,
+        selection_tie_break_keys=selection_tie_break_keys,
+        selection_objective=selection_objective,
+        selection_score_source=selection_score_source,
+        selection_eligibility_scope=selection_eligibility_scope,
+        selection_rule_digest=selection_rule_digest,
+        benchmark_sharpe=float(policy["benchmark_sharpe"] if policy is not None
+                               else body.benchmark_sharpe),
+        confidence=float(policy["confidence"] if policy is not None else body.confidence),
+        n_blocks=int(policy["n_blocks"] if policy is not None else body.n_blocks),
+        min_observations=int(policy["min_observations"] if policy is not None
+                             else body.min_observations),
+        dsr_min=float(policy["dsr_min"] if policy is not None else body.dsr_min),
+        psr_min=float(policy["psr_min"] if policy is not None else body.psr_min),
+        adjusted_psr_min=float(policy["adjusted_psr_min"] if policy is not None
+                               else body.adjusted_psr_min),
+        pbo_max=float(policy["pbo_max"] if policy is not None else body.pbo_max),
+    )
+    ppy = float((trusted or {}).get("periods_per_year") or body.periods_per_year or 0.0)
+    if not math.isfinite(ppy) or ppy <= 0:
+        raise ValueError("periods_per_year 必须是有限正数")
+    observed = (report.get("metrics") or {}).get("observed_sharpe")
+    if observed is not None:
+        report["metrics"]["observed_sharpe_annualized"] = float(observed) * math.sqrt(ppy)
+    warnings = list(report.get("warnings") or [])
+    if source == "nav_series":
+        warnings.append("NAV 兼容推导会丢失首个已实现收益期；原生回测应使用 return_series。")
+    if body.overlapping_returns:
+        warnings.append("输入收益存在重叠窗口；PSR/DSR 的独立同分布近似可能偏乐观。")
+    attestation_reasons: List[str] = []
+    trial_dates: List[str] = []
+    selection_dates: List[str] = []
+    if trial_returns is not None:
+        if not selected_dates:
+            attestation_reasons.append("入选收益缺少逐期日期，无法与试验矩阵做逐项同期校验")
+        if not trial_dates_input:
+            attestation_reasons.append("trial_dates 缺失，无法证明试验矩阵与入选收益同期")
+        else:
+            # Reuse the strict increasing-date parser with harmless finite dummy
+            # values so dates are never silently sorted or de-duplicated.
+            _, trial_dates = _strict_dated_values(
+                [[d, 0.0] for d in trial_dates_input], name="trial_dates", positive=False,
+            )
+            if len(trial_dates) != len(trial_returns):
+                attestation_reasons.append("trial_dates 长度与 trial_returns 行数不一致")
+            if selected_dates and trial_dates != selected_dates:
+                attestation_reasons.append("trial_dates 与入选策略收益日期不逐项一致")
+        if not family_id:
+            attestation_reasons.append("family_id 缺失")
+        if not selected_trial_id:
+            attestation_reasons.append("selected_trial_id 缺失")
+    if selection_score_matrix is not None:
+        if not selection_dates_input:
+            attestation_reasons.append(
+                "selection_dates 缺失，无法证明 RankIC 选择矩阵的时间顺序"
+            )
+        else:
+            _, selection_dates = _strict_dated_values(
+                [[d, 0.0] for d in selection_dates_input],
+                name="selection_dates", positive=False,
+            )
+            if len(selection_dates) != len(selection_score_matrix):
+                attestation_reasons.append(
+                    "selection_dates 长度与 selection_score_matrix 行数不一致"
+                )
+    attestation_reasons.extend(binding_reasons)
+    evidence_verified = bool(trusted is not None and not attestation_reasons)
+    # The public/browser payload is diagnostic evidence, not an immutable ledger
+    # attestation.  Never let caller-supplied matrices unlock a governance PASS.
+    statistical_status = report.get("status")
+    if statistical_status == "PASS" and not evidence_verified:
+        report["status"] = "INCOMPLETE"
+        report["passes_gate"] = False
+        report["statistical_status"] = statistical_status
+        report["reasons"] = (
+            attestation_reasons
+            + ([] if trusted is not None else ["试验家族尚未经服务端不可变 TrialLedger 校验"])
+        )
+    report["warnings"] = warnings
+    report.setdefault("evidence", {})["trial_dates_aligned"] = bool(
+        trial_dates and selected_dates and trial_dates == selected_dates
+    )
+    report["evidence"]["selection_dates_verified"] = bool(
+        selection_dates and selection_score_matrix is not None
+        and len(selection_dates) == len(selection_score_matrix)
+    )
+    report["evidence"].update({
+        "context_id": (trusted or {}).get("context_id"),
+        "evidence_digest": (trusted or {}).get("evidence_digest"),
+        "ledger_data_context_hash": (trusted or {}).get("ledger_data_context_hash"),
+        "data_snapshot_digest": ((trusted or {}).get("data_snapshot_digest")
+                                 if trusted is not None else runtime_snapshot_digest),
+        "data_snapshot_authority": ((trusted or {}).get("data_snapshot_authority")
+                                    if trusted is not None else runtime_snapshot_authority),
+        "data_snapshot_strict_pit": ((trusted or {}).get("data_snapshot_strict_pit")
+                                     if trusted is not None else runtime_snapshot_strict_pit),
+        "selected_column_index": (trusted or {}).get("selected_column_index"),
+        "selection_score_matrix_digest": (trusted or {}).get(
+            "selection_score_matrix_digest"
+        ),
+        "selection_rule_digest": selection_rule_digest,
+        "runtime_candidate_hash": _runtime_candidate_hash,
+        "expected_candidate_hash": expected_candidate_hash,
+        "runtime_candidate_verified": runtime_candidate_verified,
+        "runtime_data_snapshot_digest": runtime_snapshot_digest,
+        "runtime_data_snapshot_verified": runtime_snapshot_verified,
+        "ledger_result_digest": next((
+            c.get("ledger_result_digest") for c in ((trusted or {}).get("columns") or [])
+            if c.get("trial_id") == selected_trial_id
+        ), None),
+    })
+    report.update({
+        "ok": True,
+        "__dt": "overfit_audit",
+        "method": "overfit_audit",
+        "source": source,
+        "periods_per_year": ppy,
+        "date_start": selected_dates[0] if selected_dates else None,
+        "date_end": selected_dates[-1] if selected_dates else None,
+        "family_id": family_id,
+        "selected_trial_id": selected_trial_id,
+        "audit_context_id": (trusted or {}).get("context_id"),
+        "audit_policy_version": (trusted or {}).get("audit_policy_version"),
+        "audit_policy_digest": (trusted or {}).get("audit_policy_digest"),
+        "selection_objective": selection_objective,
+        "selection_score_source": selection_score_source,
+        "selection_eligibility_scope": selection_eligibility_scope,
+        "selection_rule_digest": selection_rule_digest,
+        "data_snapshot_digest": ((trusted or {}).get("data_snapshot_digest")
+                                 if trusted is not None else runtime_snapshot_digest),
+        "data_snapshot_authority": ((trusted or {}).get("data_snapshot_authority")
+                                    if trusted is not None else runtime_snapshot_authority),
+        "data_snapshot_strict_pit": ((trusted or {}).get("data_snapshot_strict_pit")
+                                     if trusted is not None else runtime_snapshot_strict_pit),
+        "policy_authority": (
+            "server_governor_policy" if trusted is not None else "caller_diagnostic"
+        ),
+        "evidence_verified": bool(evidence_verified),
+        "evidence_authority": (
+            "server_trial_ledger" if evidence_verified
+            else ("server_trial_ledger_unbound" if trusted is not None else "caller_supplied")
+        ),
+        "selection_binding": {
+            "verified": bool(evidence_verified),
+            "selected_trial_id": selected_trial_id,
+            "selected_column_index": (trusted or {}).get("selected_column_index"),
+            "return_series_digest": (trusted or {}).get("selected_return_series_digest"),
+            "selection_score_series_digest": (trusted or {}).get(
+                "selected_selection_score_series_digest"
+            ),
+            "selection_score_matrix_digest": (trusted or {}).get(
+                "selection_score_matrix_digest"
+            ),
+            "selection_rule_digest": selection_rule_digest,
+            "evidence_digest": (trusted or {}).get("evidence_digest"),
+            "candidate_hash": expected_candidate_hash,
+            "runtime_candidate_hash": _runtime_candidate_hash,
+            "candidate_verified": runtime_candidate_verified,
+            "runtime_data_snapshot_digest": runtime_snapshot_digest,
+            "data_snapshot_verified": runtime_snapshot_verified,
+        },
+    })
+    return JSONResponse(_jsonable(report))
 
 
 # ───────── 单票时序因子评测 · 标准工具箱(P1)— 纯函数,入 pandas Series/标量,出 JSON 安全 dict ─────────
@@ -4149,7 +5538,7 @@ def _factor_tsic(body: "FactorTsicIn") -> JSONResponse:
         "warnings": warnings, "status": "ok",
         "_label": expr, "_universe": universe,
     }
-    return JSONResponse(out)
+    return JSONResponse(_jsonable(out))
 
 
 class FactorEventIn(ModelTrainIn):
@@ -4282,7 +5671,7 @@ def _factor_event(body: "FactorEventIn") -> JSONResponse:
         "warnings": warnings, "status": "ok",
         "_label": expr, "_universe": universe,
     }
-    return JSONResponse(out)
+    return JSONResponse(_jsonable(out))
 
 
 class FactorRelstatIn(ModelTrainIn):
@@ -4787,13 +6176,17 @@ def _tvbeta(body: "FactorTVBetaIn") -> JSONResponse:
 # HTTP 200(对齐 _fail / _fail_model / _fail_factor),绝不抛 500。
 # ════════════════════════════════════════════════════════════════════════════
 
-# 节点目录(24 类)——逐字搬入调研 catalog_json,作 LLM grounding + validate_graph
+# 节点目录——逐字搬入调研 catalog_json,作 LLM grounding + validate_graph
 # 唯一真值表。键序与 docs/workflow_api.md §2、workflow.jsx SPECS 一致;每类含
 # cat(分组)/in([端口id, dt] 列表)/out([端口id, dt] 列表)/params(参数名列表)。
 _CATALOG: Dict[str, Dict[str, Any]] = {
+    "history_screen": {"cat": "io", "in": [["src", "series"]], "out": [["history", "screen_history"]], "params": ["branches", "ranking", "evaluation_start", "label"]},
+    "daily_backtest": {"cat": "bt", "in": [["history", "screen_history"]], "out": [["result", "result"]], "params": ["topn", "rebalance", "weight_mode", "initial_cash", "commission", "sell_tax", "slippage_bps"]},
     "source":    {"cat": "io", "in": [],                                                  "out": [["data", "series"]],   "params": ["scope", "code", "codes", "universe", "benchmark", "leader"]},
+    "data_screen": {"cat": "io", "in": [["src", "series"]],                         "out": [["candidates", "data_screen"]], "params": ["preset", "ma_window", "rising_transitions", "below_lookback", "max_consecutive_below", "min_bias", "max_bias", "top_n", "min_avg_amount_yi", "amount_window"]},
     "formula":   {"cat": "io", "in": [],                                                  "out": [["out", "series"]],    "params": ["expr"]},
     "factorlib": {"cat": "io", "in": [],                                                  "out": [["out", "series"]],    "params": ["query", "name"]},
+    "orthogonalize": {"cat": "mf", "in": [["signal", "series"], ["src", "series"]],     "out": [["factor", "factor"]], "params": ["industry", "size", "styles", "old_factors", "min_obs", "max_condition_number"]},
     "feature":   {"cat": "fe", "in": [["feat", "series"], ["label", "series"], ["src", "series"]], "out": [["fe", "fe"]], "params": ["tag"]},
     "xgb":       {"cat": "ml", "in": [["fe", "fe"]],                                      "out": [["model", "model"]],   "params": ["trees", "depth", "lr", "sub"]},
     "lgbm":      {"cat": "ml", "in": [["fe", "fe"]],                                      "out": [["model", "model"]],   "params": ["leaves", "lr"]},
@@ -4809,7 +6202,10 @@ _CATALOG: Dict[str, Dict[str, Any]] = {
     "tsic":      {"cat": "fa", "in": [["factor", "series"], ["src", "series"]],            "out": [["tsic", "tsic"]],     "params": ["fwd_days"]},
     "event":     {"cat": "fa", "in": [["trigger", "series"], ["src", "series"]],           "out": [["event", "event"]],   "params": ["horizons", "direction"]},
     "relstat":   {"cat": "fa", "in": [["factor", "series"], ["src", "series"]],             "out": [["relstat", "relstat"]], "params": []},
-    "backtest":  {"cat": "bt", "in": [["factor", "factor"], ["pf", "portfolio"]],         "out": [["result", "result"]], "params": ["cash", "topn", "combine", "weighting", "vol_forecast"]},
+    "backtest":  {"cat": "bt", "in": [["factor", "factor"], ["pf", "portfolio"]],         "out": [["result", "result"]], "params": ["cash", "start", "end", "topn", "rebalance", "commission", "stamp_tax", "slippage", "combine", "weighting", "vol_forecast"]},
+    # audit_context_id is deliberately not prompt/catalog configurable.  Only
+    # the server-side research finalizer injects that opaque handle.
+    "overfit":   {"cat": "fa", "in": [["result", "result"]],                             "out": [["audit", "audit"]],   "params": ["confidence", "pbo_max", "n_blocks"]},
     "portfolio": {"cat": "bt", "in": [["factor", "factor"]],                              "out": [["pf", "portfolio"]],  "params": ["topn", "weighting", "max_weight", "industry_neutral", "vol_forecast"]},
     "risk":      {"cat": "bt", "in": [["factor", "series"]],                              "out": [["risk", "risk"]],     "params": ["topn"]},
     "garch":     {"cat": "bt", "in": [["factor", "series"]],                              "out": [["garch", "garch"]],   "params": ["topn", "horizon"]},
@@ -4818,15 +6214,15 @@ _CATALOG: Dict[str, Dict[str, Any]] = {
 }
 
 # 终端节点(产出 report/ic/result/portfolio/risk/garch/attrib/tvbeta → 结果抽屉);至少 1 个图才合法(docs §8.3)。
-_TERMINAL_TYPES = {"analysis", "iccalc", "backtest", "portfolio", "tsic", "event", "relstat", "risk", "garch", "attrib", "tvbeta"}
+_TERMINAL_TYPES = {"data_screen", "daily_backtest", "analysis", "iccalc", "backtest", "overfit", "portfolio", "tsic", "event", "relstat", "risk", "garch", "attrib", "tvbeta"}
 
 # formula.expr 禁含的危险子串(受限 eval,docs §4)。
 _DSL_FORBIDDEN = ("__", "import", "lambda")
 
 # universe 枚举(docs §6 + source 允许 '自动' 按 code 推断)。
 _UNIVERSE_OK = {
-    "csi300_active", "csi_fast", "csi300_2024h2", "csi500", "csi800",
-    "all", "etf", "sample30", "自动",
+    "csi300", "csi300_active", "csi_fast", "csi300_2024h2", "csi500", "csi800", "csi1000",
+    "all_a", "all", "etf", "sample30", "自动",
 }
 
 
@@ -4837,14 +6233,18 @@ SYSTEM_PROMPT = """你是「观澜」A 股量化研究工作台的工作流编�
 
 【输出契约 · 最重要】
 只输出**一个 JSON 对象** `{"nodes":[...], "edges":[...]}`。不要任何解释、前后缀文字、Markdown 代码块(不要 ```json 围栏)。
-- 每个 node 必含:`id`(图内唯一字符串,如 "n1")、`type`(下方 24 类之一)、`x`(整数像素)、`y`(整数像素)、`params`(对象,可空 {})。
+- 每个 node 必含:`id`(图内唯一字符串,如 "n1")、`type`(下方当前目录类型之一)、`x`(整数像素)、`y`(整数像素)、`params`(对象,可空 {})。
 - 每条 edge:`{"from":[源节点id, 源输出端口id], "to":[目标节点id, 目标输入端口id]}`。
 - 布局:链从左到右 x 每级 +280;y 取 120-500;并行支路用不同 y。坐标只影响观感不影响运行。
 
-【节点目录 · 只能从这 24 类里选】格式 = type | 入端口:dt | 出端口:dt | 参数
-- source    | (无入口) | data:series | scope,code,universe — 设 universe/股票池;**其 data 口必须连到某个 feature 的 src 口**,否则股票池/样本外占比不下传(会退回默认池)。图里放一个即可
+【节点目录 · 只能从当前目录里选】格式 = type | 入端口:dt | 出端口:dt | 参数
+- history_screen | src:series(只接 source.data) | history:screen_history | branches,ranking=nearest_ma10_ma20,evaluation_start,label — 历史逐日筛选，branches为1至8个受控data_screen请求（各分支conditions内部AND，分支间OR），共用过滤器；source必须显式具名指数/代码和日线起止日。每日重算全部候选，再统一排名。不能用当日候选替代历史。数据预热与评估起点独立；静态成分/当前ST不冒充历史PIT。
+- daily_backtest | history:screen_history(只接 history_screen.history) | result:result | topn=10,rebalance=day,weight_mode=fixed_slots,initial_cash=1000000,commission=0.0003,sell_tax=0.0005,slippage_bps=5 — 日频模拟调仓，收盘信号次日开盘模拟，不足候选留现金；缺开盘持仓保留，缺收盘估值需标注陈旧；不下单。验证筛选策略用 source→history_screen→daily_backtest；普通因子backtest语义不变。
+- source    | (无入口) | data:series | scope,code,codes,universe,start,end,benchmark,oos_frac,wf_refit,research_freq — 显式股票池/代码及日期；research_freq=day/week/month 是研究采样和标签周期，5交易日指标用 day，不要把5周冒充5日。旧 freq 是行情日线字段，不能替代 research_freq。wf_refit=true 启用滚动重训。普通特征路线连 feature.src，直接正交路线连 orthogonalize.src；无src终端用 context_source_id 引用数据源。图里一个即可，多源须明确引用，不能猜首源
+- data_screen | src:series(只接 source.data) | candidates:data_screen(终端) | preset=ma_trend,ma_window,rising_transitions,below_lookback,max_consecutive_below,min_bias,max_bias,top_n,min_avg_amount_yi,amount_window — **确定性数据筛选 Skill 节点**。用户明确要用工作流筛出满足均线/时序硬条件的股票时用；它逐票执行受控规则并产 ds_* 证据，不得改成 formula→analysis 或问财近似。它是**当前截面终端**，candidates 不得连接任何下游或历史回测；历史规则回放另用 history_screen→daily_backtest，不改变本节点当前截面语义
 - formula   | (无入口) | out:series | expr — **造因子主入口**,expr 写一条 DSL 表达式
 - factorlib | (无入口) | out:series | query,name — 选一个已注册因子
+- orthogonalize | signal:series, src:series(接 source.data,下传研究上下文) | factor:factor | industry,size,styles,old_factors,min_obs — 把公式/因子库因子转成可重放正交因子规范;下游分析/组合/回测统一逐日剥离行业、规模、风格及已有因子暴露
 - feature   | feat:series, label:series(可选), src:series(接 source.data,下传股票池) | fe:fe | tag — 把上游公式物化成真 X/y;fe 块是 ML/PCA 入口。**tag 只能留空或写 "IC"/"fwd_ret"(展示标注,默认标签=未来收益);写任何其他文本会被当作 label DSL 表达式执行(如 tag:"ML" 会炸 ML 训练)**;自定义预测标签用 formula 连 label 口,绝不写进 tag
 - xgb       | fe:fe | model:model | trees,depth,lr,sub
 - lgbm      | fe:fe | model:model | leaves,lr
@@ -4855,39 +6255,44 @@ SYSTEM_PROMPT = """你是「观澜」A 股量化研究工作台的工作流编�
 - pca       | fe:fe | factor:factor | k
 - spearman  | fe:fe | factor:factor | (无参)
 - iccalc    | factor:factor | ic:ic(终端) | period
-- mf        | m1:model, f1:fe, m2:model, f2:fe | factor:factor | combine(equal/ic/icir) — 两用桥:① model→factor 的唯一桥(ML);② **多因子合成**:图里放≥2 个 formula(各写一条因子表达式),并把其中一条经 feature 接到 mf.f1,mf 会把图内所有 formula 表达式按 combine 合成(ic/icir=按样本内 rank-IC/ICIR 加权,负腿自动反向;equal=等权)。combine 默认 equal,多因子合成优先用 icir
+- mf        | m1:model, f1:fe, m2:model, f2:fe | factor:factor | combine(equal/ic/icir) — 两用桥:① model→factor 的唯一桥(ML)，多模型只支持预设等权；② 多因子合成：全部 formula 显式连入 feature.feat，再 feature.fe→mf.f1；仅使用连线上的特征，combine 默认 equal。ic/icir 只在独立校准段估权，再报告后续样本外成绩
 - analysis  | factor:factor | report:report(终端) | rebal,groups,dir — **截面IC**(一篮子股票横比),需 universe;单票会退化别用
 - tsic      | factor:series(接 formula 因子), src:series(接 source.data) | tsic:tsic(终端) | fwd_days — **个股/单票时序IC**:每股因子值 vs 自身未来收益的相关。单票/小池(scope=个股/自选)选它,**不要套 rank**(用时序/共振/财务因子)
 - event     | trigger:series(接 formula 触发式), src:series(接 source.data) | event:event(终端) | horizons,direction — **事件研究**:把 >0 触发式当离散事件,统计触发后 CAR/命中率/t值/逐年/盈亏比。反弹/异动/放量/跳空/消息面等**稀疏布尔触发**选它(截面IC对布尔信号是错口径);**跑股票池**(市场调整=池内均值,设 benchmark 用真大盘),单票需设 benchmark 才不退化
 - relstat   | factor:series(接 formula 关系因子), src:series(接 source.data) | relstat:relstat(终端) | (无参) — **关系稳定度**:共振/跟随等关系因子的描述体检(均值水平/波动/lag1自相关粘性/正占比),是 tsic 预测力的描述补充。想"看这关系强不强、稳不稳"(而非预测收益)用它
-- backtest  | factor:factor(或 pf:portfolio) | result:result(终端) | cash,topn,weighting,vol_forecast — weighting=持仓定权(equal/mktcap/inv_vol/risk_parity/min_var/max_sharpe/true_risk_parity);vol_forecast=波动口径(hist 历史[默认]/ewma/garch 预测),garch 让 inv_vol/min_var 等用「预测波动」定权(回测较慢)
+- backtest  | factor:factor(或 pf:portfolio) | result:result(终端) | cash,start,end,topn,rebalance,commission,stamp_tax,slippage,weighting,vol_forecast — start/end 可显式拉长审计窗口;weighting=持仓定权(equal/mktcap/inv_vol/risk_parity/min_var/max_sharpe/true_risk_parity);vol_forecast=波动口径(hist 历史[默认]/ewma/garch 预测)
+- overfit   | result:result | audit:audit(终端) | confidence,pbo_max,n_blocks — 接在回测后做 PSR/DSR/PBO/MinTRL/Haircut 严格审计;n_blocks 只能取 4–16 偶数,月频建议 24–36 个月;缺 TrialLedger 或完整试验收益矩阵必须 INCOMPLETE,绝不冒充通过
 - portfolio | factor:factor | pf:portfolio(终端) | topn,weighting,max_weight,industry_neutral,vol_forecast — 出最新期目标持仓权重,可再连「回测」的 pf 口;vol_forecast 同回测(hist/ewma/garch)
 - risk      | factor:series(接 formula 因子) | risk:risk(终端) | topn — **风险度量**:建 TopN 多头组合算其损失分布尾部风险:VaR/CVaR(历史·参数·蒙特卡罗三法)+ EVT(POT+GPD 极值尾部估超高分位罕见巨亏)+ Kupiec VaR 回测。默认周频+3年窗(VaR 需更密更长收益样本)。想"这组合最大潜在亏损/尾部风险多大"用它
 - garch     | factor:series(接 formula 因子) | garch:garch(终端) | topn,horizon — **条件波动预测**:建 TopN 多头组合算其净值期收益 → 拟合 EWMA + GARCH(1,1) 出**条件波动路径**(捕捉波动聚集)+ 向前 horizon 步**波动预测**(均值回复到无条件波动)。默认周频+3年窗。想"这组合下一步波动会放大还是收敛/预测未来波动"用它(与 risk 互补:risk 看尾部巨亏,garch 看波动随时间的演化与预测)
 - attrib    | factor:series(接 formula 因子) | attrib:attrib(终端) | topn — **风格归因**:建 TopN 多头组合算其期收益 → 对四个风格因子收益(市场 MKT / 规模 SMB 小盘减大盘 / 价值 HML 高BM减低BM / 动量 WML 赢家减输家)做 OLS + Newey-West HAC 回归,出**因子暴露 β**(各风格载荷与显著性)+ **alpha**(风格无法解释的超额)+ **R²**(风格解释力)+ 各因子**收益贡献**(β×因子均值)。默认月频+3年窗。想"我这策略的收益来自小盘/价值/动量哪种风格、有没有真 alpha"用它(与 risk/garch 同样吃 series 直连)
 - tvbeta    | factor:series(接 formula 因子) | tvbeta:tvbeta(终端) | topn — **时变β(Kalman)**:建 TopN 多头组合算其期收益 → 对市场期收益(全池等权,= attrib 的 MKT)做**时变参数回归** r_t=α_t+β_t·m_t(系数随机游走,Kalman 滤波因果 + RTS 平滑全样本,平滑度由浓缩似然自动 MLE 选)→ 出 **β(t) 演化路径**(滤波单边 + 平滑双边 + ±2se 置信带)+ 静态β对照 + β漂移幅度。默认周频+3年窗。想"我这策略对大盘的暴露随时间怎么漂(择时/风格切换)、现在是高β还是低β"用它(attrib 看静态β,tvbeta 看 β 随时间演化;同样吃 series 直连)
 
-【连线铁律 dt】每条边 `from端口.dt` 必须 === `to端口.dt`(series→series、fe→fe、model→model、factor→factor)。跨 dt 的边非法。dt 产出/接收:
-- series:source.data/formula.out/factorlib.out → feature.feat / feature.label / feature.src / tsic.factor / tsic.src / event.trigger / event.src / relstat.factor(formula 关系因子) / relstat.src / risk.factor(formula 因子;risk 像 backtest 但吃 series 直连) / garch.factor(formula 因子;garch 像 risk 吃 series 直连) / attrib.factor(formula 因子;attrib 像 risk 吃 series 直连) / tvbeta.factor(formula 因子;tvbeta 像 risk 吃 series 直连) / source.data 专接 feature.src / tsic.src / event.src / relstat.src 下传股票池/代码
+【连线铁律 dt】默认每条边 `from端口.dt` 必须 === `to端口.dt`(series→series、fe→fe、model→model、factor→factor)。只有两个有执行器支持的便利连接例外:formula/factorlib 的 series 可直接接入 factor 口；feature.fe 可直接接入 backtest/portfolio 的 factor 口。source.data 是研究上下文，不是可计算序列，只能连接下游 `src` 口。dt 产出/接收:
+- context-series:仅 source.data → data_screen.src / feature.src / orthogonalize.src / tsic.src / event.src / relstat.src,下传股票池/代码/日期/OOS;不得接任何非 src 口
+- factor-series:formula.out/factorlib.out → orthogonalize.signal / feature.feat / feature.label / tsic.factor / event.trigger / relstat.factor / risk.factor / garch.factor / attrib.factor / tvbeta.factor
 - event(dt):仅 event.event 产出 → 终端;relstat(dt):仅 relstat.relstat 产出 → 终端;risk(dt):仅 risk.risk 产出 → 终端;garch(dt):仅 garch.garch 产出 → 终端;attrib(dt):仅 attrib.attrib 产出 → 终端;tvbeta(dt):仅 tvbeta.tvbeta 产出 → 终端;均不接下游
 - fe:仅 feature.fe 产出 → xgb/lgbm/svm/rf/nn/lstm.fe、pca/spearman.fe、mf.f1、mf.f2
 - model:仅 ML 节点.model 产出 → 只能进 mf.m1 / mf.m2
-- factor:仅 pca/spearman/mf.factor 产出 → iccalc/analysis/backtest/portfolio.factor
+- factor:pca/spearman/mf/orthogonalize.factor 产出 → iccalc/analysis/backtest/portfolio.factor；另允许 formula/factorlib.series 直连这些 factor 口，以及 feature.fe 直连 backtest/portfolio.factor
 - portfolio:仅 portfolio.pf 产出 → backtest.pf(可选,不连也能回测)
+- result:backtest.result 或 daily_backtest.result 产出 → overfit.result;audit:仅 overfit.audit 产出并作为审计终端
 
 【硬约束 · 出图前自查】
-1. 每个 node.type ∈ 上述 24 类;每个 node.id 全图唯一非空。
-2. 每条边端口 id 准确,且 from.dt === to.dt。
-3. **至少一个终端节点**(analysis / iccalc / backtest / portfolio / tsic / event / relstat / risk / garch / attrib / tvbeta),否则跑不出结果。
+1. 每个 node.type ∈ 上述当前目录;每个 node.id 全图唯一非空。
+2. 每条边端口 id 准确,且满足上述 dt 同类规则或两个明确便利连接；source.data 只能连接下游 `src` 口。
+3. **至少一个终端节点**(data_screen / daily_backtest / analysis / iccalc / backtest / overfit / portfolio / tsic / event / relstat / risk / garch / attrib / tvbeta),否则跑不出结果。
 4. ML/PCA/Spearman 的入口是 fe → 上游**必须先有 feature 节点**(formula 不能直连模型/PCA)。
-5. **model 要分析或回测必须先经 mf**(model 不能直连 factor 口):路径 model→mf.m1(或 m2)→ mf.factor → analysis/iccalc/backtest;且同时把对应 feature 接 mf.f1(或 f2),mf 才能消费 OOS 报告。**ML 图必须保留 analysis 终端**(模型真实 OOS 成绩的唯一出口);backtest 按特征集等权重推导、不吃模型预测,只能作附加终端,不能替代 analysis 终端。
-6. feature.feat 由 formula/factorlib(因子)喂;**feature.src 必须接 source.data**(下传股票池/样本外占比,缺则退回默认池 csi_fast);feature.label 可选。每张图必须有一个 source 且其 data 连到某 feature.src。**feature.params.tag 只能空/"IC"/"fwd_ret"**,其余文本会被当 label 表达式执行;自定义标签走 label 口。
+5. **model 要分析或回测必须先经 mf**(model 不能直连 factor 口):路径 model→mf.m1(或 m2)→mf.factor→analysis/iccalc/backtest。mf 传递真实不可变 OOS 预测信号 artifact，下游回测消费该信号，不可替换成原始特征之和。多模型只支持预设 equal 权重；不得用同一测试期 IC 估权再报告为样本外成绩。建议同时保留 analysis 和 backtest。回测是研究级次日开盘模拟，未满足实盘成交约束。
+6. feature.feat 由 formula/factorlib(因子)喂;普通特征路线把 source.data 接 feature.src。若走 formula/factorlib→orthogonalize→分析/组合/回测,则把 source.data 接 orthogonalize.src。两种接法都用于下传股票池、日期和样本外占比;缺失会退回默认上下文。feature.label 可选。**feature.params.tag 只能空/"IC"/"fwd_ret"**,其余文本会被当 label 表达式执行;自定义标签走 label 口。
 7. 同一个(节点, 入端口)最多一条入边;**唯一例外:feature.feat 可接多条边**——多个 formula/factorlib 各连一条边到同一 feature 的 feat 口,聚合为多特征(保序去重)供 ML/PCA/Spearman 训练(多特征 ML 首选此法)。不要自连(from 节点 === to 节点)。
 8. formula.expr 不得含 `__` / `import` / `lambda`。
-9. 任一 node.params.universe 若给出,必 ∈ {csi300_active, csi_fast, csi300_2024h2, csi500, csi800, all, etf, sample30, 自动};省略则全图默认 csi_fast。
+9. 任一 node.params.universe 若给出,必 ∈ {csi300, csi300_active, csi_fast, csi300_2024h2, csi500, csi800, csi1000, all_a, all, etf, sample30, 自动};省略则全图默认 csi_fast。all_a 仅供 source.data→data_screen.src；data_screen 的 source 必须显式选池或填写 source.codes，只有 codes 为空时才不能用“自动”。
+10. 每张图最多一个 overfit 过拟合审计节点;审计结果是图级硬门,批判改进不得删除或用普通回测/模型报告绕过。
+11. data_screen 必须由显式股票池(或 source.codes)的 source.data 连接 src；其 candidates 是当前截面终端，不得连接下游。与回测/报告同图时只能是口径独立的并行终端，绝不能声称回测消费了本次候选。
 
 【因子表达式 DSL 白名单(formula.expr)】只用下列字段 + 算子,或一个已注册因子名:
-字段(量价估值):close open high low volume vwap amount returns industry pe_ttm pb ps_ttm dv_ttm total_mv circ_mv turnover_rate;字段(技术·精算,缺则NaN):rsi_14(Wilder RSI) macd_signal(MACD信号线) amihud_20(Amihud非流动性) mom_20 mom_60 mom_120(动量);字段(财务,季频·公告日PIT对齐):roe(净资产收益率) roa(总资产收益率) net_margin(净利率) rev_yoy(营收同比) np_yoy(净利同比) debt_ratio(资产负债率) eps net_income revenue total_equity cfo(净利/营收/净资产/经营现金流,元,原始量);参照字段(选配,需数据源填「对标指数」/「龙头代码」才有):idx_ret(对标宽基指数日收益,如沪深300) ref_ret(龙头股日收益)
+字段(量价估值):close open high low volume vwap amount returns industry pe_ttm pb ps_ttm dv_ttm total_mv circ_mv turnover_rate;字段(技术·因果重算,缺则NaN):rsi_14(EMA span14 RSI,非Wilder) macd_signal(兼容旧名,实际为EMA12-EMA26的DIF) amihud_20(成交额口径Amihud非流动性) mom_20 mom_60 mom_120(动量);字段(财务,季频·公告日PIT对齐):roe(净资产收益率) roa(总资产收益率) net_margin(净利率) rev_yoy(营收同比) np_yoy(净利同比) debt_ratio(资产负债率) eps net_income revenue total_equity cfo(净利/营收/净资产/经营现金流,元,原始量);参照字段(选配,需数据源填「对标指数」/「龙头代码」才有):idx_ret(对标宽基指数日收益,如沪深300) ref_ret(龙头股日收益)
 常用财务因子写法:高质量 `rank(roe)`;高成长 `rank(np_yoy)`;盈利收益率(价值)`rank(net_income/total_mv)`;账面市值比 BM `rank(total_equity/total_mv)`;低杠杆 `rank(-debt_ratio)`;现金含量 `rank(cfo/net_income)`(注:不要把「账面市值比」写成 -pe_ttm,二者不同)。
 算子:rank scale indneutralize csmean(截面/篮子均值,配 correlation 做共振) indmean(x,industry)(所在行业均值,配 correlation 做行业共振) ts_mean ts_sum stddev ts_max ts_min ts_argmax ts_argmin ts_rank delta delay product correlation covariance regbeta(y,x,n)=滚动β(cov/var,共振/跟随弹性) regresi(y,x,n)=回归残差 rsqr(y,x,n)=拟合优度R²(共振强度) sequence(x,n)=时间序号(配 regbeta 算趋势斜率) decay_linear wma sma signedpower power log sign abs max_pair min_pair filter_where cross,以及 + - * / ** 比较 ()
 例:5 日反转 `rank(-delta(close,5))`;20 日动量 `rank(ts_sum(returns,20))`;量价背离 `-correlation(rank(close),rank(volume),10)`;低换手 `-rank(turnover_rate)`;均线突破 `cross(close,ts_mean(close,20))`;篮子共振 `correlation(returns,csmean(returns),20)`(配自选股池);大盘共振 `correlation(returns,idx_ret,20)`(数据源选「对标指数·沪深300」);行业共振 `correlation(returns,indmean(returns,industry),20)`;龙头共振 `correlation(returns,ref_ret,20)`(数据源填「龙头代码」)。
@@ -4923,10 +6328,12 @@ D · **多因子合成**(目标如「ROE质量+账面市值比+净利同比 ICIR
 ],"edges":[
  {"from":["s","data"],"to":["fe","src"]},
  {"from":["f1","out"],"to":["fe","feat"]},
+ {"from":["f2","out"],"to":["fe","feat"]},
+ {"from":["f3","out"],"to":["fe","feat"]},
  {"from":["fe","fe"],"to":["mf","f1"]},
  {"from":["mf","factor"],"to":["an","factor"]}
 ]}
-(要点:N 个 formula 各写一条因子;只需把其中一条经 feature 接进 mf.f1,mf 会把图内**所有** formula 按 combine=icir 合成;f2/f3 不必再连边。末端 analysis 看报告 / 换 backtest 回测。)
+(要点:N 个 formula 各写一条因子，全部显式连接 feature.feat，再经 feature.fe→mf.f1；不能用孤立公式隐式加入模型。IC/ICIR权重只在独立校准段估计，末端仅报告后续样本外区间。)
 E · **个股/单票时序IC**(目标如「立昂微 大盘共振 时序IC」「单只票 605358 测动量时序IC」):单票没有截面 → 用 tsic,不用 analysis、不套 rank。
 {"nodes":[
  {"id":"s","type":"source","x":60,"y":210,"params":{"scope":"自选","codes":"605358","benchmark":"csi300"}},
@@ -5008,27 +6415,45 @@ def _parse_graph(text: str) -> Dict[str, Any]:
 
 
 def _autowire_source(graph) -> None:
-    """P3 自愈:LLM 偶尔漏连 source.data→feature.src(股票池/样本外占比脐带)。若图里有 source +
-    feature 节点、但无任何连到 feature.src 的边,则就地补一条 source.data→第一个 feature.src,
-    保证用户选的股票池真下传(不再静默退回默认池)。LLM 已连则不动。"""
+    """P3 自愈:补齐 source.data→各上下文节点的 src 脐带。
+
+    feature/orthogonalize/诊断节点都依赖这条边下传股票池、日期及 OOS 参数。LLM 已为某个
+    节点连接 src 时保留原边；只给仍缺 src 的节点补边，避免一个已连接分支遮蔽其他分支。
+    """
     try:
         nodes = graph.get("nodes") or []
         edges = graph.get("edges") or []
-        src = next((n for n in nodes if n.get("type") == "source"), None)
-        sinks = [n for n in nodes if n.get("type") in ("feature", "tsic", "event", "relstat")]   # 都有 src 口
-        if not src or not sinks:
+        sources = [n for n in nodes if n.get("type") == "source" and n.get("id")]
+        src = sources[0] if len(sources) == 1 else None
+        sinks = [n for n in nodes if n.get("type") in
+                 ("data_screen", "history_screen", "feature", "orthogonalize", "tsic", "event", "relstat")]  # 都有 src 口
+        if not src:
             return
-        wired = any(isinstance(e.get("to"), list) and len(e["to"]) >= 2 and e["to"][1] == "src"
-                    for e in edges)
-        if wired:
-            return
-        edges.append({"from": [src.get("id"), "data"], "to": [sinks[0].get("id"), "src"]})
+        for node in nodes:
+            if node.get("type") in {"analysis", "iccalc", "backtest", "portfolio", "risk", "garch", "attrib", "tvbeta"}:
+                node.setdefault("params", {}).setdefault("context_source_id", src["id"])
+        source_ids = {n.get("id") for n in sources}
+        wired_sinks = {
+            e["to"][0] for e in edges
+            if isinstance(e, dict) and isinstance(e.get("from"), list)
+            and len(e["from"]) >= 2 and e["from"][0] in source_ids
+            and e["from"][1] == "data"
+            and isinstance(e.get("to"), list) and len(e["to"]) >= 2
+            and e["to"][1] == "src"
+        }
+        for sink in sinks:
+            sink_id = sink.get("id")
+            if sink_id and sink_id not in wired_sinks:
+                edges.append({"from": [src.get("id"), "data"],
+                              "to": [sink_id, "src"]})
         graph["edges"] = edges
     except Exception:  # noqa: BLE001 — 自愈失败不阻断,原图照返
         pass
 
 
-def validate_graph(graph: Any) -> "tuple[bool, List[str]]":
+def validate_graph(
+    graph: Any, *, require_complete: bool = False,
+) -> "tuple[bool, List[str]]":
     """服务端权威校验(纯函数,无 engine 依赖)→ (ok, errors)。对齐 docs §8 + validation_rules。
 
     逐条核:type∈目录 / id 唯一非空 / edge 结构 / 无自环 / 端口存在 + dt 匹配 / 单入边 /
@@ -5047,6 +6472,7 @@ def validate_graph(graph: Any) -> "tuple[bool, List[str]]":
 
     # 2/3. 逐 node 校验 type、id;建 id→type map。
     id_to_type: Dict[str, str] = {}
+    node_by_id: Dict[str, Dict[str, Any]] = {}
     for idx, node in enumerate(nodes):
         if not isinstance(node, dict):
             errors.append(f"第 {idx} 个节点不是对象")
@@ -5061,6 +6487,18 @@ def validate_graph(graph: Any) -> "tuple[bool, List[str]]":
             errors.append(f"节点 {nid if isinstance(nid, str) else idx} type '{ntype}' 不在目录")
         if isinstance(nid, str) and nid.strip() and nid not in id_to_type:
             id_to_type[nid] = ntype if isinstance(ntype, str) else ""
+            node_by_id[nid] = node
+
+    overfit_ids = [nid for nid, ntype in id_to_type.items() if ntype == "overfit"]
+    for nid, node in node_by_id.items():
+        params = node.get("params") or {}
+        ref = params.get("context_source_id") if isinstance(params, dict) else None
+        if ref is not None and (not isinstance(ref, str) or id_to_type.get(ref) != "source"):
+            errors.append(f"节点 {nid} context_source_id 必须引用现有 source 节点")
+    if len(overfit_ids) > 1:
+        errors.append(
+            "每张工作流最多一个 overfit 过拟合审计节点；多个审计没有可比较的聚合统计口径"
+        )
 
     # 端口字典缓存:type → {portId: dt}(out / in 各一份)。
     def _out_map(t: str) -> Dict[str, str]:
@@ -5069,7 +6507,17 @@ def validate_graph(graph: Any) -> "tuple[bool, List[str]]":
     def _in_map(t: str) -> Dict[str, str]:
         return {p: d for p, d in _CATALOG.get(t, {}).get("in", [])}
 
+    def _node_params(nid: str) -> Dict[str, Any]:
+        raw = (node_by_id.get(nid) or {}).get("params")
+        return raw if isinstance(raw, dict) else {}
+
     seen_in_ports: set = set()  # (dstId, dstPort) 去重 → 单入边
+    wired_data_screens: Dict[str, str] = {}
+    all_a_source_edges: Dict[str, int] = {
+        nid: 0 for nid, ntype in id_to_type.items()
+        if ntype == "source"
+        and str(_node_params(nid).get("universe") or "").strip() == "all_a"
+    }
     has_terminal = any(
         isinstance(n, dict) and n.get("type") in _TERMINAL_TYPES for n in nodes
     )
@@ -5112,12 +6560,48 @@ def validate_graph(graph: Any) -> "tuple[bool, List[str]]":
             continue
         out_dt = out_ports[src_port]
         in_dt = in_ports[dst_port]
-        if out_dt != in_dt:
+        # source.data carries universe/codes/date/OOS context only.  Treating
+        # it as an ordinary ``series`` makes an invalid graph look type-correct
+        # and fail later because it has no factor expression.
+        if src_type == "source" and not (src_port == "data" and dst_port == "src"):
+            errors.append(
+                f"边 {src_id}.{src_port} 是数据上下文；source.data 只能连接下游 src 口"
+            )
+            continue
+        compatible = (
+            out_dt == in_dt
+            or (out_dt == "series" and in_dt == "factor"
+                and src_type in {"formula", "factorlib"})
+            or (out_dt == "fe" and in_dt == "factor"
+                and src_type == "feature" and dst_type in {"backtest", "portfolio"})
+        )
+        if not compatible:
             errors.append(
                 f"边 {src_id}.{src_port}({out_dt}) → {dst_id}.{dst_port}({in_dt}) dt 不匹配"
             )
             # dt 不匹配则跳过后续语义校验(已是确定性错误)。
             continue
+
+        # ``src`` is a semantic context channel, not an arbitrary series
+        # input.  Only source.data carries universe/codes/date/OOS metadata.
+        # Accepting formula.out here is type-correct but silently drops that
+        # context in both browser and durable execution.
+        if dst_port == "src" and not (src_type == "source" and src_port == "data"):
+            errors.append(
+                f"入端口 {dst_id}.src 只能由 source.data 供给(用于下传股票池/日期/OOS)"
+            )
+
+        if src_id in all_a_source_edges:
+            all_a_source_edges[src_id] += 1
+            if not (src_port == "data" and dst_type == "data_screen" and dst_port == "src"):
+                errors.append(
+                    f"全A source {src_id}(universe=all_a) 仅供 data_screen.src；"
+                    f"不能连接 {dst_id}.{dst_port}"
+                )
+
+        if (src_type == "source" and src_port == "data"
+                and dst_type in {"data_screen", "history_screen"} and dst_port == "src"):
+            wired_data_screens[dst_id] = src_id
 
         # 7. single-in-edge(对齐 workflow.jsx 单入口);例外:feature.feat 多边聚合为多特征
         #    (执行器 run_graph 保序去重,镜像 deriveRecipeForNode)。
@@ -5141,6 +6625,101 @@ def validate_graph(graph: Any) -> "tuple[bool, List[str]]":
             errors.append(
                 f"入端口 {dst_id}.{dst_port} 的 series 只能由 source/formula/factorlib 供给"
             )
+
+    for nid, ntype in id_to_type.items():
+        if ntype not in {"data_screen", "history_screen"}:
+            continue
+        source_id = wired_data_screens.get(nid)
+        if source_id is None:
+            errors.append(
+                f"数据筛选节点 {nid} 必须显式连接 source.data → {nid}.src；"
+                "不允许使用默认快速池代替"
+            )
+            continue
+        source_params = _node_params(source_id)
+        requested_universe = str(source_params.get("universe") or "").strip()
+        raw_codes = source_params.get("codes")
+        has_explicit_codes = bool(
+            [item for item in raw_codes if str(item).strip()]
+            if isinstance(raw_codes, list) else str(raw_codes or "").strip()
+        )
+        if not has_explicit_codes and (not requested_universe or requested_universe == "自动"):
+            errors.append(
+                f"数据筛选节点 {nid} 的数据源必须显式选择股票池；"
+                "请选择 all_a(全A·筛选 Skill 专用)、具名指数，或填写 source.codes；"
+                "空代码时不能使用“自动”"
+            )
+    for nid, edge_count in all_a_source_edges.items():
+        if edge_count == 0:
+            errors.append(f"全A source {nid}(universe=all_a) 必须连接 data_screen.src")
+
+    # A self-loop check is insufficient: A→B→A previously reached the
+    # executor, where topo_order returned only a partial graph and the run was
+    # later misreported as a generic missing terminal.  Detect cycles over all
+    # structurally well-formed node references, independently of port errors,
+    # so the author sees the real cause at save/run time.
+    adjacency: Dict[str, List[str]] = {nid: [] for nid in id_to_type}
+    indegree: Dict[str, int] = {nid: 0 for nid in id_to_type}
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        frm, to = edge.get("from"), edge.get("to")
+        if (not isinstance(frm, (list, tuple)) or len(frm) != 2
+                or not isinstance(to, (list, tuple)) or len(to) != 2):
+            continue
+        src_id, dst_id = frm[0], to[0]
+        if src_id not in id_to_type or dst_id not in id_to_type or src_id == dst_id:
+            continue
+        adjacency[src_id].append(dst_id)
+        indegree[dst_id] += 1
+    ready = [nid for nid, degree in indegree.items() if degree == 0]
+    visited = 0
+    while ready:
+        current = ready.pop()
+        visited += 1
+        for downstream in adjacency[current]:
+            indegree[downstream] -= 1
+            if indegree[downstream] == 0:
+                ready.append(downstream)
+    if visited != len(id_to_type):
+        cyclic = sorted(nid for nid, degree in indegree.items() if degree > 0)
+        errors.append("工作流存在环路，涉及节点: " + ", ".join(cyclic))
+
+    # Authoring/save validation can additionally fail before execution when a
+    # node cannot possibly run.  The default remains shape-compatible with the
+    # long-standing public helper, which is also used to inspect partial canvas
+    # fragments while the user is still wiring them.
+    # Optional context
+    # and alternative inputs remain optional; only semantic minimums are
+    # enforced.  This also prevents a disconnected terminal from satisfying
+    # the old terminal-count-only rule.
+    required_ports: Dict[str, tuple[str, ...]] = {
+        "history_screen": ("src",), "daily_backtest": ("history",),
+        "data_screen": ("src",),
+        "orthogonalize": ("signal",),
+        "feature": ("feat",),
+        "xgb": ("fe",), "lgbm": ("fe",), "svm": ("fe",),
+        "rf": ("fe",), "nn": ("fe",), "lstm": ("fe",),
+        "pca": ("fe",), "spearman": ("fe",),
+        "iccalc": ("factor",), "analysis": ("factor",),
+        "tsic": ("factor", "src"), "event": ("trigger", "src"),
+        "relstat": ("factor", "src"), "overfit": ("result",),
+        "portfolio": ("factor",), "risk": ("factor",),
+        "garch": ("factor",), "attrib": ("factor",), "tvbeta": ("factor",),
+    }
+    if require_complete:
+        for nid, ntype in id_to_type.items():
+            for port in required_ports.get(ntype, ()):
+                if (nid, port) not in seen_in_ports:
+                    errors.append(f"节点 {nid}.{port} 缺少必需输入")
+            if ntype == "mf" and not any(
+                (nid, port) in seen_in_ports for port in ("m1", "f1", "m2", "f2")
+            ):
+                errors.append(f"节点 {nid} 至少需要一个模型或特征输入")
+            if ntype == "backtest" and not any(
+                (nid, port) in seen_in_ports for port in ("factor", "pf")
+            ):
+                errors.append(f"节点 {nid} 至少需要 factor 或 pf 输入")
 
     # 8. terminal>=1。
     if not has_terminal:
@@ -5186,13 +6765,13 @@ class GenIn(BaseModel):
 # ── W8b AI 闭环:评审-改进(/workflow/critique)──────────────────────────────
 # rd-agent 式闭环的「critique」环:前端把 目标 + 当前图 + 真实回测指标 POST 来,LLM 据指标
 # 诊断问题并产出**改进后的** graph(同 generate 契约);LLM 不可用/产图不合法 → 规则兜底
-# (确定性:RankIC<0 取反方向、样本外塌缩换稳健因子、Sharpe 低改月频)。绝不抛 500。
+# (确定性候选，不把负IC视为反向获利证明；任何修改均需全新样本验证)。绝不抛 500。
 _CRITIQUE_SYS = SYSTEM_PROMPT + """
 
 【评审-改进模式(本次任务,覆盖上面的"只生成"语气)】
 你现在是量化策略评审官。用户给:① 目标 ② 当前工作流 graph ③ 该工作流的**真实回测指标**。
 请据指标诊断问题、产出**改进后的**工作流。常见诊断→改法:
-- RankIC 为负 → 因子方向反了:把因子表达式整体取负(如 rank(...) → -(rank(...)))或「因子分析」节点 dir 设 "-1"(二选一,勿同时,否则抵消)。
+- RankIC 为负只说明本次测量负相关，不证明反向可盈利。先检查覆盖、方向定义与独立样本；不可在同一测试集反复翻转挑选正IC。任何反向方案仅是假设，需新的留出样本验证。
 - 样本外(OOS)塌缩 / 疑似过拟合 → 换更稳健因子(低波 rank(-stddev(returns,20)) / 动量 rank(ts_sum(returns,20)))或加大调仓周期。
 - Sharpe / 年化偏低、换手过高 → 回测/分析改月频(rebalance/rebal: "month")降成本。
 - 指标尚可 → 小幅微调或维持。
@@ -5211,17 +6790,7 @@ def _rule_critique(goal: str, metrics: "Dict[str, Any]", graph: "Dict[str, Any]"
     diag: "List[str]" = []
     changed = False
     if _ok(ric) and ric < 0:
-        flipped = False
-        for n in nodes:
-            if n.get("type") == "analysis":
-                n.setdefault("params", {})["dir"] = "-1"; flipped = True; changed = True
-        if not flipped:
-            for n in nodes:
-                if n.get("type") == "formula":
-                    e = str((n.get("params") or {}).get("expr") or "").strip()
-                    if e:
-                        n.setdefault("params", {})["expr"] = "-(" + e + ")"; changed = True
-        diag.append(f"RankIC 为负({round(float(ric), 4)})→ 因子方向反了,已对因子取负")
+        diag.append(f"RankIC 为负({round(float(ric), 4)})：保留原方向，先核对数据与独立样本；自动反向不能证明改进")
     elif oosv in ("overfit", "degraded"):
         for n in nodes:
             if n.get("type") == "formula":
@@ -5234,16 +6803,22 @@ def _rule_critique(goal: str, metrics: "Dict[str, Any]", graph: "Dict[str, Any]"
             elif n.get("type") == "analysis":
                 n.setdefault("params", {})["rebal"] = "month"; changed = True
         diag.append("收益偏弱 → 回测/分析改月频,降换手成本")
-    if not changed:
+    if not changed and not diag:
         diag.append("指标尚可,未见明显问题,维持当前工作流")
-    return {"ok": True, "diagnosis": ";".join(diag), "graph": {"nodes": nodes, "edges": edges}, "source": "rule"}
+    from guanlan_v2.workflow.authoring import validate_authoring
+    candidate = {"nodes": nodes, "edges": edges}
+    _autowire_source(candidate)
+    checked = validate_authoring(candidate)
+    return {"ok": checked["ok"], "diagnosis": ";".join(diag), "graph": candidate, "source": "rule",
+            "errors": checked["errors"], "reason": None if checked["ok"] else "规则候选图不合法: " + ";".join(checked["errors"]),
+            "requires_fresh_evaluation": True}
 
 
 class CritiqueIn(BaseModel):
     """``POST /workflow/critique`` 入参:目标 + 当前图 + 该图真实回测指标。"""
 
     goal: str = ""
-    metrics: Dict[str, Any] = Field(default_factory=dict)   # {rank_ic,sharpe,ann_return,oos_verdict,n_dates,factor}
+    metrics: Dict[str, Any] = Field(default_factory=dict)   # headline + audit_declared/status/passes_gate
     graph: Dict[str, Any] = Field(default_factory=dict)     # {nodes,edges}
     constraints: str = ""    # 调用方求值环境约束(研究回路声明"求值只读表达式";空=prompt 逐字不变,画布/帷幄零行为变化)
 
@@ -5267,11 +6842,77 @@ class WorkflowRunIn(BaseModel):
     oos_frac: Optional[float] = None
 
 
-def build_workflow_router(workspace_store: Any = None) -> APIRouter:
+class WorkflowRunStartIn(WorkflowRunIn):
+    """Start a reconnectable server-owned workflow run."""
+
+    run_id: Optional[str] = None
+    name: str = ""
+    workspace_id: Optional[str] = None
+
+
+class HistoryScreenIn(BaseModel):
+    params: Dict[str, Any] = Field(default_factory=dict)
+    context: Dict[str, Any] = Field(default_factory=dict)
+    workspace_id: Optional[str] = None
+
+
+class DailyScreenBacktestIn(BaseModel):
+    history: Dict[str, Any] = Field(default_factory=dict)
+    params: Dict[str, Any] = Field(default_factory=dict)
+    workspace_id: Optional[str] = None
+
+
+def build_workflow_router(
+    workspace_store: Any = None,
+    run_store: Optional[WorkflowRunStore] = None,
+    trial_audit_store: Any = None,
+) -> APIRouter:
     """工作流自有节点路由组(无 prefix,P2-P5 共用)。随 cards/seats/factorlib 工厂式。"""
     router = APIRouter(tags=["workflow"])
     # 工作流服务端持久化 store(照 cards/factorlib 工厂头部 new 一次)。
     wf_store = WorkflowStore()
+    # 长回测由服务端 daemon worker 持有；页面切走后凭 run_id 重连。
+    durable_runs = run_store or WorkflowRunStore()
+    run_slots = _threading.BoundedSemaphore(value=2)
+    run_start_lock = _threading.Lock()
+
+    def _require_replay_owner(owner):
+        from guanlan_v2.workflow.store import _workspace_id
+        _workspace_id(owner)
+        if owner:
+            if workspace_store is None:
+                raise ValueError("研究空间服务不可用")
+            workspace_store.require(owner, active_only=True)
+
+    @router.post("/workflow/history-screen")
+    def history_screen(body: HistoryScreenIn):
+        from guanlan_v2.workflow.strategy_replay import run_history_screen
+        try:
+            _require_replay_owner(body.workspace_id)
+            with run_slots:
+                return run_history_screen(body.params, body.context, owner=body.workspace_id)
+        except Exception as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    @router.post("/backtest/daily-screen")
+    def daily_screen_backtest(body: DailyScreenBacktestIn):
+        from guanlan_v2.workflow.strategy_replay import run_daily_backtest
+        try:
+            _require_replay_owner(body.workspace_id)
+            with run_slots:
+                return run_daily_backtest(body.history, body.params, owner=body.workspace_id)
+        except Exception as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    @router.get("/workflow/catalog")
+    def workflow_catalog():
+        from guanlan_v2.workflow.authoring import catalog
+        return {"ok": True, **catalog()}
+
+    @router.post("/workflow/validate")
+    def workflow_validate(body: WorkflowSaveIn):
+        from guanlan_v2.workflow.authoring import validate_authoring
+        return validate_authoring(body.graph)
 
     @router.post("/feature/build")
     def feature_build(body: FeatureBuildIn):
@@ -5366,12 +7007,26 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
 
         feat_series: List[pd.Series] = []
         feature_names: List[str] = []
+        factor_spec_replays: List[Dict[str, Any]] = []
         for i, expr in enumerate(features):
             name = f"f{i + 1}"
+            structured_spec = None
             try:
                 # 注册名优先(借引擎 zoo registry),否则当 zoo-DSL 表达式编译(同 report.py:204-209)。
                 try:
-                    s = _get_alpha(expr).compute(panel)
+                    registered = _get_alpha(expr)
+                    structured_spec = getattr(
+                        registered.compute, "__guanlan_factor_spec__", None,
+                    )
+                    if isinstance(structured_spec, dict):
+                        # Keep preview/build byte-for-byte aligned with model,
+                        # backtest and portfolio materialisation: base first,
+                        # endpoint preprocessing second, orthogonalisation last.
+                        s, structured_spec = _materialize_structured_base(
+                            registered, panel,
+                        )
+                    else:
+                        s = registered.compute(panel)
                 except KeyError:
                     validate_expr(expr)
                     s = compile_factor(expr)(panel)
@@ -5386,6 +7041,25 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
                 s = winsorize(s, body.winsorize_q)
             if body.standardize:
                 s = zscore(s)
+            if isinstance(structured_spec, dict):
+                try:
+                    s, replay_audit = _orthogonalize_from_spec(
+                        s, panel, structured_spec.get("transform"),
+                        dependency_bindings=(structured_spec.get("dependencies") or {}).get(
+                            "existing_factors"
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001 -- fail closed
+                    return _fail(
+                        universe,
+                        f"factor_spec_replay_error[{expr}]: {type(exc).__name__}: {exc}",
+                        start=start, end=end,
+                    )
+                factor_spec_replays.append({
+                    "name": expr,
+                    "factor_spec": structured_spec,
+                    "audit": replay_audit,
+                })
             feat_series.append(s.rename(name))
             feature_names.append(name)
 
@@ -5479,6 +7153,10 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
             "winsorize_q": float(body.winsorize_q),
             "standardize": bool(body.standardize),
         }
+        if factor_spec_replays:
+            # This is replay evidence for the UI/next node; execution remains
+            # authoritative in the registered factor spec and its digest.
+            fe_spec["factor_spec_replays"] = factor_spec_replays
 
         return JSONResponse({
             "ok": True,
@@ -5494,6 +7172,7 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
             "ic": ic_rows,
             "preview": {"columns": cols, "rows": prev_rows},
             "warnings": warnings,
+            "factor_spec_replays": factor_spec_replays,
             "fe": fe_spec,
         })
 
@@ -5614,6 +7293,21 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
         诚实失败 ok:False + reason(HTTP 200)。数据只经 get_default_loader(不碰 engine/)。"""
         return _factor_report2(body)
 
+    @router.post("/workflow/overfit-audit")
+    def workflow_overfit_audit(body: OverfitAuditIn):
+        """通用回测过拟合审计；可信证据只按 opaque context_id 服务端解析。"""
+        try:
+            return _overfit_audit(body, evidence_store=trial_audit_store)
+        except Exception as exc:  # noqa: BLE001 - malformed evidence is explicit
+            return JSONResponse({
+                "ok": False,
+                "__dt": "overfit_audit",
+                "method": "overfit_audit",
+                "status": "INCOMPLETE",
+                "passes_gate": False,
+                "reason": f"{type(exc).__name__}: {exc}",
+            })
+
     @router.post("/factor/tsic")
     def factor_tsic(body: FactorTsicIn):
         """个股时序 IC(单票/小池:每股因子值 vs 自身未来收益 Spearman 相关)——截面 IC 在单票
@@ -5709,13 +7403,16 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
                     + "{nodes,edges},不要任何解释或围栏。"
                 )
                 continue
-            ok, errs = validate_graph(graph)
+            _autowire_source(graph)
+            from guanlan_v2.workflow.authoring import validate_authoring
+            checked = validate_authoring(graph)
+            ok, errs = checked["ok"], checked["errors"]
             if ok:
-                _autowire_source(graph)   # P3 自愈:补漏连的 source.data→feature.src(股票池脐带)
                 return JSONResponse({
                     "ok": True,
                     "graph": {"nodes": graph["nodes"], "edges": graph["edges"]},
                     "attempts": attempt + 1,
+                    "source": "llm", "validation": checked,
                 })
             last_err = "; ".join(errs[:8])
             user = (
@@ -5738,7 +7435,11 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
         goal = (body.goal or "").strip()
         cur = body.graph if isinstance(body.graph, dict) else {}
         m = body.metrics or {}
-        summary = {k: m.get(k) for k in ("rank_ic", "sharpe", "ann_return", "oos_verdict", "n_dates", "factor")}
+        summary = {k: m.get(k) for k in (
+            "rank_ic", "sharpe", "ann_return", "oos_verdict", "n_dates", "factor",
+            "audit_declared", "audit_status", "audit_passes_gate",
+            "audit_execution_error", "audit_missing_from_graph",
+        )}
         constraints = (body.constraints or "").strip()
         user = (
             f"目标:{goal or '(未给)'}\n"
@@ -5755,12 +7456,14 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
             rc["llm_error"] = f"{type(exc).__name__}: {exc}"
             return JSONResponse(rc)
         diag = str(obj.get("diagnosis") or "").strip()
-        ok, errs = validate_graph(obj)
+        _autowire_source(obj)
+        from guanlan_v2.workflow.authoring import validate_authoring
+        checked = validate_authoring(obj)
+        ok, errs = checked["ok"], checked["errors"]
         if not ok:
             rc = _rule_critique(goal, m, cur)
             rc["diagnosis"] = (diag + " · " if diag else "") + "(LLM 改进图不合法[" + "; ".join(errs[:3]) + "],改用规则:" + rc["diagnosis"] + ")"
             return JSONResponse(rc)
-        _autowire_source(obj)   # P3 自愈:补漏连的 source.data→feature.src
         return JSONResponse({
             "ok": True,
             "diagnosis": diag or "已据指标改进工作流。",
@@ -5770,11 +7473,71 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
 
     # ===== 工作流服务端执行(P4 执行器 HTTP 门面)及持久化 ======
     # 契约:POST /workflow/run  {graph, universe?, freq?, start?, end?, oos_frac?} → executor 结果
+    #      POST /workflow/run/start {run_id?,name,graph,...} → 立即回 queued/running
+    #       GET /workflow/run/status/{run_id}               → 可跨页面重连进度/结果
     #      POST /workflow/save {name, graph:{nodes,edges}} → {ok,id,ts,name}
     #       GET  /workflow/list                            → {ok, items:[{id,name,ts,graph}]}
     #       GET  /workflow/get/{wid}                       → {ok, graph:{nodes,edges}, name,id,ts}
     #       DELETE /workflow/delete/{wid}                  → {ok}
     # 诚实失败:一律 {ok:False, reason} HTTP 200,绝不抛 500(对齐本文件 _fail 范式)。
+
+    def _run_overrides(body: WorkflowRunIn) -> Dict[str, Any]:
+        return {k: v for k, v in (
+            ("universe", body.universe), ("freq", body.freq),
+            ("start", body.start), ("end", body.end),
+            ("oos_frac", body.oos_frac),
+        ) if v is not None}
+
+    def _universe_override_error(graph: Dict[str, Any], overrides: Dict[str, Any]) -> Optional[str]:
+        override = str(overrides.get("universe") or "").strip()
+        types = {str((node or {}).get("type") or "")
+                 for node in (graph.get("nodes") or []) if isinstance(node, dict)}
+        if override and "data_screen" in types:
+            return ("数据筛选图不接受运行级 universe 覆盖；请在连接的 source 节点显式选择"
+                    "“全A·筛选 Skill 专用”、具名指数或填写 source.codes")
+        if override == "all_a":
+            return ("运行级 universe=all_a 不适用于普通因子/回测；"
+                    "all_a 只能在 source 节点选择并连接 data_screen.src")
+        return None
+
+    def _needs_screen_contract_validation(graph: Dict[str, Any]) -> bool:
+        """Keep legacy execution permissive while enforcing the new Skill boundary.
+
+        Older saved canvases were historically executable even when they did
+        not satisfy the newer full-graph authoring validator.  Only graphs
+        that exercise the new ``data_screen``/``all_a`` authority need that
+        validator at run time; generation and critique still validate all
+        authored graphs in full.
+        """
+        for node in graph.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            if node.get("type") == "data_screen":
+                return True
+            params = node.get("params")
+            if (node.get("type") == "source" and isinstance(params, dict)
+                    and str(params.get("universe") or "").strip() == "all_a"):
+                return True
+        return False
+
+    def _prepare_executable_graph(
+        graph: Dict[str, Any], *, require_complete: bool = False,
+        allow_no_terminal: bool = False,
+    ) -> tuple[Optional[Dict[str, Any]], Dict[str, Any], List[str]]:
+        """Losslessly migrate known v1 shapes, then apply one strict contract."""
+        migrated, migration = migrate_graph(graph)
+        graph_ok, graph_errors = validate_graph(
+            migrated, require_complete=require_complete,
+        )
+        if allow_no_terminal:
+            graph_errors = [
+                error for error in graph_errors
+                if not error.startswith("缺终端节点")
+            ]
+            graph_ok = not graph_errors
+        if not graph_ok:
+            return None, migration, graph_errors
+        return migrated, migration, []
 
     @router.post("/workflow/run")
     def workflow_run(body: WorkflowRunIn):
@@ -5784,13 +7547,132 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
         g = body.graph if isinstance(body.graph, dict) else {}
         if not (isinstance(g.get("nodes"), list) and g.get("nodes")):
             return JSONResponse({"ok": False, "reason": "graph.nodes 缺失或为空"})
-        ov = {k: v for k, v in (("universe", body.universe), ("freq", body.freq),
-                                ("start", body.start), ("end", body.end),
-                                ("oos_frac", body.oos_frac)) if v is not None}
+        prepared, migration, graph_errors = _prepare_executable_graph(
+            g, require_complete=True, allow_no_terminal=True,
+        )
+        if prepared is None:
+            return JSONResponse({"ok": False,
+                                 "reason": "工作流校验失败: " + "；".join(graph_errors),
+                                 "errors": graph_errors, "migration": migration})
+        g = prepared
+        ov = _run_overrides(body)
+        override_error = _universe_override_error(g, ov)
+        if override_error:
+            return JSONResponse({"ok": False, "reason": override_error})
         try:
             return JSONResponse(_wex.run_graph(g, overrides=(ov or None)))
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}"})
+
+    def _execute_durable_run(run_id: str, graph: Dict[str, Any],
+                             overrides: Dict[str, Any], workspace_id: Optional[str] = None) -> None:
+        """Own heavy execution independently of the request/page lifecycle."""
+        import time as _time
+        from guanlan_v2.workflow import executor as _wex
+
+        with run_slots:
+            started = int(_time.time() * 1000)
+            durable_runs.update(
+                run_id, status="running", started_at=started,
+                reason=None,
+            )
+
+            def on_node(node_id: str, node_type: str, state: str) -> None:
+                durable_runs.update_node(run_id, node_id, node_type, state)
+
+            try:
+                outcome = _wex.run_graph(
+                    graph, overrides={**(overrides or {}), "_workflow_run_id": run_id,
+                                      "_workspace_id": workspace_id},
+                    on_node=on_node,
+                )
+                ended = int(_time.time() * 1000)
+                ok = bool(isinstance(outcome, dict) and outcome.get("ok"))
+                durable_runs.update(
+                    run_id,
+                    status="completed" if ok else "failed",
+                    result=outcome,
+                    reason=None if ok else str(
+                        (outcome or {}).get("reason") or "工作流没有产出可用结果"
+                    ),
+                    ended_at=ended,
+                )
+            except Exception as exc:  # noqa: BLE001 - persisted honest failure
+                durable_runs.update(
+                    run_id,
+                    status="failed",
+                    reason=f"{type(exc).__name__}: {exc}",
+                    ended_at=int(_time.time() * 1000),
+                )
+
+    @router.post("/workflow/run/start")
+    def workflow_run_start(body: WorkflowRunStartIn):
+        """Start an idempotent durable run and return before the backtest finishes."""
+        g = body.graph if isinstance(body.graph, dict) else {}
+        if not (isinstance(g.get("nodes"), list) and g.get("nodes")):
+            return JSONResponse({"ok": False, "reason": "graph.nodes 缺失或为空"})
+        prepared, migration, graph_errors = _prepare_executable_graph(
+            g, require_complete=True, allow_no_terminal=True,
+        )
+        if prepared is None:
+            return JSONResponse({"ok": False,
+                                 "reason": "工作流校验失败: " + "；".join(graph_errors),
+                                 "errors": graph_errors, "migration": migration})
+        g = prepared
+        ov = _run_overrides(body)
+        override_error = _universe_override_error(g, ov)
+        if override_error:
+            return JSONResponse({"ok": False, "reason": override_error})
+        try:
+            if body.workspace_id and workspace_store is not None:
+                workspace_store.require(body.workspace_id, active_only=True)
+            # Atomic within this router: concurrent retries must not spawn
+            # duplicate workers, and an id cannot be reused for another graph.
+            with run_start_lock:
+                if body.run_id:
+                    existing = durable_runs.get(body.run_id, workspace_id=body.workspace_id)
+                    if existing is not None:
+                        persisted_graph = {"nodes": g.get("nodes") or [], "edges": g.get("edges") or []}
+                        if existing.get("graph") != persisted_graph or existing.get("overrides") != ov:
+                            return JSONResponse({"ok": False, "reason": "run_id 已用于不同图或参数，拒绝复用"})
+                        return JSONResponse({"ok": True, "started": False, **WorkflowRunStore.public(existing)})
+                rec = durable_runs.create(run_id=body.run_id, name=body.name, graph=g,
+                                          overrides=ov, workspace_id=body.workspace_id)
+                try:
+                    _threading.Thread(target=_execute_durable_run,
+                        args=(rec["id"], rec["graph"], rec["overrides"], body.workspace_id), daemon=True,
+                        name=f"workflow-run-{rec['id'][-8:]}").start()
+                except Exception as exc:
+                    durable_runs.update(rec["id"], status="failed", reason=f"任务启动失败: {exc}")
+                    raise
+                return JSONResponse({"ok": True, "started": True, **WorkflowRunStore.public(rec)})
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({
+                "ok": False, "reason": f"{type(exc).__name__}: {exc}",
+            })
+
+    @router.get("/workflow/run/list")
+    def workflow_run_list(workspace_id: Optional[str] = None, limit: int = 50):
+        try:
+            return JSONResponse({"ok": True, "items": durable_runs.list_runs(
+                workspace_id=workspace_id, limit=max(1, min(100, limit)))})
+        except Exception as exc:
+            return JSONResponse({"ok": False, "items": [], "reason": f"{type(exc).__name__}: {exc}"})
+
+    @router.get("/workflow/run/status/{run_id}")
+    def workflow_run_status(run_id: str, workspace_id: Optional[str] = None):
+        """Return namespace-checked progress/result for page reconnection."""
+        try:
+            rec = durable_runs.get(run_id, workspace_id=workspace_id)
+            if rec is None:
+                return JSONResponse({"ok": False, "reason": "运行记录不存在"})
+            return JSONResponse({
+                "ok": True, **WorkflowRunStore.public(rec),
+            })
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({
+                "ok": False, "reason": f"{type(exc).__name__}: {exc}",
+            })
 
     @router.post("/workflow/save")
     def workflow_save(body: WorkflowSaveIn):
@@ -5801,7 +7683,17 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
             g = body.graph or {}
             if not isinstance(g.get("nodes"), list):
                 return JSONResponse({"ok": False, "reason": "graph.nodes 缺失或非数组"})
-            rec = wf_store.save(body.name, g, workspace_id=body.workspace_id)
+            prepared, migration, graph_errors = _prepare_executable_graph(
+                g, require_complete=True,
+            )
+            if prepared is None:
+                return JSONResponse({
+                    "ok": False,
+                    "reason": "工作流校验失败: " + "；".join(graph_errors),
+                    "errors": graph_errors,
+                    "migration": migration,
+                })
+            rec = wf_store.save(body.name, prepared, workspace_id=body.workspace_id)
             return JSONResponse({
                 "ok": True,
                 "id": rec["id"],
@@ -5809,6 +7701,8 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
                 "name": rec["name"],
                 "scope": rec["scope"],
                 "workspace_id": rec["workspace_id"],
+                "schema_version": rec.get("schema_version"),
+                "migration": rec.get("migration") or migration,
             })
         except Exception as exc:  # noqa: BLE001  诚实失败 HTTP 200,不抛 500
             return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}"})
@@ -5821,6 +7715,9 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
                 workspace_id=workspace_id,
                 include_global=include_global,
             )
+            from guanlan_v2.workflow.migrations import legacy_recovery_info
+            for item in items:
+                item["legacy_recovery"] = legacy_recovery_info(item.get("graph") or {})
             return JSONResponse({"ok": True, "items": items})
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "items": [], "reason": f"{type(exc).__name__}: {exc}"})
@@ -5837,6 +7734,7 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
             )
             if rec is None:
                 return JSONResponse({"ok": False, "reason": "工作流不存在"})
+            from guanlan_v2.workflow.migrations import legacy_recovery_info
             return JSONResponse({
                 "ok": True,
                 "graph": rec["graph"],
@@ -5847,6 +7745,8 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
                 "workspace_id": rec.get("workspace_id"),
                 "read_only": bool(rec.get("read_only")),
                 "is_template": bool(rec.get("is_template")),
+                "migration": rec.get("migration"),
+                "legacy_recovery": legacy_recovery_info(rec["graph"]),
             })
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}"})
@@ -6147,6 +8047,8 @@ def build_workflow_router(workspace_store: Any = None) -> APIRouter:
         spec = {"variant_id": vid, "name": str(body.get("name") or "工作流模型"),
                 "kind": kind, "recipe": recipe,
                 "created": datetime.datetime.now().isoformat(timespec="seconds")}
+        if body.get("candidate_only") is True:
+            spec["status"] = "draft"
         _threading.Thread(target=lambda: _run_promote_subprocess(spec), daemon=True).start()
         return JSONResponse({"ok": True, "started": True, "variant_id": vid, "state": _promote_public_state()})
 

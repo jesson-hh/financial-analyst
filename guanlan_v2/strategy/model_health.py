@@ -132,6 +132,7 @@ def write_cpcv(model_id: str, result: Dict[str, Any]) -> None:
     """cpcv 结果落 model_cpcv_<id>.json(原子写)。只新写,绝不改三产物。"""
     import json
     p = _cpcv_path(model_id); tmp = str(p) + ".tmp"
+    p.parent.mkdir(parents=True, exist_ok=True)
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(json.dumps(result, ensure_ascii=False))
     os.replace(tmp, str(p))
@@ -144,7 +145,19 @@ def load_cpcv_summary(model_id: str) -> Optional[Dict[str, Any]]:
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        result = json.loads(p.read_text(encoding="utf-8"))
+        from guanlan_v2.screen.model_registry import current_model_version
+        bound, current = result.get("model_version"), current_model_version(model_id)
+        if not bound or not current or bound != current:
+            result.update({"ready": False, "deployment_ready": False,
+                           "evidence_status": "stale" if bound else "legacy_unbound",
+                           "previous_dsr": result.get("dsr"), "dsr": None,
+                           "note": "验证未绑定当前模型内容版本或版本已变化，请重新验证；旧数值仅供追溯。"})
+        elif result.get("n_paths") == 0:
+            result.update({"ready": False, "dsr": None, "note": "没有有效验证路径"})
+        else:
+            result["evidence_status"] = "bound"
+        return result
     except Exception:  # noqa: BLE001
         return None
 
@@ -185,7 +198,9 @@ def load_health_summary() -> Optional[Dict[str, Any]]:
                 out["vintage"] = {"n_days": int(len(v)),
                                   "ic_mean": round(float(v["ic"].mean()), 4),
                                   "ready": bool(len(v) >= 10),
-                                  "note": "真OOS:快照分数冻结于预测时点,无回看偏差(≥10天后作主口径)"}
+                                  "snapshot_provenance_verified": False,
+                                  "note": "积累快照的已实现收益统计；历史快照可同日覆盖、首次记录时间未认证，"
+                                          "≥10日仅表示观测数充足，不是实盘放行"}
         return out
     except Exception:  # noqa: BLE001
         return None

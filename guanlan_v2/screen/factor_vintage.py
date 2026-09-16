@@ -36,9 +36,12 @@ def _sweep_items():
     try:
         from guanlan_v2.factorlib.store import LibraryFactorStore
         for f in LibraryFactorStore().list_factors(validate=False):
-            nm, expr = str(f.get("name") or ""), f.get("expr")
+            nm = str(f.get("name") or "")
+            expr = nm if isinstance(f.get("factor_spec"), dict) else f.get("expr")
             if f.get("status") == "draft" and expr and nm and nm not in have:
-                items.append((nm, {"expr": expr, "family": "draft"}))
+                items.append((nm, {"expr": expr, "family": "draft",
+                                   **({"factor_spec": f["factor_spec"]}
+                                      if isinstance(f.get("factor_spec"), dict) else {})}))
     except Exception:  # noqa: BLE001 — draft 并入失败不挡正式因子 vintage
         pass
     return items
@@ -53,6 +56,7 @@ def compute_factor_vintage(universe: str = "csi300", years: float = 2.0, horizon
     from financial_analyst.data.loader_factory import get_default_loader
     from financial_analyst.data.universe import resolve_universe_codes
     from financial_analyst.factors.zoo.expr import compile_factor
+    from financial_analyst.factors.zoo.registry import get as get_alpha
     from financial_analyst.factors.zoo.panel_cache import load_panel_cached
     from guanlan_v2.screen.catalog import FACTOR_DEFS
 
@@ -84,7 +88,10 @@ def compute_factor_vintage(universe: str = "csi300", years: float = 2.0, horizon
         if not expr:
             continue
         try:
-            fac = compile_factor(expr)(panel)
+            try:
+                fac = get_alpha(expr).compute(panel)
+            except KeyError:
+                fac = compile_factor(expr)(panel)
             if fac is None or not isinstance(fac, pd.Series):
                 continue
             d = pd.DataFrame({"f": fac, "r": fwd, "c": fac.index.get_level_values("code"),

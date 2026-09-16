@@ -50,6 +50,22 @@ _G0 = {"nodes": [{"id": "n1", "type": "formula", "params": {"expr": "rank(-delta
        "edges": []}
 _G1 = {"nodes": [{"id": "n1", "type": "formula", "params": {"expr": "rank(-delta(close,20))"}}],
        "edges": []}
+_AUDIT_G0 = {"nodes": [
+    {"id": "n1", "type": "formula", "params": {"expr": "rank(-delta(close,5))"}},
+    {"id": "bt", "type": "backtest", "params": {}},
+    {"id": "audit", "type": "overfit", "params": {}},
+], "edges": [
+    {"from": ["n1", "out"], "to": ["bt", "factor"]},
+    {"from": ["bt", "result"], "to": ["audit", "result"]},
+]}
+_AUDIT_G1 = {"nodes": [
+    {"id": "n1", "type": "formula", "params": {"expr": "rank(-delta(close,20))"}},
+    {"id": "bt", "type": "backtest", "params": {}},
+    {"id": "audit", "type": "overfit", "params": {}},
+], "edges": [
+    {"from": ["n1", "out"], "to": ["bt", "factor"]},
+    {"from": ["bt", "result"], "to": ["audit", "result"]},
+]}
 
 
 def _ex_ok(rank_ic=0.05, sharpe=1.0, oos="robust", exprs=("rank(-delta(close,5))",), has_ml=False):
@@ -62,6 +78,21 @@ def _ex_ok(rank_ic=0.05, sharpe=1.0, oos="robust", exprs=("rank(-delta(close,5))
 
 def _weak():
     return _ex_ok(rank_ic=0.001, sharpe=0.1, oos="degraded")
+
+
+def _audit_ex(*, rank_ic=0.05, sharpe=1.0, oos="robust", status="INCOMPLETE",
+              selection_score=None):
+    out = _ex_ok(rank_ic=rank_ic, sharpe=sharpe, oos=oos)
+    out["metrics"].update({
+        "audit_declared": True,
+        "audit_status": status,
+        "audit_passes_gate": status == "PASS",
+    })
+    out["terminal"] = {"kind": "overfit", "node_id": "audit", "payload": {}}
+    out["_selection_score_mean"] = (
+        rank_ic if selection_score is None else float(selection_score)
+    )
+    return out
 
 
 def _wire(monkeypatch, tmp_path, evals, critique=None, generate=None):
@@ -97,6 +128,60 @@ def _run_both(monkeypatch, tmp_path, *, evals, critique=None, generate=None,
     end_a = ad.run_research_optimize("rr_opt000", "找反转", max_rounds, min_rank_ic, universe,
                                      freq, None, None, progress=lambda **kw: None)
     return end_l, side_l, end_a, side_a
+
+
+def _run_audit_adapter(monkeypatch, tmp_path, evals, *, max_rounds=1, critique=None):
+    """Run the adapter with a sealed-context double while retaining real gate logic."""
+    from guanlan_v2.workflow import trial_audit_connector as connector
+
+    _wire(
+        monkeypatch, tmp_path, [], critique=critique,
+        generate=lambda goal: {"ok": True, "graph": _AUDIT_G0, "attempts": 1},
+    )
+    outcomes = list(evals)
+    eval_calls = []
+
+    def fake_eval(graph, p, pr, k, mr):
+        eval_calls.append((k, graph))
+        return outcomes.pop(0)
+
+    captures, seals, routes = [], [], []
+    monkeypatch.setattr(rl, "_run_graph_eval", fake_eval)
+    monkeypatch.setattr(
+        connector, "selection_evidence_from_execution",
+        lambda execution: {
+            "selection_score_mean": execution["_selection_score_mean"],
+        },
+    )
+    monkeypatch.setattr(
+        connector, "capture_trial_return",
+        lambda **kw: captures.append(kw["trial_id"]) or {"trial_id": kw["trial_id"]},
+    )
+
+    def fake_seal(**kw):
+        seals.append(kw["selected_trial_id"])
+        return {
+            "context_id": "tac_" + "a" * 64,
+            "evidence_digest": "b" * 64,
+            "family_id": "fam-test",
+            "selected_trial_id": kw["selected_trial_id"],
+            "n_trials": len(kw["captures"]),
+            "frequency": "month",
+        }
+
+    monkeypatch.setattr(connector, "seal_trial_family_context", fake_seal)
+    monkeypatch.setattr(
+        rl, "_route_product",
+        lambda run_id, k, graph, goal, diag, metrics, terminal, universe,
+        node_errors=None: routes.append((k, metrics)) or
+        {"name": "lib_audit", "status": "draft"},
+    )
+    end = ad.run_research_optimize(
+        "rr_audit0", "可信因子", max_rounds, 0.02, "csi300_active", "month",
+        None, None, progress=lambda **kw: None,
+    )
+    return end, {"eval_calls": eval_calls, "captures": captures,
+                 "seals": seals, "routes": routes, "remaining": outcomes}
 
 
 # --------------------------------------------------------------------------- #
@@ -149,6 +234,100 @@ def test_first_round_pass_compose_channel_equivalence(monkeypatch, tmp_path):
                                      None, None, progress=lambda **kw: None)
     assert end_l["promoted"]["status"] == end_a["promoted"]["status"] == "draft_compose"
     assert saved_l["expr"] == saved_a["expr"] == "(0.63)*(rank(x)) + (0.37)*(rank(y))"
+
+
+@pytest.mark.parametrize(
+    ("rank_ic", "sharpe", "oos"),
+    [
+        (0.001, 1.0, "robust"),
+        (0.05, 1.0, "overfit"),
+        (0.05, 0.0, "robust"),
+    ],
+)
+def test_audit_postseal_is_not_started_without_a_base_gate_candidate(
+    monkeypatch, tmp_path, rank_ic, sharpe, oos,
+):
+    pre = _audit_ex(rank_ic=rank_ic, sharpe=sharpe, oos=oos)
+    # This PASS must remain unused: a failing base candidate is ineligible for
+    # sealing/postseal and cannot be redeemed by an audit result.
+    post = _audit_ex(status="PASS")
+
+    end, seen = _run_audit_adapter(monkeypatch, tmp_path, [pre, post])
+
+    assert end["promoted"] is None
+    assert end["stop_reason"] == "postseal_audit_context_unavailable"
+    assert "基础研究联合门" in end["audit_context_error"]
+    assert len(seen["eval_calls"]) == 1
+    assert seen["seals"] == [] and seen["routes"] == []
+
+
+@pytest.mark.parametrize(
+    ("rank_ic", "sharpe", "oos"),
+    [
+        (0.001, 1.0, "robust"),
+        (0.05, 1.0, "overfit"),
+        (0.05, 0.0, "robust"),
+    ],
+)
+def test_audit_pass_cannot_bypass_postseal_base_joint_gate(
+    monkeypatch, tmp_path, rank_ic, sharpe, oos,
+):
+    pre = _audit_ex()  # eligible for family sealing
+    post = _audit_ex(rank_ic=rank_ic, sharpe=sharpe, oos=oos, status="PASS")
+
+    end, seen = _run_audit_adapter(monkeypatch, tmp_path, [pre, post])
+
+    assert len(seen["eval_calls"]) == 2 and len(seen["seals"]) == 1
+    assert seen["routes"] == [] and end["promoted"] is None
+    assert end["stop_reason"] == "postseal_joint_gate_failed"
+    assert end["audit_postseal"]["status"] == "PASS"
+    assert end["audit_postseal"]["passes_gate"] is False
+    assert end["audit_postseal"]["joint_gate"]["passed"] is False
+
+
+def test_audit_postseal_selects_only_base_passing_round_and_publishes_on_full_pass(
+    monkeypatch, tmp_path,
+):
+    # Round 0 has the larger RankIC but fails OOS. Round 1 is the only eligible
+    # postseal candidate; the final PASS also satisfies the complete joint gate.
+    critique = lambda goal, metrics, graph, constraints="": {
+        "ok": True, "diagnosis": "修复样本外", "graph": _AUDIT_G1, "source": "llm",
+    }
+    end, seen = _run_audit_adapter(
+        monkeypatch, tmp_path,
+        [_audit_ex(rank_ic=0.20, oos="overfit"), _audit_ex(rank_ic=0.05),
+         _audit_ex(rank_ic=0.06, status="PASS")],
+        max_rounds=2, critique=critique,
+    )
+
+    assert len(seen["eval_calls"]) == 3 and len(seen["seals"]) == 1
+    assert end["best_k"] == 1
+    assert [k for k, _ in seen["routes"]] == [1]
+    assert end["promoted"] == {"name": "lib_audit", "status": "draft"}
+    assert end["stop_reason"] == "postseal_audit_pass"
+    assert end["audit_postseal"]["joint_gate"]["passed"] is True
+
+
+def test_audit_candidate_order_uses_canonical_rankic_series_mean(
+    monkeypatch, tmp_path,
+):
+    # Both rounds pass the base gate.  Headline scalar RankIC favours round 0,
+    # while the exact captured series (the PBO objective) favours round 1.
+    # The selected TrialLedger column and routed graph must follow the latter.
+    critique = lambda goal, metrics, graph, constraints="": {
+        "ok": True, "diagnosis": "精确序列更强", "graph": _AUDIT_G1, "source": "llm",
+    }
+    end, seen = _run_audit_adapter(
+        monkeypatch, tmp_path,
+        [_audit_ex(rank_ic=0.08, selection_score=0.03),
+         _audit_ex(rank_ic=0.06, selection_score=0.05),
+         _audit_ex(rank_ic=0.06, selection_score=0.05, status="PASS")],
+        max_rounds=2, critique=critique,
+    )
+
+    assert end["best_k"] == 1
+    assert len(seen["seals"]) == 1
+    assert [k for k, _metrics in seen["routes"]] == [1]
 
 
 # --------------------------------------------------------------------------- #

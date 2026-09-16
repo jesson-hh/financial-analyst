@@ -158,7 +158,7 @@ def _fake_training(monkeypatch, saved):
     monkeypatch.setattr(wapi, "_build_model", lambda k, p: (_M(), {}))
     monkeypatch.setattr(mw, "_holdout_oos_ic", lambda *a, **kw: 0.05)
     monkeypatch.setattr(reg, "save_variant",
-                        lambda vid, df, meta: saved.update(df=df, meta=meta))
+                        lambda vid, df, meta, **kw: saved.update(df=df, meta=meta))
 
 
 def test_train_promote_attaches_dims_seven_columns(tmp_path, monkeypatch):

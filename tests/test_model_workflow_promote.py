@@ -246,7 +246,7 @@ def test_spec_status_forces_draft(monkeypatch):
     monkeypatch.setattr("guanlan_v2.workflow.api._build_model", lambda k, p: (_M(), {}))
     monkeypatch.setattr(mw, "_holdout_oos_ic", lambda *a, **kw: 0.9)
     import guanlan_v2.screen.model_registry as reg
-    monkeypatch.setattr(reg, "save_variant", lambda vid, df, meta: saved.update(meta=meta))
+    monkeypatch.setattr(reg, "save_variant", lambda vid, df, meta, **kw: saved.update(meta=meta))
     r = mw.train_promote({"variant_id": "m_rl_x_r0", "name": "t", "kind": "xgboost",
                           "recipe": {"features": ["rank(close)"], "universe": "csi_fast",
                                      "start": "2026-01-01"},

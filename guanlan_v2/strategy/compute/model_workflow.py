@@ -10,6 +10,56 @@ from typing import Any, Dict
 _TREE_KINDS = ("lightgbm", "xgboost", "rf")
 
 
+def _persist_technical_manifest(variant_id, panel, summary):
+    """Stage complete audit facts outside pandas before the model meta commit.
+
+    The content-named JSON is immutable by identity, like estimator artifacts.
+    Summary-only derived panels are explicit; a digest cannot recreate facts.
+    """
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+    import tempfile
+    from guanlan_v2.screen import model_registry as reg
+
+    manifest = getattr(panel, "technical_provenance_manifest", None)
+    if manifest is None:
+        return {"available": False, "reason": "full technical manifest unavailable; summary only"}
+    if not isinstance(manifest, dict):
+        raise ValueError("full technical manifest must be a JSON object")
+    payload = json.dumps(manifest, sort_keys=True, ensure_ascii=True,
+                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    expected = (summary or {}).get("manifest_sha256")
+    if expected and expected != digest:
+        raise ValueError("technical manifest changed since panel summary was computed")
+    root = reg.MODELS_DIR.resolve()
+    directory = (root / str(variant_id)).resolve()
+    if not variant_id or variant_id == "prod" or directory == root or root not in directory.parents:
+        raise ValueError("technical manifest path must belong to a non-prod model variant")
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"technical_manifest_{digest}.json"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=directory,
+                                         prefix=".technical-manifest-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return {"available": True, "file": target.name, "sha256": digest,
+            "bytes": len(payload), "format": "canonical-json-v1",
+            "scope": "full technical manifest including request/cache execution metadata"}
+
+
 def _apply_promote_gate(meta: Dict[str, Any], oos_ic) -> Dict[str, Any]:
     """P1 §5 opt-in 阈值门:env GUANLAN_PROMOTE_MIN_OOS_IC 设了才生效(缺省零行为变化)。
     不达标(含 oos_ic=None)→ meta.status="draft"(不进正式列表/不能设默认);达标记 passed。
@@ -47,6 +97,11 @@ def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "reason": "recipe.features 为空"}
 
     fwd_days = int(recipe.get("fwd_days") or 5)
+    label_token = str(recipe.get("label") or "fwd_ret").strip().lower()
+    known_forward = label_token in {"", "ic", "fwd_ret", "fwd", "forward", "forward_return", "return", "ret"}
+    if not known_forward and not recipe.get("label_span"):
+        return {"ok": False, "reason": "自定义标签必须显式声明 label_span，避免标签跨期泄漏"}
+    label_span = fwd_days if known_forward else max(fwd_days, int(recipe["label_span"]))
     end = recipe.get("end")
     if not end:
         from guanlan_v2.strategy.compute.regen import _latest_trade_date
@@ -66,6 +121,14 @@ def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "reason": _jsonresp_reason(mat)}
     panel, fe_df, label_s, feature_names = mat
 
+    dts = fe_df.index.get_level_values("datetime")
+    last = dts.max()
+    x_last = fe_df[dts == last].dropna()
+    if x_last.empty:
+        missing = [str(c) for c in fe_df.columns if fe_df[dts == last][c].isna().all()]
+        return {"ok": False, "reason": "最新截面无可预测样本",
+                "data_asof": str(pd.Timestamp(last).date()), "missing_latest_features": missing}
+
     X = fe_df.dropna()
     y = label_s.reindex(X.index).dropna()
     X = X.reindex(y.index)
@@ -78,11 +141,6 @@ def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"训练失败: {type(exc).__name__}: {exc}"}
 
-    dts = fe_df.index.get_level_values("datetime")
-    last = dts.max()
-    x_last = fe_df[dts == last].dropna()
-    if x_last.empty:
-        return {"ok": False, "reason": "最新截面无可预测样本"}
     pred = pd.Series(model.predict(x_last.values), index=x_last.index)
     codes = x_last.index.get_level_values("code") if "code" in x_last.index.names \
         else x_last.index.get_level_values(-1)
@@ -98,7 +156,22 @@ def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
     # dims 缺失/跨日/异常 → 原样 3+2 列 + 诚实 reason(附着失败绝不 fail 训练)
     rank_df, v4info = _attach_v4_dims(rank_df)
 
-    oos_ic = _holdout_oos_ic(kind, body.params, fe_df, label_s, fwd_days=fwd_days, frac=0.2)
+    evaluation = {}
+    oos_ic = _holdout_oos_ic(kind, body.params, fe_df, label_s,
+                           fwd_days=label_span, frac=0.2, evidence=evaluation,
+                           observation_index=getattr(getattr(panel, "df", None), "index", label_s.index))
+    from guanlan_v2.strategy.compute.training_runtime import training_provenance
+    preprocessing = {"schema": "workflow-cross-section-v1", "feature_names": feature_names,
+                     "features": feats, "winsorize": True, "winsorize_q": body.winsorize_q,
+                     "standardize": True, "scope": "within_each_date",
+                     "missing_features": "drop_incomplete_rows"}
+    provenance = training_provenance(
+        fe_df, label_s, X.index, prediction_date=pd.Timestamp(last).date().isoformat(),
+        label_spec={"expression": body.label, "horizon": fwd_days, "label_span": label_span},
+        evaluation=evaluation, feature_expressions=feats, preprocessing=preprocessing)
+    panel_df = getattr(panel, "df", None)
+    if panel_df is not None:
+        provenance["technical_provenance"] = dict(panel_df.attrs.get("technical_provenance") or {})
     meta = {
         "id": spec["variant_id"], "name": spec.get("name") or "工作流模型",
         "source": "workflow", "kind": kind, "recipe": recipe, "retrainable": True,
@@ -106,16 +179,23 @@ def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
         "universe": body.universe, "asof": rank_df["date"].iloc[0],
         "created": spec.get("created") or "", "hyper": hyper,
         "v4_rating": v4info,   # 五维附着结果(attached/dims_date/n_rated 或诚实 reason)
+        "training_provenance": provenance, "train_rows": int(len(X)),
+        "requested_data_end": str(end), "ranking_rows": int(len(rank_df)),
     }
     if spec.get("status"):                   # P4:调用方强制状态(研究回路恒 draft);门只降不升
         meta["status"] = str(spec["status"])
     meta = _apply_promote_gate(meta, oos_ic)
     try:
-        reg.save_variant(spec["variant_id"], rank_df, meta)
+        provenance["technical_provenance_manifest"] = _persist_technical_manifest(
+            spec["variant_id"], panel, provenance.get("technical_provenance"))
+        reg.save_variant(spec["variant_id"], rank_df, meta, estimator=model,
+                         preprocessing=preprocessing)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"入库失败: {type(exc).__name__}: {exc}"}
     res: Dict[str, Any] = {"ok": True, "variant_id": spec["variant_id"], "oos_ic": oos_ic,
-                           "v4_rating": v4info}
+                           "v4_rating": v4info, "model_version": meta.get("model_version"),
+                           "asof": meta["asof"], "training_provenance": provenance,
+                           "estimator_artifact": meta.get("estimator_artifact")}
     if meta.get("status") == "draft":
         res["status"] = "draft"
         res["gate"] = meta.get("gate")
@@ -185,6 +265,20 @@ def retrain_variant(vid: str) -> Dict[str, Any]:
     if not meta:
         return {"ok": False, "variant_id": vid, "reason": "变体不存在"}
     kind = str(meta.get("kind") or "").strip()
+    if kind == "v4-lgb" and meta.get("retrainable") is True:
+        from guanlan_v2.strategy.compute.model_train import train_variant
+        recipe = meta.get("recipe") or {}
+        if recipe.get("schema") != "v4-workshop-v1":
+            return {"ok": False, "variant_id": vid, "reason": "v4 变体缺少可核验训练 recipe"}
+        result = train_variant(vid, meta.get("name"), list(recipe.get("factor_ids") or []),
+                               list(recipe.get("base_features") or []),
+                               universe=recipe.get("universe") or "all",
+                               created=meta.get("created") or "", status=meta.get("status"),
+                               holdout_k=int(recipe.get("holdout_k") or 20))
+        latest_meta = result.get("meta") or {}
+        return {"ok": bool(result.get("ok")), "variant_id": vid, "date": latest_meta.get("asof"),
+                "oos_ic": latest_meta.get("oos_ic"), "model_version": latest_meta.get("model_version"),
+                "universe_note": "原特征选择重训，数据滚动；历史成分/PIT未认证"}
     if meta.get("retrainable") is not True or kind not in _TREE_KINDS:
         return {"ok": False, "variant_id": vid,
                 "reason": f"该变体不支持重训(kind={kind or '?'} / retrainable={meta.get('retrainable')})"}
@@ -222,25 +316,49 @@ def _jsonresp_reason(resp) -> str:
         return "materialize 失败(universe/特征/标签求值)"
 
 
-def _holdout_oos_ic(kind, params, fe_df, label_s, fwd_days=5, frac=0.2):
+def _holdout_oos_ic(kind, params, fe_df, label_s, fwd_days=5, frac=0.2, evidence=None,
+                    observation_index=None):
     """真 OOS:末 frac 调仓日留出 + purge fwd_days 防标签泄漏;**新建模型只在训练段 fit**、
     在留出段预测算逐日 rank-IC 均值(不复用全窗口模型→非样本内)。样本不足/失败 → None(诚实)。"""
     import numpy as np, pandas as pd
     try:
         from guanlan_v2.workflow.api import _build_model
+        from guanlan_v2.workflow.temporal_split import purged_dates
+        # Label shifts operate on the original per-code observation rows, not
+        # the feature-complete subset and not an assumed dense market calendar.
+        if observation_index is None:
+            observation_index = label_s.index
         dts_all = pd.DatetimeIndex(sorted(set(fe_df.index.get_level_values("datetime"))))
+        # Holdout count is based on actually matured labels, not the unlabelled
+        # prediction tail. Splits/purge still use the complete trading calendar.
+        labeled_dates = sorted(set(label_s.dropna().index.get_level_values("datetime")))
+        n_hold = max(1, int(len(labeled_dates) * frac))
+        hold_dates = labeled_dates[-n_hold:]
+        if evidence is not None:
+            evidence.update({"metric_scope": "purged_chronological_holdout",
+                             "label_span": int(fwd_days), "n_test_dates_requested": n_hold,
+                             "test_start": str(pd.Timestamp(hold_dates[0]).date()) if hold_dates else None,
+                             "test_end": str(pd.Timestamp(hold_dates[-1]).date()) if hold_dates else None})
         if len(dts_all) < 30:
+            if evidence is not None:
+                evidence["reason"] = "too_few_dates"
             return None
-        n_hold = max(1, int(len(dts_all) * frac))
-        train_cut = len(dts_all) - n_hold - fwd_days   # purge fwd_days
-        if train_cut < 10:
+        if not hold_dates:
             return None
-        train_dates = set(dts_all[:train_cut])
-        hold_dates = list(dts_all[-n_hold:])
+        candidates = dts_all[dts_all < hold_dates[0]]
+        train_dates, split = purged_dates(dts_all, candidates, hold_dates, fwd_days,
+                                         observation_index=observation_index)
+        if evidence is not None:
+            evidence["split"] = split
+        if len(train_dates) < 10:
+            return None
         dcol = fe_df.index.get_level_values("datetime")
         Xtr = fe_df[pd.Index(dcol).isin(train_dates)].dropna()
         ytr = label_s.reindex(Xtr.index).dropna()
         Xtr = Xtr.reindex(ytr.index)
+        if evidence is not None:
+            from guanlan_v2.strategy.compute.training_runtime import date_bounds
+            evidence["train"] = date_bounds(Xtr.index)
         if len(Xtr) < 500:
             return None
         m, _ = _build_model(kind, params)
@@ -256,13 +374,19 @@ def _holdout_oos_ic(kind, params, fe_df, label_s, fwd_days=5, frac=0.2):
             ic = p.rank().corr(yi.rank())
             if np.isfinite(ic):
                 ics.append(float(ic))
+        if evidence is not None:
+            evidence.update({"n_test_dates_scored": len(ics), "ready": bool(ics)})
         return round(float(np.mean(ics)), 4) if ics else None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if evidence is not None:
+            evidence.update({"ready": False, "reason": f"{type(exc).__name__}: {exc}"})
         return None
 
 
 if __name__ == "__main__":   # spec 模式:<spec.json> 训新变体;重训模式:--retrain <vid> 覆盖旧变体
     import json, sys
+    from guanlan_v2.strategy.compute.training_runtime import bootstrap_training_engine
+    bootstrap_training_engine()
     if len(sys.argv) >= 3 and sys.argv[1] == "--retrain":   # 手动/日跑重训子进程入口(api.py 调)
         vid = sys.argv[2]
         print(f"[model_retrain] variant={vid} ...", flush=True)

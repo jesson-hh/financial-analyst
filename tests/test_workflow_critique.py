@@ -23,7 +23,10 @@ def _capture_llm(monkeypatch, seen):
     monkeypatch.setattr(wapi, "_llm_complete", fake)
 
 
-_G = {"nodes": [{"id": "f", "type": "formula", "params": {"expr": "rank(close)"}}], "edges": []}
+_G = {"nodes": [{"id": "s", "type": "source", "params": {"universe": "csi300"}},
+                {"id": "f", "type": "formula", "params": {"expr": "rank(close)"}},
+                {"id": "a", "type": "analysis", "params": {"context_source_id": "s"}}],
+      "edges": [{"from": ["f", "out"], "to": ["a", "factor"]}]}
 
 
 def test_critique_constraints_in_prompt(monkeypatch):

@@ -6,9 +6,10 @@ with no network / file / store I/O (asserted by an import-surface inspection in
 ``tests/orchestration/test_governor.py``). It carries three responsibilities:
 
 1. **Extracted overfitting statistics.** :func:`cscv_pbo` and :func:`oos_verdict` are
-   the *verbatim* bodies of ``workflow.api._cscv_pbo`` / ``_oos_verdict`` — the
-   originals became one-line delegates importing back into here, so every existing
-   caller and test keeps exact behavior (brief invariant 1). :func:`dsr` wraps
+   the shared implementations behind ``workflow.api._cscv_pbo`` / ``_oos_verdict`` —
+   the originals became one-line delegates importing back into here.  PBO additionally
+   has an optional frozen candidate tie-break and tie-aware OOS rank so row order cannot
+   change a governed decision. :func:`dsr` wraps
    ``strategy.compute.cpcv.deflated_sharpe`` with a **function-local** import, keeping
    the orchestration module-level import graph light. No algorithm is re-derived: the
    deflated-Sharpe / PBO / OOS-decay math lives in its existing home and is only
@@ -141,11 +142,13 @@ def oos_verdict(is_v, oos_v, n_oos, min_n: int = 6):
     return "overfit", ratio, "疑似过拟合 · 样本外塌缩/反号"
 
 
-def cscv_pbo(perf_matrix, n_blocks: int = 8):
+def cscv_pbo(perf_matrix, n_blocks: int = 8, *, tie_break_keys=None):
     """CSCV → PBO(回测过拟合概率,López de Prado / 华泰对抗"挑出来的虚高回测")。
 
-    Relocated verbatim from ``workflow.api._cscv_pbo`` (whose body is now a delegate
-    into here). ``perf_matrix``:候选 × 时间块 的表现矩阵,形状 (N候选, S块)。把 S 块
+    Shared with ``workflow.api._cscv_pbo`` (whose body is now a delegate into here).
+    ``perf_matrix``:候选 × 时间块 的表现矩阵,形状 (N候选, S块)。
+    ``tie_break_keys`` 可传与候选对齐的冻结并列键；受治理研究使用
+    ``(trial_created_at, trial_id)``。把 S 块
     枚举所有 C(S, S/2) 互补划分:每划分用 IS 选表现最优候选 → 看它在 OOS 的相对排名
     ω∈(0,1) → ω<0.5 记一次过拟合。PBO = 这类划分占比。需 N≥2 候选 & S≥4 偶数块。
     返回 {enabled, pbo, n_combos, ...}。
@@ -156,6 +159,20 @@ def cscv_pbo(perf_matrix, n_blocks: int = 8):
     if M.ndim != 2 or M.shape[0] < 2 or M.shape[1] < 4:
         return {"enabled": False, "reason": f"PBO 需 ≥2 候选 & ≥4 时间块(得 {tuple(M.shape) if M.ndim == 2 else M.shape})"}
     N, S = M.shape
+    if tie_break_keys is None:
+        tie_keys = list(range(N))
+    else:
+        try:
+            tie_keys = list(tie_break_keys)
+            unique_keys = len(set(tie_keys))
+            sorted(tie_keys)
+        except (TypeError, ValueError):
+            return {"enabled": False, "reason": "PBO tie_break_keys 必须唯一且可比较"}
+        if len(tie_keys) != N or unique_keys != N:
+            return {
+                "enabled": False,
+                "reason": f"PBO tie_break_keys 必须与 {N} 个候选一一对应且唯一",
+            }
     if S % 2 == 1:   # 取偶数块
         S -= 1
         M = M[:, :S]
@@ -167,9 +184,19 @@ def cscv_pbo(perf_matrix, n_blocks: int = 8):
         oos_idx = [b for b in range(S) if b not in is_idx]
         is_perf = M[:, list(is_idx)].mean(axis=1)
         oos_perf = M[:, oos_idx].mean(axis=1)
-        best = int(np.argmax(is_perf))                       # IS 最优候选
-        order = oos_perf.argsort()                            # OOS 升序
-        rank = int(np.where(order == best)[0][0]) + 1         # 1=最差 .. N=最优
+        best_value = float(np.max(is_perf))
+        tied_best = np.flatnonzero(np.isclose(
+            is_perf, best_value, rtol=1e-12, atol=1e-12,
+        ))
+        best = min((int(index) for index in tied_best),
+                   key=lambda index: tie_keys[index])         # IS 冻结并列规则
+        selected_oos = float(oos_perf[best])
+        oos_ties = np.isclose(
+            oos_perf, selected_oos, rtol=1e-12, atol=1e-12,
+        )
+        n_lower = int(np.count_nonzero((oos_perf < selected_oos) & ~oos_ties))
+        # 1=最差 .. N=最优；并列成员取平均秩，避免 argsort 的行序副作用。
+        rank = n_lower + (int(np.count_nonzero(oos_ties)) + 1.0) / 2.0
         omega = rank / (N + 1.0)
         if omega < 0.5:
             n_below += 1
@@ -177,7 +204,8 @@ def cscv_pbo(perf_matrix, n_blocks: int = 8):
     pbo = (n_below / n_tot) if n_tot else float("nan")
     return {"enabled": True, "pbo": _num(pbo), "n_combos": int(n_tot),
             "n_candidates": int(N), "n_blocks": int(S),
-            "note": "PBO = IS 最优候选在 OOS 落入后半的概率(CSCV);>0.5 提示选优过拟合,<0.3 较稳健。"}
+            "tie_aware": True,
+            "note": "PBO = IS 最优候选在 OOS 落入后半的概率(CSCV);IS 按冻结键解并列,OOS 用平均秩;>0.5 提示选优过拟合,<0.3 较稳健。"}
 
 
 def dsr(

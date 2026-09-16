@@ -7,12 +7,16 @@
 ## 页面:AI 工作流
 | 项 | 值 |
 |----|----|
-| 页面 | 观澜 · AI 工作流.html(`workflow.jsx?v=27`) |
+| 页面 | 观澜 · AI 工作流.html(`workflow.jsx?v=20260822quant5`) |
 | 入口组件 | `WorkflowApp`(workflow.jsx) |
 | 全局导航条 | 有(是 factor 模块的 nav 入口) |
 | 后端 | 借引擎 `/factor/*` + 仓内 `/factorlib/*`(P1)+ 仓内 `/feature/build`(P2)+ 仓内 `/model/train`(P3 `kind=xgboost\|lightgbm\|svm\|rf`,P6 `kind=mlp`,P7 `kind=lstm`→`/model/lstm`)+ 仓内 `/factor/{pca,spearman}`(P4)+ 仓内 `/backtest/vector`(P5)(`guanlan_v2/workflow/`) |
 
 职责:可视化工作流编排——`CATALOG` 算子节点,拖拽/连线/撤销/导入导出。
+
+**2026-08-22 · 结构化因子与可信过拟合审计**:
+- 正交化产物以 `guanlan.factor_spec.v1` 保存、注册和重放；因子库名称是权威执行引用，报告/回测/组合保持“基础因子 → winsorize/zscore → 正交化”的原顺序，拒绝重复正交。结果可直接存因子库，也可先注册为 draft 再沉淀经验卡。
+- 过拟合审计公开输入的矩阵始终只作诊断；正式 PASS 只能由服务端 TrialLedger 封存的 opaque `audit_context_id` 解锁，并逐项核对家族、入选 trial、矩阵列、日期、收益、逐期 RankIC 和摘要。收益矩阵只用于 PSR/DSR/Haircut，CSCV/PBO 使用独立的逐期 RankIC 选优矩阵，并诚实标记为“全验证基础联合门 shortlist 内的条件式 PBO”。研究回路在 trial reveal 后重跑最佳图，审计未 PASS 不晋级。
 
 **进展(2026-06-04)**:
 - **P0 · 执行器(已接)**:`run()` 升级为通用 DAG 执行器(`topoOrder` + `runGraph`)+ 节点三件套机制(`SPECS`/`CATALOG`/`NODE_EXEC`,配方见 [../../docs/node_recipe.md](../../docs/node_recipe.md))。公式输入 / 因子分析 → `/factor/report`、多因子 → `/factor/compose` **已出真数据**;占位节点(`__pending`)永不当结果,杜绝谎报。加节点只扩三件套,既有组件零改;改 workflow.jsx → bump HTML `?v=`。

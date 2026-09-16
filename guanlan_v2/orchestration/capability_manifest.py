@@ -23,8 +23,8 @@ Capability ids are bound to the *implemented* Phase-3 refs
 capability and grants nothing — it produces mapping material + a lint only.
 
 FROZEN TABLE STATE (HAZARD note): the material currently freezes against the
-76-row ``WW_TOOL_TABLE`` after the reviewed workspace, media, realtime and
-control-plane additions. The manifest records the
+77-row ``WW_TOOL_TABLE`` after the reviewed workspace, media, realtime,
+control-plane and deterministic data-screening additions. The manifest records the
 exact frozen table shape it derives from (``source_tool_count`` +
 ``source_tool_digest`` over the sorted tool-name projection) so a foreign commit
 that changes the table trips the drift guard with concrete numbers, never
@@ -41,7 +41,8 @@ confusion :func:`lint_skill_supply` exists to catch. The re-freeze therefore mov
 ``source_tool_count`` / ``source_tool_digest`` only; every row is byte-identical.
 Re-generated to 76 for the 2026-08 product integration; the additional tools
 remain presentation/control/workspace surfaces and do not grant a new Phase-3
-market-data capability.
+market-data capability. Re-generated to 77 when ``ww_data_screen`` joined the
+reviewed ``signals`` capability as a deterministic typed-rule read.
 
 Regenerate: ``python -m guanlan_v2.orchestration.capability_manifest``.
 """
@@ -119,7 +120,8 @@ _METHOD_TOOL_INTENT: dict[str, tuple[str, ...]] = {
         "ww_f10",
     ),
     "signals": (
-        "ww_factor_analyze", "ww_model_health", "ww_rescore", "ww_screen_run",
+        "ww_data_screen", "ww_factor_analyze", "ww_model_health", "ww_rescore",
+        "ww_screen_run",
     ),
 }
 
@@ -146,8 +148,9 @@ _METHOD_NOTES: dict[str, str] = {
         "broker ratings)."
     ),
     "signals": (
-        "Model / factor signal reads (v4 screening, rescore overlay, model health, "
-        "factor IC) — research / display, never order signals."
+        "Deterministic typed-rule screening plus model / factor signal reads "
+        "(v4 screening, rescore overlay, model health, factor IC) — research / "
+        "display, never order signals."
     ),
 }
 

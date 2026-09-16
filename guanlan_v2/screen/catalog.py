@@ -74,15 +74,25 @@ def _build() -> Dict[str, Dict[str, Any]]:
             if str(entry.get("status") or "").strip() == "draft":
                 continue   # P2:研究回路 draft 因子不上选股货架(人审 /factorlib/promote 转正后才可见)
             try:
-                expr = _st._zoo_expr(entry)
-                if not expr or any(r in expr for r in _UNAVAILABLE_REFS):
+                structured = isinstance(entry.get("factor_spec"), dict)
+                base_expr = (_st._zoo_expr(entry) if not structured
+                             else str((entry["factor_spec"].get("base_features") or [""])[0]))
+                if not base_expr or any(r in base_expr for r in _UNAVAILABLE_REFS):
                     continue
-                validate_expr(expr)
-                compile_factor(expr)
+                if structured:
+                    _st.compile_entry(entry)
+                    # The registry name is the only non-lossy executable
+                    # reference; publishing base_expr here would drop transform.
+                    expr = fid
+                else:
+                    expr = base_expr
+                    validate_expr(expr)
+                    compile_factor(expr)
             except Exception:  # noqa: BLE001 — 单条坏因子不拖累目录
                 continue
             out[fid] = {"short": fid[4:] if fid.startswith("lib_") else fid, "family": "因子库",
                         "expr": expr, "dir": 1, "ic": None,
+                        **({"factor_spec": entry["factor_spec"]} if structured else {}),
                         "desc": (str(entry.get("description") or "").strip()
                                  or str(entry.get("source") or ""))[:90]}
     except Exception:  # noqa: BLE001 — factorlib 整体不可用 → 目录退回 catalog-only

@@ -45,6 +45,9 @@ class ResearchLoopIn(BaseModel):
     freq: str = "month"
     start: Optional[str] = None
     end: Optional[str] = None
+    # Additive cut-over switch.  Existing direct HTTP clients stay on the
+    # legacy loop unless they opt in; the Weiwō tool opts in by default.
+    governed: bool = False
 
 
 def _progress(**kw: Any) -> None:
@@ -65,7 +68,14 @@ def _run_loop_thread(run_id: str, body: ResearchLoopIn) -> None:
     err: Optional[str] = None
     end_row: Dict[str, Any] = {}
     try:
-        end_row = rloop.run_research_loop(
+        if body.governed:
+            # Lazy import keeps the legacy endpoint footprint unchanged and
+            # avoids loading the orchestration stack for compatibility calls.
+            from guanlan_v2.research.optimize_adapter import run_research_optimize
+            runner = run_research_optimize
+        else:
+            runner = rloop.run_research_loop
+        end_row = runner(
             run_id=run_id, goal=body.goal, max_rounds=body.max_rounds,
             min_rank_ic=body.min_rank_ic, universe=body.universe, freq=body.freq,
             start=body.start, end=body.end, progress=_progress)
@@ -89,6 +99,7 @@ def _start_loop_bg(body: ResearchLoopIn) -> Optional[str]:
         _RESEARCH_STATE.update(
             running=True, phase="starting", label="启动研究回路…", round_k=0,
             total_rounds=body.max_rounds, run_id=run_id,
+            engine=("governed" if body.governed else "legacy"),
             started_at=time.time(), ended_at=None, ok=None, error=None, lines=[])
     threading.Thread(target=lambda: _run_loop_thread(run_id, body),
                      name="research-loop", daemon=True).start()

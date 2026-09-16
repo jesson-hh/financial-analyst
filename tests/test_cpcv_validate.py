@@ -70,7 +70,8 @@ def test_strict_validate_v4_real(monkeypatch, tmp_path):
 def test_write_load_cpcv(tmp_path, monkeypatch):
     from guanlan_v2.strategy import model_health as mh
     monkeypatch.setattr(mh, "CPCV_DIR", tmp_path, raising=False)
-    res = {"ready": True, "model_id": "prod", "dsr": 0.7,
+    monkeypatch.setattr("guanlan_v2.screen.model_registry.current_model_version", lambda mid: "mv_test")
+    res = {"ready": True, "model_id": "prod", "model_version": "mv_test", "dsr": 0.7,
            "sharpe_dist": {"median": 1.2, "std": 0.3, "p05": 0.5, "p95": 1.9}, "n_trials": 10}
     mh.write_cpcv("prod", res)
     s = mh.load_cpcv_summary("prod")

@@ -33,6 +33,10 @@ from pydantic import BaseModel, Field
 
 from guanlan_v2.factorlib.store import LIBRARY_FAMILY, LibraryFactorStore
 from guanlan_v2.factorlib.qlib_to_zoo import UnsupportedFactor, qlib_to_zoo
+from guanlan_v2.factorlib.specs import (
+    FactorSpecError, factor_spec_digest, pin_factor_spec_dependencies,
+    verify_factor_spec_dependencies,
+)
 
 
 # 安全名:只允许字母/数字/下划线/连字符;其余(含 / \ . : 等路径穿越字符)折成 _。
@@ -52,19 +56,21 @@ def _safe_filename(name: str) -> str:
 
 
 class ValidateIn(BaseModel):
-    expr: str
+    expr: str = ""
     is_qlib: bool = False     # True → 先过 qlib_to_zoo 译写再校验
+    factor_spec: Optional[dict] = None
 
 
 class SaveIn(BaseModel):
     name: str
-    expr: str
+    expr: str = ""            # structured factor 可由 factor_spec.base_features[0] 提供
     family: str = "library_mined"   # 默认带 library 前缀 → 进 /factorlib/registered
     description: str = ""
     source: str = ""
     is_qlib: bool = False
     status: str = ""                # P2:空=正式;"draft"=研究回路产物待人审(不上选股货架)
     meta: dict = Field(default_factory=dict)   # 展示用快照(_label/universe/ic…);store 忽略未知键
+    factor_spec: Optional[dict] = None  # 结构化因子权威定义；expr 仅作兼容展示
 
 
 _VALID_SAVE_STATUS = {"", "draft"}
@@ -109,14 +115,25 @@ def _save_factor_unlocked(body: SaveIn, store: LibraryFactorStore) -> dict:
     流程与诚实失败契约同原闭包(见 /save docstring);新增 status 校验与落盘
     (空=正式,draft=待人审——draft 仍注册进 zoo 可按名复验,只是不上选股货架)。
     """
-    # 1) 表达式非空
+    # 1) 因子名非空
     raw = (body.expr or "").strip()
-    if not raw:
-        return {"ok": False, "reason": "空表达式"}
-    # 2) 因子名非空
     nm = (body.name or "").strip()
     if not nm:
         return {"ok": False, "reason": "因子名不能为空"}
+    # 1.5) 结构化规范是权威定义。禁止与 expr 分叉，也不允许把结构化
+    #     base_feature 当 Qlib 串部分翻译后留下两套含义。
+    try:
+        factor_spec = (pin_factor_spec_dependencies(
+            body.factor_spec, fallback_expr=raw, factor_name=nm,
+        ) if body.factor_spec is not None else None)
+    except FactorSpecError as exc:
+        return {"ok": False, "reason": f"factor_spec 非法: {exc}"}
+    if factor_spec is not None:
+        if body.is_qlib:
+            return {"ok": False, "reason": "结构化 factor_spec 不支持 is_qlib；请先保存 zoo-DSL base_feature"}
+        raw = factor_spec["base_features"][0]
+    if not raw:
+        return {"ok": False, "reason": "空表达式"}
     # 2.5) P2:status 校验(空=正式;draft=待人审)
     status = (body.status or "").strip()
     if status not in _VALID_SAVE_STATUS:
@@ -128,11 +145,12 @@ def _save_factor_unlocked(body: SaveIn, store: LibraryFactorStore) -> dict:
     except UnsupportedFactor as u:
         return {"ok": False, "reason": f"untranslatable: {u}"}
 
-    # 4) 校验(与 /factorlib/validate、store.register_all 同源两行;非法 expr 诚实失败)
+    # 4) 校验/编译。structured 走 store 的统一编译器，注册、启动重载、
+    #    /validate 与此处使用完全相同的执行定义。
     try:
-        from financial_analyst.factors.zoo.expr import compile_factor, validate_expr
-        validate_expr(zexpr)
-        compute = compile_factor(zexpr)
+        zexpr, compute, factor_spec = store.compile_entry({
+            "name": nm, "expr": zexpr, "factor_spec": factor_spec,
+        })
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "zoo_expr": zexpr,
                 "reason": f"{type(exc).__name__}: {exc}"}
@@ -167,6 +185,9 @@ def _save_factor_unlocked(body: SaveIn, store: LibraryFactorStore) -> dict:
             rec["qlib_src"] = raw           # 原始 Qlib 串仅作台账/展示
         if body.meta:
             rec["meta"] = body.meta         # 展示用快照;store.list_factors 只读固定键,忽略未知键
+        if factor_spec is not None:
+            rec["factor_spec"] = factor_spec
+            rec["factor_spec_digest"] = factor_spec_digest(factor_spec)
         if status:
             rec["status"] = status   # P2:draft 落盘(promote 转正时摘除)
         rec["saved_at"] = datetime.now().isoformat(timespec="seconds")
@@ -202,12 +223,15 @@ def _save_factor_unlocked(body: SaveIn, store: LibraryFactorStore) -> dict:
             pass
         from financial_analyst.factors.zoo.registry import AlphaSpec, register, unregister
         unregister(nm)                     # replace 语义:避开 frozen-collision
+        tags = ["guanlan_factorlib", "mined"]
+        if factor_spec is not None:
+            tags.extend(("factor_spec:v1", f"spec:{factor_spec_digest(factor_spec)}"))
         register(AlphaSpec(
             name=nm, family=fam,
             description=body.description or "",
             formula_text=zexpr,
             compute=compute,
-            tags=("guanlan_factorlib", "mined"),
+            tags=tuple(tags),
         ))
         registered = True
     except Exception as exc:  # noqa: BLE001
@@ -217,6 +241,9 @@ def _save_factor_unlocked(body: SaveIn, store: LibraryFactorStore) -> dict:
     # 8) 成功返回(落盘成功即 ok:True;registered 标注运行时注册是否生效)
     resp = {"ok": True, "name": nm, "expr": zexpr, "family": fam,
             "file": fp.name, "registered": registered}
+    if factor_spec is not None:
+        resp.update({"structured": True, "factor_spec": factor_spec,
+                     "factor_spec_digest": factor_spec_digest(factor_spec)})
     if reg_reason:
         resp["reason"] = reg_reason
     return resp
@@ -251,6 +278,15 @@ def save_factor_idempotent(body: SaveIn, store: LibraryFactorStore, *,
     """
     try:
         with _factorlib_write_guard(store):
+            try:
+                requested_spec = (pin_factor_spec_dependencies(
+                    body.factor_spec, fallback_expr=str(body.expr or "").strip(),
+                    factor_name=str(body.name or "").strip(),
+                ) if body.factor_spec is not None else None)
+            except FactorSpecError as exc:
+                return {"ok": False, "reason": f"factor_spec 非法: {exc}"}
+            requested_expr = (requested_spec["base_features"][0] if requested_spec is not None
+                              else str(body.expr or "").strip())
             for entry in store.load_all():
                 meta = entry.get("meta") or {}
                 if not isinstance(meta, dict):
@@ -267,12 +303,25 @@ def save_factor_idempotent(body: SaveIn, store: LibraryFactorStore, *,
                 )
                 if not same_origin:
                     continue
-                if str(entry.get("expr") or "").strip() != str(body.expr or "").strip():
+                if str(entry.get("expr") or "").strip() != requested_expr:
                     return {"ok": False, "reason": "同一空间资产版本的全局记录表达式不一致"}
+                try:
+                    stored_spec = (verify_factor_spec_dependencies(
+                        entry.get("factor_spec"),
+                        fallback_expr=str(entry.get("expr") or "").strip(),
+                        factor_name=str(entry.get("name") or "").strip(),
+                    ) if entry.get("factor_spec") is not None else None)
+                except FactorSpecError as exc:
+                    return {"ok": False, "reason": f"已存 factor_spec 损坏: {exc}"}
+                if stored_spec != requested_spec:
+                    return {"ok": False, "reason": "同一空间资产版本的 factor_spec 不一致"}
                 return {
                     "ok": True, "name": entry.get("name"), "expr": entry.get("expr"),
                     "family": entry.get("family"), "file": entry.get("_file"),
                     "registered": False, "recovered": True,
+                    **({"structured": True, "factor_spec": stored_spec,
+                        "factor_spec_digest": factor_spec_digest(stored_spec)}
+                       if stored_spec is not None else {}),
                 }
             if (body.source or "").strip() != _WORKSPACE_PUBLISH_SOURCE:
                 return {"ok": False, "reason": "内部空间发布来源标记缺失"}
@@ -374,9 +423,17 @@ def build_factorlib_router(store: Optional[LibraryFactorStore] = None) -> APIRou
         try:
             import financial_analyst.factors.zoo  # noqa: F401  触发内置注册
             from financial_analyst.factors.zoo.registry import list_alphas
-            rows = [{"name": s.name, "family": s.family, "formula": s.formula_text}
-                    for s in list_alphas(None)
-                    if str(s.family).startswith(LIBRARY_FAMILY)]
+            stored = {str(row.get("name")): row for row in store.list_factors(validate=False)}
+            rows = []
+            for s in list_alphas(None):
+                if not str(s.family).startswith(LIBRARY_FAMILY):
+                    continue
+                row = {"name": s.name, "family": s.family, "formula": s.formula_text}
+                saved = stored.get(str(s.name)) or {}
+                if isinstance(saved.get("factor_spec"), dict):
+                    row.update({"structured": True, "factor_spec": saved["factor_spec"],
+                                "factor_spec_digest": saved.get("factor_spec_digest")})
+                rows.append(row)
             return JSONResponse({"ok": True, "count": len(rows), "registered": rows})
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "count": 0, "registered": [],
@@ -390,6 +447,18 @@ def build_factorlib_router(store: Optional[LibraryFactorStore] = None) -> APIRou
         译/编不动 → ``ok:False`` + reason(HTTP 200)。
         """
         raw = (body.expr or "").strip()
+        try:
+            factor_spec = (pin_factor_spec_dependencies(
+                body.factor_spec, fallback_expr=raw,
+            ) if body.factor_spec is not None else None)
+        except FactorSpecError as exc:
+            return JSONResponse({"ok": False, "zoo_expr": raw,
+                                 "reason": f"factor_spec 非法: {exc}"})
+        if factor_spec is not None:
+            if body.is_qlib:
+                return JSONResponse({"ok": False, "zoo_expr": raw,
+                                     "reason": "结构化 factor_spec 不支持 is_qlib"})
+            raw = factor_spec["base_features"][0]
         if not raw:
             return JSONResponse({"ok": False, "zoo_expr": "", "reason": "空表达式"})
         try:
@@ -397,10 +466,14 @@ def build_factorlib_router(store: Optional[LibraryFactorStore] = None) -> APIRou
         except UnsupportedFactor as u:
             return JSONResponse({"ok": False, "zoo_expr": "", "reason": f"untranslatable: {u}"})
         try:
-            from financial_analyst.factors.zoo.expr import compile_factor, validate_expr
-            validate_expr(zoo_expr)
-            compile_factor(zoo_expr)
-            return JSONResponse({"ok": True, "zoo_expr": zoo_expr})
+            _expr, _compute, canonical = store.compile_entry({
+                "name": "", "expr": zoo_expr, "factor_spec": factor_spec,
+            })
+            payload = {"ok": True, "zoo_expr": _expr}
+            if canonical is not None:
+                payload.update({"structured": True, "factor_spec": canonical,
+                                "factor_spec_digest": factor_spec_digest(canonical)})
+            return JSONResponse(payload)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "zoo_expr": zoo_expr,
                                  "reason": f"{type(exc).__name__}: {exc}"})

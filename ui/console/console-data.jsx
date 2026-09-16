@@ -46,6 +46,18 @@ function wwMediaUrl(mediaId) {
   return id ? (WW_API + '/console/media/' + encodeURIComponent(id)) : '';
 }
 
+function wwNormalizeWorkflowArtifact(payload) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const safeId = (value, pattern) => pattern.test(String(value || '')) ? String(value) : '';
+  const workspaceId = safeId(p.workspace_id, /^rw_[0-9A-Za-z_-]+$/);
+  const sessionId = safeId(p.session_id, /^[0-9A-Za-z_-]{1,100}$/);
+  const runId = safeId(p.run_id, /^wr_[0-9a-f]{12,40}$/);
+  const workflowId = safeId(p.workflow_id, /^[0-9A-Za-z_-]{1,100}$/);
+  const graph = p.graph && Array.isArray(p.graph.nodes) && Array.isArray(p.graph.edges) ? p.graph : null;
+  if (!workspaceId || (!runId && !workflowId && !graph)) return null;
+  return { workspaceId, sessionId, runId, workflowId, graph, name: String(p.name || 'Agent 工作流').slice(0, 160) };
+}
+
 function wwNormalizeMediaImage(payload) {
   const p = payload && typeof payload === 'object' ? payload : {};
   const mediaId = wwSafeMediaId(p.media_id);
@@ -148,7 +160,8 @@ function wwApply(s, ev) {
       n.confirm = null;
     }
   }
-  if (ev.type === 'tool_result' && ev.artifact && ev.artifact.page && WW_PAGES[ev.artifact.page]) {
+  // 整图产物只生成可点击对话卡，不能在 SSE/历史重放时自动覆盖当前画布。
+  if (ev.type === 'tool_result' && ev.artifact && ev.artifact.kind !== 'workflow' && ev.artifact.page && WW_PAGES[ev.artifact.page]) {
     n.artifacts = s.artifacts.concat([{ ...ev.artifact, evId: ev.id, ts: ev.ts, tool: ev.tool }]);
     if (n.activated.indexOf(ev.artifact.page) < 0) n.activated = n.activated.concat([ev.artifact.page]);
     n.benchClosed = false;   // 新产物 → 工作台重新滑出
@@ -156,7 +169,7 @@ function wwApply(s, ev) {
   return n;
 }
 
-// 事件流 → chat 形消息模型:[{kind:'user'|'chain'|'answer'|'report'|'condense'|'error', ...}]
+// 事件流 → chat 形消息模型:[{kind:'user'|'memory'|'chain'|'answer'|'report'|'condense'|'error', ...}]
 function wwDeriveItems(events, busy) {
   const items = [];
   let chain = null;            // 当前折叠中的工具链 {kind:'chain', chain:[...]}
@@ -209,6 +222,11 @@ function wwDeriveItems(events, busy) {
         row.t = row._ts && ev.ts ? Math.max(0, (new Date(ev.ts) - new Date(row._ts)) / 1000) : 0;
         if (chain && at != null && chain.chain[at] === row) delete openIdx[ev.tool];
       }
+      if (ev.artifact && ev.artifact.kind === 'workflow') {
+        const workflow = wwNormalizeWorkflowArtifact(ev.artifact.payload);
+        if (workflow) items.push({ kind: 'workflow', id: 'wf' + ev.id, ...workflow });
+        else items.push({ kind: 'warning', id: 'wfw' + ev.id, note: '工作流产物缺少有效空间或图标识，未自动打开' });
+      }
       if (ev.artifact && ev.artifact.kind === 'report_md') {
         items.push({ kind: 'report', id: 'r' + ev.id, path: ev.artifact.payload.path,
           code: ev.artifact.payload.code, name: ev.artifact.payload.name || ev.artifact.payload.code });
@@ -220,6 +238,9 @@ function wwDeriveItems(events, busy) {
         else items.push({ kind: 'warning', id: 'mw' + ev.id,
           note: '图片产物已拦截：缺少合法的媒体标识或图片类型' });
       }
+    } else if (ev.type === 'artifact' && ev.artifact && ev.artifact.kind === 'workflow') {
+      const workflow = wwNormalizeWorkflowArtifact(ev.artifact.payload);
+      if (workflow) items.push({ kind: 'workflow', id: 'wf' + ev.id, ...workflow });
     } else if (ev.type === 'artifact' && ev.artifact && ev.artifact.kind === 'media_image') {
       // 兼容仅投递 artifact 的 SSE 事件；仍执行与 tool_result 完全相同的句柄校验。
       const media = wwNormalizeMediaImage(ev.artifact.payload);
@@ -236,6 +257,12 @@ function wwDeriveItems(events, busy) {
         thinkingMode: currentThinkingMode, turnId: answerTurnId });
     } else if (ev.type === 'condensation') {
       items.push({ kind: 'condense', id: 'k' + ev.id, summary: ev.summary || '' });
+    } else if (ev.type === 'memory_flush') {
+      items.push({ kind: 'memory_flush', id: 'mf' + ev.id,
+        note: ev.note || '关键前情已写入本会话长期笔记' });
+    } else if (ev.type === 'memory_recall' && Number(ev.count || 0) > 0) {
+      items.push({ kind: 'memory', id: 'mr' + ev.id, count: Number(ev.count || 0),
+        hits: Array.isArray(ev.hits) ? ev.hits : [], turnId: eventTurnId || currentTurnId });
     } else if (ev.type === 'task_update' && ev.status === 'cancelled' && !ev.kind) {
       // 保留旧 turn 已经生成的部分内容，但明确标记「被打断」；
       // 只取消尚未完成的工具，不把已 done 的工具误标失败。
@@ -490,5 +517,5 @@ window.WW = { API: WW_API, TOOL_CN: WW_TOOL_CN, PAGES: WW_PAGES, GENERAL_WORKSPA
               workspaceAgentRuns: wwWorkspaceAgentRuns, workspaceAssets: wwWorkspaceAssets,
               workspaceSeats: wwWorkspaceSeats, canonicalSecurityCode: wwCanonicalSecurityCode,
               chooseResearchFolder: wwChooseResearchFolder, deriveItems: wwDeriveItems,
-              mediaUrl: wwMediaUrl,
+              mediaUrl: wwMediaUrl, normalizeWorkflowArtifact: wwNormalizeWorkflowArtifact,
               seatsDecisions: wwSeatsDecisions };

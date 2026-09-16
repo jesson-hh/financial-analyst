@@ -26,6 +26,8 @@ Zero network, microsecond reads.  Use when you have a local Qlib data directory.
 from __future__ import annotations
 
 import struct
+from collections import OrderedDict
+from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -60,12 +62,12 @@ DAILY_BASIC_FIELD_MAP: Dict[str, str] = {
     "turnover_rate": "turnover_rate",
 }
 
-# Precomputed technical-indicator fields (day freq only; same .bin layout as quote).
-# Surfaced so DSL formulas can use exact RSI/MACD/Amihud/momentum instead of reconstructing.
+# Legacy technical filenames. fetch_tech recomputes versioned causal values from
+# current quote observations; _read_bin remains an unmodified raw audit interface.
 TECH_FIELD_MAP: Dict[str, str] = {
-    "rsi_14": "rsi_14",            # Wilder RSI(14)
-    "macd_signal": "macd_signal",  # MACD 信号线
-    "amihud_20": "amihud_20",      # Amihud 非流动性(20日)
+    "rsi_14": "rsi_14",            # Legacy EMA-span14 RSI, not Wilder RSI
+    "macd_signal": "macd_signal",  # Legacy name: EMA12-EMA26 (DIF, not DEA)
+    "amihud_20": "amihud_20",      # Amount-based Amihud; NOT v4's volume proxy
     "mom_20": "mom_20",            # 20日动量
     "mom_60": "mom_60",            # 60日动量
     "mom_120": "mom_120",          # 120日动量
@@ -181,6 +183,7 @@ class QlibBinaryLoader(BaseLoader):
         # (rotating window — only ~7 days retained).
 
         self._calendars: Dict[str, List[pd.Timestamp]] = {}
+        self._calendar_signatures = {}
         import threading
         self._calendar_lock = threading.Lock()
         # Lazily-built financial-statement index ({ts_code: ann_date-indexed frame});
@@ -188,19 +191,34 @@ class QlibBinaryLoader(BaseLoader):
         # _merge_financials fans the per-code fetch out over a thread pool.
         self._fin_cache: Optional[Dict[str, "pd.DataFrame"]] = None
         self._fin_lock = threading.Lock()
+        # Small per-loader LRU: retain complete warmup only for recently used
+        # stocks/as-of dates. File signatures invalidate corrected/appended data.
+        self._tech_cache = OrderedDict()
+        self._tech_cache_bytes = 0
+        self._tech_cache_max_bytes = 64 * 1024 * 1024
+        self._tech_cache_max_entries = 128
+        self._tech_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _load_calendar(self, freq: str = "day") -> List[pd.Timestamp]:
-        """Return the calendar for *freq*, loading from disk on first call (thread-safe)."""
+        """Read once per file revision (thread-safe); new dates invalidate cache."""
+        if freq not in self._roots:
+            raise ValueError(f"freq={freq!r} not configured in provider_uri")
+        cal_fname = _CALENDAR_FILE.get(freq)
+        if cal_fname is None:
+            raise ValueError(f"Unknown freq: {freq!r}")
+        cal_path = self._roots[freq] / "calendars" / cal_fname
+        stat = cal_path.stat()
+        signature = (stat.st_size, stat.st_mtime_ns)
         cached = self._calendars.get(freq)
-        if cached is not None:
+        if cached is not None and self._calendar_signatures.get(freq) == signature:
             return cached
         with self._calendar_lock:
             cached = self._calendars.get(freq)   # 双重检查
-            if cached is not None:
+            if cached is not None and self._calendar_signatures.get(freq) == signature:
                 return cached
             if freq not in self._roots:
                 raise ValueError(
@@ -214,6 +232,7 @@ class QlibBinaryLoader(BaseLoader):
             with open(cal_path, "r", encoding="utf-8") as f:
                 stamps = [pd.Timestamp(line.strip()) for line in f if line.strip()]
             self._calendars[freq] = stamps
+            self._calendar_signatures[freq] = signature
             return stamps
 
     @staticmethod
@@ -366,9 +385,110 @@ class QlibBinaryLoader(BaseLoader):
         return self._build_df(code, DAILY_BASIC_FIELD_MAP, start, end, freq="day")
 
     def fetch_tech(self, code: str, start: str, end: str) -> pd.DataFrame:
-        """Precomputed technical indicators (RSI/MACD/Amihud/momentum) — day freq only.
-        Same graceful contract as fetch_daily_basic: a missing .bin → absent column → NaN."""
-        return self._build_df(code, TECH_FIELD_MAP, start, end, freq="day")
+        """Versioned causal daily fields; ignore unverifiable/stale technical bins.
+
+        Read full quote history up to ``end`` for stable EMA initialisation and
+        lookback, then slice the result. Missing real amount never falls back to
+        volume or close*volume. Source/definition metadata travels in attrs;
+        raw legacy values remain available via _read_bin for comparison only.
+        """
+        from financial_analyst.data.loaders.technical import technical_definition_fingerprint
+        signatures = self._tech_source_signatures(code)
+        definition_hash = technical_definition_fingerprint()
+        key = (self._code_to_dir(code), str(pd.Timestamp(end)), definition_hash, signatures)
+        with self._tech_lock:
+            cached = self._tech_cache.get(key)
+            if cached is not None:
+                self._tech_cache.move_to_end(key)
+        if cached is None:
+            tech = self._compute_tech_history(code, end)
+            if self._tech_source_signatures(code) != signatures:
+                raise RuntimeError(f"Technical source changed while reading {code}; retry on a stable snapshot")
+            if tech.empty:
+                return tech
+            tech.attrs["technical_provenance"]["source_file_signatures"] = {
+                name: {"size": size, "mtime_ns": stamp}
+                for name, size, stamp in signatures
+            }
+            size = int(tech.memory_usage(index=True, deep=True).sum())
+            with self._tech_lock:
+                # A concurrent caller may have filled this exact key already.
+                previous = self._tech_cache.pop(key, None)
+                if previous is not None:
+                    self._tech_cache_bytes -= previous[1]
+                if size <= self._tech_cache_max_bytes:
+                    self._tech_cache[key] = (tech, size)
+                    self._tech_cache_bytes += size
+                while (len(self._tech_cache) > self._tech_cache_max_entries
+                       or self._tech_cache_bytes > self._tech_cache_max_bytes):
+                    _, (_, evicted_size) = self._tech_cache.popitem(last=False)
+                    self._tech_cache_bytes -= evicted_size
+        else:
+            tech = cached[0]
+        result = tech.loc[(tech.index >= pd.Timestamp(start)) & (tech.index <= pd.Timestamp(end))].copy()
+        result.attrs = deepcopy(tech.attrs)
+        result.index.name = "trade_date"
+        result = result.reset_index()
+        result.attrs["technical_provenance"].update({
+            "code": str(code), "requested_start": str(start), "requested_end": str(end),
+            "definition_hash": definition_hash,
+            "cache": "hit" if cached is not None else "miss",
+            "cache_policy": "instance LRU, 128 entries/64 MiB, source size+mtime_ns invalidation",
+        })
+        return result
+
+    def _tech_source_signatures(self, code: str) -> tuple:
+        root = self._roots["day"]
+        feature_dir = root / "features" / self._code_to_dir(code)
+        paths = [root / "calendars" / "day.txt"]
+        paths.extend(feature_dir / f"{name}.day.bin" for name in ("close", "volume", "amount"))
+        signatures = []
+        for path in paths:
+            try:
+                stat = path.stat()
+                signatures.append((str(path.relative_to(root)), stat.st_size, stat.st_mtime_ns))
+            except FileNotFoundError:
+                signatures.append((str(path.relative_to(root)), None, None))
+        return tuple(signatures)
+
+    def _compute_tech_history(self, code: str, end: str) -> pd.DataFrame:
+        from financial_analyst.data.loaders.technical import (
+            TECH_VERSION, TECH_DEFINITIONS, compute_daily_technical,
+        )
+        calendar = self._load_calendar("day")
+        if not calendar:
+            return pd.DataFrame()
+        quote = self._build_df(code, {"close": "close", "vol": "volume", "amount": "amount"},
+                               str(calendar[0]), end, freq="day")
+        if quote.empty or "close" not in quote:
+            return pd.DataFrame()
+        quote = quote.set_index("trade_date").sort_index()
+        valid_close = np.isfinite(quote["close"]) & (quote["close"] > 0)
+        if not bool(valid_close.any()):
+            return pd.DataFrame()
+        # Physical binary/calendar tails may include future NaNs. They do not
+        # establish observations, and EMA carry-forward must not invent values.
+        first_observed = quote.index[valid_close][0]
+        last_observed = quote.index[valid_close][-1]
+        quote = quote.loc[first_observed:last_observed].copy()
+        raw_amount = quote.get("amount", pd.Series(np.nan, index=quote.index)).copy()
+        quote = _normalize_vol_units(quote)
+        tech = compute_daily_technical(quote)
+        corrected = int((quote.get("amount", raw_amount).ne(raw_amount) & raw_amount.notna()).sum())
+        tech.attrs["technical_provenance"] = {
+            "schema": TECH_VERSION,
+            "code": str(code),
+            "policy": "full_causal_recompute; no precomputed-bin mixing; no technical ffill",
+            "source": "qlib quote binaries; observed close and actual amount",
+            "first_source_date": str(first_observed.date()),
+            "last_source_date": str(last_observed.date()),
+            "amount_unit_policy": "CNY after existing loader ratio-based unit normalisation",
+            "amount_rows_normalised": corrected,
+            "price_adjustment": "inherited from provider; not independently PIT-certified",
+            "definitions": dict(TECH_DEFINITIONS),
+            "missing_policy": "no synthetic amount; missing close/amount yields missing dependent value",
+        }
+        return tech
 
     def fetch_financials(self, code: str) -> pd.DataFrame:
         """Return point-in-time financial-statement fields for one code, indexed

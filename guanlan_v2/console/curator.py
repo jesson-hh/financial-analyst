@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 _KEYED_RE = re.compile(r"^- \[\d{4}-\d{2}-\d{2}\] \([^)]+\) ")
 
@@ -34,7 +34,8 @@ def classify_lines(text: str) -> Tuple[List[str], List[str]]:
     return keyed, unkeyed
 
 
-def consolidate_memory(mem_path: Path, archive_path: Path, max_lines: int = 120) -> Dict[str, Any]:
+def consolidate_memory(mem_path: Path, archive_path: Path, max_lines: int = 120,
+                       protected_lines: Iterable[str] = ()) -> Dict[str, Any]:
     """常驻感知收敛:keyed 行永不归档;溢出的最旧 unkeyed 行归档(不物理删,可恢复)。
     保留行按原始顺序写回。注:合并时顺带剔除空行(压紧格式)。无溢出则不动文件、不建 archive。"""
     try:
@@ -43,10 +44,18 @@ def consolidate_memory(mem_path: Path, archive_path: Path, max_lines: int = 120)
         lines = [ln for ln in mem_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
         if len(lines) <= max_lines:
             return {"ok": True, "archived": 0, "kept": len(lines)}
-        unkeyed_idx = [i for i, ln in enumerate(lines) if not is_keyed_line(ln)]
-        keyed_n = len(lines) - len(unkeyed_idx)
-        keep_unkeyed_n = max(0, max_lines - keyed_n)
-        archived_idx = set(unkeyed_idx[:max(0, len(unkeyed_idx) - keep_unkeyed_n)])
+        protected = {str(ln).strip() for ln in protected_lines if str(ln).strip()}
+        # UI pin 与主题 key 是两个概念，但二者都属于“不可被自动收敛”的常驻集合。
+        # protected_lines 来自治理 sidecar；sidecar 不可用时仍退化为原有 keyed 规则。
+        archiveable_idx = [
+            i for i, ln in enumerate(lines)
+            if not is_keyed_line(ln) and ln.strip() not in protected
+        ]
+        resident_n = len(lines) - len(archiveable_idx)
+        keep_archiveable_n = max(0, max_lines - resident_n)
+        archived_idx = set(
+            archiveable_idx[:max(0, len(archiveable_idx) - keep_archiveable_n)]
+        )
         if not archived_idx:
             return {"ok": True, "archived": 0, "kept": len(lines)}
         archived = [lines[i] for i in sorted(archived_idx)]

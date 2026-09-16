@@ -171,6 +171,42 @@ def test_cscv_pbo_wellformed():
     assert 0.0 <= res["pbo"] <= 1.0
 
 
+def test_cscv_pbo_tie_keys_are_candidate_permutation_invariant():
+    # This discrete RankIC matrix deliberately creates IS/OOS ties.  The legacy
+    # argmax/argsort implementation changed from 0.2571 to 0.4429 under a row
+    # permutation, crossing the formal 0.30 gate despite identical evidence.
+    matrix = np.asarray([
+        [2, 0, 1, 0, -2, 0, 2, 2],
+        [2, 1, -1, 0, 1, -1, 2, 0],
+        [-1, 0, -2, 1, -1, 2, -1, -1],
+        [1, -1, -1, -1, 1, -1, 2, -1],
+    ], dtype="float64") / 2.0
+    keys = [("2026-08-22T10:00:00", f"trial-{index}") for index in range(4)]
+    permutation = [2, 1, 3, 0]
+
+    original = cscv_pbo(matrix, 8, tie_break_keys=keys)
+    permuted = cscv_pbo(
+        matrix[permutation], 8,
+        tie_break_keys=[keys[index] for index in permutation],
+    )
+
+    assert original["pbo"] == permuted["pbo"] == pytest.approx(0.21428571428571427)
+    assert original["pbo"] <= 0.30 and permuted["pbo"] <= 0.30
+    assert original["tie_aware"] is True
+
+
+def test_cscv_pbo_oos_ties_use_average_rank():
+    result = cscv_pbo(
+        np.ones((2, 4), dtype="float64"), 4,
+        tie_break_keys=[("2026-01-01", "a"), ("2026-01-02", "b")],
+    )
+    # Both candidates share OOS ranks 1 and 2, hence average rank 1.5 and
+    # omega=0.5.  It must not be classified as the selected member falling into
+    # the lower half merely because argsort happened to place it first.
+    assert result["enabled"] is True
+    assert result["pbo"] == 0.0
+
+
 def test_cscv_pbo_delegate_identity():
     from guanlan_v2.workflow import api as workflow_api
 

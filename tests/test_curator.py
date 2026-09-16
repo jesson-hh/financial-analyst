@@ -77,3 +77,18 @@ def test_consolidate_keyed_only_never_archives(tmp_path):
     body = mem.read_text(encoding="utf-8")
     assert "(k1)" in body and "(k2)" in body and "(k3)" in body
     assert not arch.exists()
+
+
+def test_consolidate_keeps_explicitly_pinned_unkeyed_line(tmp_path):
+    """治理层置顶与 key 分离，但两者都不能被自动收敛归档。"""
+    from guanlan_v2.console.curator import consolidate_memory
+    mem = tmp_path / "memory.md"; arch = tmp_path / "memory.archive.md"
+    pinned = "- [2026-06-01] 用户手动置顶但没有主题键"
+    mem.write_text(
+        pinned + "\n- [2026-06-02] old\n- [2026-06-03] newest\n",
+        encoding="utf-8",
+    )
+    result = consolidate_memory(mem, arch, max_lines=2, protected_lines={pinned})
+    assert result["ok"] and result["archived"] == 1
+    assert pinned in mem.read_text(encoding="utf-8")
+    assert pinned not in arch.read_text(encoding="utf-8")

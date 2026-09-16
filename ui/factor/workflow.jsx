@@ -10,8 +10,21 @@ const WW_QUERY = new URLSearchParams(location.search);
 const WW_WS = WW_QUERY.get('ws') || '';
 const WW_WORKSPACE_ID = WW_QUERY.get('workspace_id') || (/^rw_[0-9A-Za-z_-]+$/.test(WW_WS) ? WW_WS : '');
 const WW_READONLY = WW_QUERY.get('readonly') === '1';
+const WW_SESSION_ID = /^[0-9A-Za-z_-]{1,100}$/.test(WW_QUERY.get('session_id') || '') ? WW_QUERY.get('session_id') : '';
 const WW_NS_ID = WW_WORKSPACE_ID || WW_WS;
 const WW_NS = WW_NS_ID ? (':' + WW_NS_ID) : '';
+const WW_BACK_TO_CHAT_EVENT = 'guanlan:ww:back-to-conversation';
+
+function wwBackToConversation() {
+  // 嵌入帷幄时不能在 iframe 内跳转：由父壳收起右栏工作台/全宽 Stage，
+  // 才能保留当前 sid、流式任务与研究空间上下文。
+  if (WW_EMBED && window.parent !== window) {
+    window.parent.postMessage({ type: WW_BACK_TO_CHAT_EVENT }, location.origin);
+    return;
+  }
+  // 独立窗口回到现行帷幄入口；旧「投研台」已经归档，不再存在。
+  window.location.href = '../console/观澜 · 帷幄.html' + (WW_SESSION_ID ? '?session_id=' + encodeURIComponent(WW_SESSION_ID) : '');
+}
 
 // ───────── 布局常量 ─────────
 const HEADER = 34, PAD = 8, ROW = 26, W = 200;
@@ -26,6 +39,7 @@ const CAT = {
 
 // ───────── 节点规格 (目录 + 行为) ─────────
 const SPECS = {
+  data_screen: { title: '数据筛选 Skill', cat: 'io', inputs: [{ id: 'src', label: '数据源', dt: 'series' }], outputs: [{ id: 'candidates', label: '候选', dt: 'data_screen' }], params: [{ id: 'preset', label: '筛选模板', type: 'select', value: 'ma_trend', options: [{ value: 'ma_trend', label: '沿均线上升' }], hint: '模板会编译为受控硬规则并逐票执行，不走 v4 排名或问财近似。' }, { id: 'ma_window', label: '均线窗口', type: 'step', value: 5, step: 1 }, { id: 'rising_transitions', label: '严格上升次数', type: 'step', value: 3, step: 1, hint: '3 次变化会检查最近 4 个移动均线值，任一次持平也不通过。' }, { id: 'below_lookback', label: '回看天数', type: 'step', value: 5, step: 1 }, { id: 'max_consecutive_below', label: '最多连续跌破', type: 'step', value: 1, step: 1 }, { id: 'min_bias', label: '最小乖离率', type: 'step', value: 0, step: 0.005, dec: 3 }, { id: 'max_bias', label: '最大乖离率', type: 'step', value: 0.03, step: 0.005, dec: 3 }, { id: 'top_n', label: '返回数量', type: 'step', value: 5, step: 1 }, { id: 'min_avg_amount_yi', label: '日均成交额≥(亿)', type: 'step', value: 1, step: 0.5, dec: 1 }, { id: 'amount_window', label: '成交额窗口', type: 'step', value: 20, step: 1 }] },
   source:   { title: '数据源', cat: 'io', inputs: [], outputs: [{ id: 'data', label: '数据', dt: 'series' }], params: [{ id: 'scope', label: '范围', type: 'select', value: '小池', options: ['个股', '自选', '小池', '全市场'] }, { id: 'code', label: '标的/池', type: 'text', value: '600519' }, { id: 'codes', label: '自选代码', type: 'text', value: '', hint: '自组股池:填股票代码(逗号/空格分隔,如 600519,000858,SH600036)。填了就用这批票(覆盖下面「股票池」);留空走股票池。⚠ 小池/单票的排名类截面因子会退化,单票更适合阶段B共振/时序。' }, { id: 'benchmark', label: '对标指数', type: 'select', value: '', options: [{ value: '', label: '不对标' }, { value: 'csi300', label: '沪深300(真实指数)' }], hint: '共振用:选了就给面板注入大盘日收益 idx_ret,公式可写 correlation(returns, idx_ret, 20)=个股与大盘20日共振。目前真实指数仅沪深300;其它宽基请用 csmean(returns) 在所选池上做等权代理大盘。' }, { id: 'leader', label: '龙头代码', type: 'text', value: '', hint: '共振用:填一只龙头股代码(如 600519),给面板注入它的日收益 ref_ret,公式可写 correlation(returns, ref_ret, 20)=个股跟随龙头的20日共振。留空则不注入。' }, { id: 'universe', label: '股票池', type: 'select', value: '自动', options: [{ value: '自动', label: '自动·按标的' }, { value: 'csi300', label: '沪深300' }, { value: 'csi500', label: '中证500' }, { value: 'csi800', label: '中证800' }, { value: 'csi1000', label: '中证1000' }, { value: 'all', label: '全市场A股' }, { value: 'csi_fast', label: '快速测试·100' }, { value: 'sample30', label: '样本30' }, { value: 'etf', label: 'ETF' }, { value: 'csi300_active', label: '沪深300·活跃' }, { value: 'csi300_2024h2', label: '沪深300·24H2' }] }, { id: 'start', label: '起始日', type: 'text', value: '' }, { id: 'end', label: '截止日', type: 'text', value: '' }, { id: 'freq', label: '频率', type: 'select', value: 'day', options: [{ value: 'day', label: '日线' }] }, { id: 'oos_frac', label: '样本外占比', type: 'select', value: '0', options: [{ value: '0', label: '不切(全样本)' }, { value: '0.2', label: '末20%留样本外' }, { value: '0.3', label: '末30%留样本外' }, { value: '0.4', label: '末40%留样本外' }], hint: 'W7 过拟合体检:把时间窗末段留作"样本外(OOS)"。下游因子分析/回测/模型会把样本内(IS)与样本外(OOS)的 RankIC/Sharpe 并排 + 衰减%;样本外塌缩=疑似过拟合(wiki:样本内≈样本外才算验证)。' }, { id: 'wf_refit', label: '滚动重训', type: 'select', value: '否', options: ['否', '是'], hint: 'W7 真滚动前进重训(仅 ML 节点):逐折 expanding-train 重训新模型→预测下一段样本外,拼接算整体 RankIC(真前进验证,非切片统计)。K× 训练成本,默认否。结果在抽屉脚注/警告显示「滚动重训(K折)」。' }] },
   formula:  { title: '公式输入', cat: 'io', inputs: [], outputs: [{ id: 'out', label: '公式', dt: 'series' }], params: [{ id: 'expr', label: '表达式', type: 'text', value: 'close' }] },
   factorlib:{ title: '因子库', cat: 'io', inputs: [], outputs: [{ id: 'out', label: '因子', dt: 'series' }], params: [{ id: 'name', label: '已选因子', type: 'text', value: '' }, { id: 'expr', label: '表达式', type: 'text', value: '' }] },
@@ -42,11 +56,13 @@ const SPECS = {
   spearman: { title: 'Spearman 因子', cat: 'mf', inputs: [{ id: 'fe', label: '特征工程', dt: 'fe' }], outputs: [{ id: 'factor', label: 'Factor', dt: 'factor' }], params: [] },
   iccalc:   { title: '因子 IC 计算', cat: 'mf', inputs: [{ id: 'factor', label: '因子值', dt: 'factor' }], outputs: [{ id: 'ic', label: 'IC', dt: 'ic' }], params: [{ id: 'period', label: '周期', type: 'step', value: 5, step: 1 }] },
   mf:       { title: '多因子构建（ML）', cat: 'mf', inputs: [{ id: 'm1', label: '模型 1', dt: 'model' }, { id: 'f1', label: '特征 1', dt: 'fe' }, { id: 'm2', label: '模型 2', dt: 'model' }, { id: 'f2', label: '特征 2', dt: 'fe' }], outputs: [{ id: 'factor', label: 'Factor', dt: 'factor' }], params: [{ id: 'combine', label: '合成加权', type: 'select', value: 'equal', options: [{ value: 'equal', label: '等权' }, { value: 'ic', label: 'IC 加权' }, { value: 'icir', label: 'ICIR 加权' }], hint: '多个因子如何合成:等权 / 按样本内 rank-IC / 按 rank-ICIR(惩罚 IC 不稳定的因子)加权。IC/ICIR 仅用样本内(前60%调仓日)估权,防前视;负 IC 的腿自动反向。' }] },
+  orthogonalize: { title: '因子正交化', cat: 'mf', inputs: [{ id: 'signal', label: '原始因子', dt: 'series' }], outputs: [{ id: 'factor', label: '正交因子', dt: 'factor' }], params: [{ id: 'industry', label: '行业控制', type: 'select', value: '是', options: ['是', '否'], hint: '使用当前运行面板的静态行业映射做截面残差化；未提供历史行业 vintage，严格 PIT=false 会在审计证据显形；未知行业行会诚实排除。' }, { id: 'size', label: '规模控制', type: 'select', value: '总市值', options: ['总市值', '流通市值', '不控制'], hint: '控制 log(总市值/流通市值)，不再用成交额冒充规模。' }, { id: 'styles', label: '风格控制', type: 'select', value: 'beta,volatility', options: [{ value: '', label: '不控制风格' }, { value: 'beta,volatility', label: 'Beta + 波动率' }, { value: 'beta,volatility,liquidity,momentum', label: '完整风格组' }], hint: '全部只使用截至当日的滚动值：60日Beta、20日波动、流动性、20日动量。' }, { id: 'old_factors', label: '已有因子', type: 'text', value: '', hint: '可选：填因子库名称或合法 DSL；多个因子请用分号或换行分隔（DSL 函数内的逗号不会被拆开）。' }, { id: 'min_obs', label: '每日最小样本', type: 'step', value: 20, step: 5 }, { id: 'max_condition_number', label: '条件数上限', type: 'text', value: '100000000', hint: '设计矩阵超过上限即该日失败关闭，不用不稳定残差。' }] },
   analysis: { title: '因子分析', cat: 'fa', inputs: [{ id: 'factor', label: '因子值', dt: 'factor' }], outputs: [{ id: 'report', label: '分析', dt: 'report' }], params: [{ id: 'rebal', label: '调仓频率', type: 'select', value: 'month', options: [{ value: 'day', label: '日频' }, { value: 'week', label: '周频' }, { value: 'month', label: '月频' }] }, { id: 'groups', label: '分组数量', type: 'step', value: 10, step: 1, hint: '分层回测的分位组数(经 /factor/report2 真生效);常用 5 或 10。' }, { id: 'dir', label: '因子方向', type: 'select', value: '0', options: [{ value: '0', label: '原始' }, { value: '-1', label: '取反 ×(-1)' }], hint: '取反 = 因子值乘 -1(把"越小越好"翻成"越大越好");经 /factor/report2 真生效。' }, { id: 'neutral', label: '中性化', type: 'select', value: '否', options: ['否', '是'], hint: '行业 + 市值中性化:逐日把因子对「行业哑变量 + log市值」做截面 OLS,取残差替代原值,剥离行业/规模暴露后再评 IC/分层(经 /factor/report2 真算)。诚实降级:面板缺市值→仅行业;行业全未知→仅市值;两者皆缺→跳过沿用原值(结果在告警显形)。' }] },
   tsic: { title: '个股时序IC', cat: 'fa', inputs: [{ id: 'factor', label: '因子', dt: 'series' }, { id: 'src', label: '数据源', dt: 'series' }], outputs: [{ id: 'tsic', label: '时序IC', dt: 'tsic' }], params: [{ id: 'fwd_days', label: '未来收益窗口', type: 'step', value: 20, step: 5, hint: '个股/单票口径:每股因子值 vs 它自己未来 N 日收益的 Spearman 相关。单票没有截面、IC 退化 → 用这个。接 公式因子 + 数据源(scope=个股/自选);不要套 rank、用时序/共振/财务因子。' }] },
   event: { title: '事件研究', cat: 'fa', inputs: [{ id: 'trigger', label: '触发', dt: 'series' }, { id: 'src', label: '数据源', dt: 'series' }], outputs: [{ id: 'event', label: '事件', dt: 'event' }], params: [{ id: 'horizons', label: '前向窗口', type: 'text', value: '1,5,10,20', hint: '事件触发后看几日收益(逗号分隔交易日)。事件研究=把 >0 触发式当离散事件,统计触发后 CAR/命中率/t值/逐年/盈亏比;反弹/异动/放量/跳空/消息面等稀疏触发用它,不要套 rank。跑股票池(市场调整=池内均值),单票退化看原始收益。' }, { id: 'direction', label: '方向解读', type: 'select', value: '0', options: [{ value: '0', label: '原始' }, { value: '-1', label: '取反' }], hint: '仅展示元数据,不改触发的 firing 判定。' }] },
   relstat: { title: '关系稳定度', cat: 'fa', inputs: [{ id: 'factor', label: '关系因子', dt: 'series' }, { id: 'src', label: '数据源', dt: 'series' }], outputs: [{ id: 'relstat', label: '稳定度', dt: 'relstat' }], params: [] },
   backtest: { title: '向量化回测', cat: 'bt', inputs: [{ id: 'factor', label: '因子', dt: 'factor' }, { id: 'pf', label: '组合(可选)', dt: 'portfolio' }], outputs: [{ id: 'result', label: '结果', dt: 'result' }], params: [{ id: 'cash', label: '初始资金', type: 'text', value: '1000000' }, { id: 'topn', label: 'TopN', type: 'step', value: 30, step: 5 }, { id: 'rebalance', label: '调仓频率', type: 'select', value: 'month', options: [{ value: 'day', label: '日频' }, { value: 'week', label: '周频' }, { value: 'month', label: '月频' }] }, { id: 'commission', label: '佣金率', type: 'step', value: 0.0003, step: 0.0001, dec: 4 }, { id: 'stamp_tax', label: '印花税', type: 'step', value: 0.0005, step: 0.0001, dec: 4 }, { id: 'slippage', label: '滑点bps', type: 'step', value: 5, step: 1 }, { id: 'combine', label: '多因子合成', type: 'select', value: 'equal', options: [{ value: 'equal', label: '等权' }, { value: 'ic', label: 'IC 加权' }, { value: 'icir', label: 'ICIR 加权' }], hint: '当上游是多因子(特征>1)时如何合成:等权 / 样本内 rank-IC / rank-ICIR 加权(防前视)。单因子时无效。' }, { id: 'weighting', label: '持仓定权', type: 'select', value: 'equal', options: [{ value: 'equal', label: '等权' }, { value: 'mktcap', label: '市值加权' }, { value: 'inv_vol', label: '反波动' }, { value: 'risk_parity', label: '风险平价(近似)' }, { value: 'min_var', label: '最小方差' }, { value: 'max_sharpe', label: '最大夏普' }, { value: 'true_risk_parity', label: '真风险平价' }, { value: 'black_litterman', label: 'Black-Litterman(LLM观点)' }], hint: '每期 TopN 持仓如何分配权重(真按此权重序列回测,非只等权)。反波动/风险平价用截至各调仓日的滚动波动(防前视)。接了「组合构建」节点时以其定权为准。' }, { id: 'vol_forecast', label: '波动口径', type: 'select', value: 'hist', options: [{ value: 'hist', label: '历史波动' }, { value: 'ewma', label: 'EWMA预测' }, { value: 'garch', label: 'GARCH预测' }], hint: '反波动/最小方差/风险平价等用哪种「波动」定权:历史=截至各调仓日的滚动波动(默认·快);EWMA/GARCH=条件波动预测(前瞻·捕捉波动聚集,用预测下期 σ 而非回看 σ)。GARCH 每票季度级重拟合,回测较慢。仅对用波动的定权法生效。' }] },
+  overfit: { title: '过拟合审计', cat: 'fa', inputs: [{ id: 'result', label: '回测结果', dt: 'result' }], outputs: [{ id: 'audit', label: '审计报告', dt: 'audit' }], params: [{ id: 'confidence', label: '置信度', type: 'select', value: '0.95', options: [{ value: '0.95', label: '95%' }, { value: '0.99', label: '99%' }] }, { id: 'pbo_max', label: 'PBO 上限', type: 'step', value: 0.30, step: 0.05, dec: 2 }, { id: 'n_blocks', label: 'CSCV 分块', type: 'select', value: '8', options: [{ value: '8', label: '8块·快速' }, { value: '12', label: '12块·严格' }, { value: '16', label: '16块·深度' }], hint: '必须是偶数。完整试验矩阵由因子工厂/TrialLedger提供；单次手工回测会诚实显示“证据不完整”。' }] },
   portfolio:{ title: '组合构建', cat: 'bt', inputs: [{ id: 'factor', label: '因子', dt: 'factor' }], outputs: [{ id: 'pf', label: '组合', dt: 'portfolio' }], params: [{ id: 'topn', label: '持仓数', type: 'step', value: 30, step: 5 }, { id: 'weighting', label: '加权方式', type: 'select', value: 'equal', options: [{ value: 'equal', label: '等权' }, { value: 'mktcap', label: '市值加权' }, { value: 'inv_vol', label: '反波动' }, { value: 'risk_parity', label: '风险平价(近似)' }, { value: 'min_var', label: '最小方差' }, { value: 'max_sharpe', label: '最大夏普' }, { value: 'true_risk_parity', label: '真风险平价' }, { value: 'black_litterman', label: 'Black-Litterman(LLM观点)' }] }, { id: 'max_weight', label: '单票上限', type: 'step', value: 0, step: 0.05, dec: 2, hint: '单只股票权重上限(0 = 不限);如设 0.10 即每只 ≤10%,超出截断后剩余按比例重新归一。' }, { id: 'industry_neutral', label: '行业中性', type: 'select', value: '否', options: ['否', '是'], hint: '是 → 各行业等权、行业内再按加权方式分配(近似行业中性,需 industry 列;缺失自动跳过)。' }, { id: 'vol_forecast', label: '波动口径', type: 'select', value: 'hist', options: [{ value: 'hist', label: '历史波动' }, { value: 'ewma', label: 'EWMA预测' }, { value: 'garch', label: 'GARCH预测' }], hint: '反波动/最小方差/风险平价等用哪种「波动」定权:历史(默认·快)/ EWMA / GARCH 条件波动预测(前瞻·捕捉波动聚集)。仅对用波动的定权法生效。' }] },
   risk:     { title: '风险度量', cat: 'bt', inputs: [{ id: 'factor', label: '因子', dt: 'series' }], outputs: [{ id: 'risk', label: '风险', dt: 'risk' }], params: [{ id: 'topn', label: 'TopN', type: 'step', value: 30, step: 5, hint: '建 TopN 多头组合,算其损失分布尾部风险:VaR/CVaR(历史·参数·蒙特卡罗三法)+ EVT(POT+GPD 极值尾部)+ Kupiec VaR 回测。默认周频+3年窗(VaR 需更密更长的组合收益样本;月频1年仅~12期不够)。接 公式输入/因子库 因子表达式(像 tsic/事件研究),配数据源设股票池。' }] },
   garch:    { title: '条件波动预测', cat: 'bt', inputs: [{ id: 'factor', label: '因子', dt: 'series' }], outputs: [{ id: 'garch', label: '波动', dt: 'garch' }], params: [{ id: 'topn', label: 'TopN', type: 'step', value: 30, step: 5, hint: '建 TopN 多头组合,算其净值期收益 → 拟合 EWMA + GARCH(1,1):出条件波动路径(捕捉波动聚集)+ 向前多步波动预测(均值回复)。默认周频+3年窗。接 公式输入/因子库 因子表达式(像 tsic/risk),配数据源设股票池。与「风险度量」互补:risk 看尾部巨亏,garch 看波动随时间的演化与预测。' }, { id: 'horizon', label: '预测步数', type: 'step', value: 12, step: 1, hint: '向前多步预测的步数(单位=调仓频率;周频 12≈一季度)。GARCH 预测随步数均值回复到无条件波动。' }] },
@@ -54,13 +70,61 @@ const SPECS = {
   tvbeta:   { title: '时变β(Kalman)', cat: 'bt', inputs: [{ id: 'factor', label: '因子', dt: 'series' }], outputs: [{ id: 'tvbeta', label: '时变β', dt: 'tvbeta' }], params: [{ id: 'topn', label: 'TopN', type: 'step', value: 30, step: 5, hint: '建 TopN 多头组合算其期收益 → 对市场期收益(默认沪深300,可在 source 节点设 benchmark;取不到回退全池等权)做时变参数回归 r=α_t+β_t·m_t:Kalman 滤波(因果·实时β)+ RTS 平滑(全样本·去噪β),平滑度由浓缩似然自动 MLE 选(平滑线平=无统计显著漂移,非bug)。出 β(t) 演化路径+静态β对照。默认周频+3年窗。接 公式输入/因子库 因子表达式(像 risk/garch/attrib)。看「我对大盘的暴露随时间怎么漂、现在高β还是低β」(attrib 看静态β,tvbeta 看 β 演化)。' }] },
 };
 
+// Historical rule replay is a distinct typed path; snapshot candidates cannot feed it.
+SPECS.history_screen = { title: '历史逐日筛选', cat: 'io', inputs: [{ id: 'src', label: '日线数据源', dt: 'series' }], outputs: [{ id: 'history', label: '逐日候选历史', dt: 'screen_history' }], params: [
+  { id: 'label', label: '策略名称', type: 'text', value: '自定义逐日筛选' },
+  { id: 'evaluation_start', label: '评估起日', type: 'text', value: '', hint: '数据源起日包含预热；此处填写实际开始记账的 YYYY-MM-DD。' },
+  { id: 'ranking', label: '统一排序', type: 'select', value: 'nearest_ma10_ma20', options: [{ value: 'nearest_ma10_ma20', label: '贴近 MA10/20' }] },
+  { id: 'branches', label: '硬规则分支', type: 'history_branches', value: [] },
+] };
+SPECS.daily_backtest = { title: '日频模拟调仓', cat: 'bt', inputs: [{ id: 'history', label: '逐日候选历史', dt: 'screen_history' }], outputs: [{ id: 'result', label: '模拟结果', dt: 'result' }], params: [
+  { id: 'topn', label: '固定槽位数', type: 'step', value: 10, step: 1 },
+  { id: 'rebalance', label: '调仓频率', type: 'select', value: 'day', options: [{ value: 'day', label: '日频' }] },
+  { id: 'weight_mode', label: '仓位方式', type: 'select', value: 'fixed_slots', options: [{ value: 'fixed_slots', label: '固定槽位留现金' }] },
+  { id: 'initial_cash', label: '初始资金(元)', type: 'text', value: 1000000 },
+  { id: 'commission', label: '双边佣金率', type: 'step', value: 0.0003, step: 0.0001, dec: 4 },
+  { id: 'sell_tax', label: '卖出税率', type: 'step', value: 0.0005, step: 0.0001, dec: 4 },
+  { id: 'slippage_bps', label: '双边滑点bp', type: 'step', value: 5, step: 1 },
+] };
+
+// Backtest dates remain optional to preserve the existing one-year default, but
+// become explicit/replayable when an audit needs a longer track record.
+SPECS.source.params.push({ id: 'research_freq', label: '研究采样', type: 'select', value: '', options: [
+  { value: '', label: '兼容原节点默认' }, { value: 'day', label: '日频研究' },
+  { value: 'week', label: '周频研究' }, { value: 'month', label: '月频研究' },
+], hint: '研究采样与标签周期，不是行情周期；5交易日指标选日频。调仓仍由终端单独设置。留空保留旧图默认。' });
+SPECS.orthogonalize.inputs.push({ id: 'src', label: '数据源(可选)', dt: 'series' });
+SPECS.backtest.params.splice(1, 0,
+  { id: 'start', label: '回测起日', type: 'text', value: '', hint: '可选 YYYY-MM-DD；留空沿用旧默认窗口。若后接过拟合审计，月频建议至少 24–36 个月。' },
+  { id: 'end', label: '回测止日', type: 'text', value: '', hint: '可选 YYYY-MM-DD；留空到当前最新可用数据。' },
+);
+const _overfitBlocksParam = SPECS.overfit.params.find(p => p.id === 'n_blocks');
+if (_overfitBlocksParam) _overfitBlocksParam.hint = '必须是 4–16 的偶数，8 块至少需 16 个收益期；月频建议回测 24–36 个月。完整试验矩阵由因子工厂/TrialLedger提供；单次手工回测会诚实显示“证据不完整”。';
+
+// 数据筛选 Skill 使用真实全 A 当前上市快照；旧 all 是指数成分并集，不能继续
+// 在选择器里冒充全市场。两个口径都保留，老工作流仍可按原值重放。
+const _sourceUniverseParam = SPECS.source.params.find(p => p.id === 'universe');
+if (_sourceUniverseParam && Array.isArray(_sourceUniverseParam.options)) {
+  const legacyAll = _sourceUniverseParam.options.find(o => o && o.value === 'all');
+  if (legacyAll) legacyAll.label = '旧版指数并集 · 非全A';
+  if (!_sourceUniverseParam.options.some(o => o && o.value === 'all_a')) {
+    const legacyIndex = _sourceUniverseParam.options.indexOf(legacyAll);
+    _sourceUniverseParam.options.splice(legacyIndex < 0 ? 1 : legacyIndex, 0,
+      { value: 'all_a', label: '全A · 筛选 Skill 专用' });
+  }
+}
+const _screenBiasMin = SPECS.data_screen.params.find(p => p.id === 'min_bias');
+const _screenBiasMax = SPECS.data_screen.params.find(p => p.id === 'max_bias');
+if (_screenBiasMin) _screenBiasMin.hint = '使用小数口径；0 表示收盘不低于均线。';
+if (_screenBiasMax) _screenBiasMax.hint = '使用小数口径；0.03 表示最多高于均线 3%。';
+
 const CATALOG = [
-  { g: '01 · 基础工具', items: ['source', 'formula', 'factorlib', 'model'] },
+  { g: '01 · 基础工具', items: ['source', 'data_screen', 'history_screen', 'formula', 'factorlib', 'model'] },
   { g: '02 · 特征工程', items: ['feature'] },
   { g: '03 · 机器学习', items: ['xgb', 'lgbm', 'svm', 'rf', 'nn', 'lstm'] },
-  { g: '04 · 因子相关', items: ['pca', 'spearman', 'iccalc', 'mf', 'analysis', 'tsic', 'event', 'relstat'] },
-  { g: '05 · 回测相关', items: ['portfolio', 'backtest', 'risk', 'garch', 'attrib', 'tvbeta'] },
-  { g: '06 · 模型验证', items: ['validate'] },
+  { g: '04 · 因子相关', items: ['pca', 'spearman', 'orthogonalize', 'iccalc', 'mf', 'analysis', 'tsic', 'event', 'relstat'] },
+  { g: '05 · 回测相关', items: ['portfolio', 'backtest', 'daily_backtest', 'risk', 'garch', 'attrib', 'tvbeta'] },
+  { g: '06 · 验证与审计', items: ['validate', 'overfit'] },
 ];
 
 // ───────── 工具: 节点布局 / 端口坐标 ─────────
@@ -71,7 +135,7 @@ function rowsOf(spec) {
     ...spec.params.map(p => ({ kind: 'param', param: p })),
   ];
 }
-function nodeHeight(spec) { return HEADER + PAD * 2 + rowsOf(spec).length * ROW; }
+function nodeHeight(spec) { return HEADER + PAD * 2 + rowsOf(spec).length * ROW + (spec === SPECS.history_screen ? 7 * ROW : 0); }
 function portXY(node, portId, side) {
   const spec = SPECS[node.type]; const rows = rowsOf(spec);
   const i = rows.findIndex(r => (r.kind === 'in' || r.kind === 'out') && r.port.id === portId && r.kind === side);
@@ -82,36 +146,53 @@ function portXY(node, portId, side) {
 // ───────── 种子图 ─────────
 let _id = 0; const nid = () => 'n' + (++_id);
 function seedGraph() {
-  const f1 = { id: nid(), type: 'formula', x: 60, y: 150, params: { expr: 'close' } };
-  const f2 = { id: nid(), type: 'formula', x: 60, y: 470, params: { expr: 'volume' } };
-  const fe1 = { id: nid(), type: 'feature', x: 320, y: 120, params: { tag: 'IC' } };
-  const fe2 = { id: nid(), type: 'feature', x: 320, y: 440, params: { tag: 'IC' } };
-  const x1 = { id: nid(), type: 'xgb', x: 600, y: 80, params: { trees: 100, depth: 3, lr: 0.1, sub: 1.0 } };
-  const x2 = { id: nid(), type: 'xgb', x: 600, y: 470, params: { trees: 100, depth: 4, lr: 0.1, sub: 0.9 } };
-  const m = { id: nid(), type: 'mf', x: 900, y: 210, params: {} };
-  const a = { id: nid(), type: 'analysis', x: 1190, y: 250, params: { rebal: 'month', groups: 10, dir: '0' } };
-  const nodes = [f1, f2, fe1, fe2, x1, x2, m, a];
-  const edges = [
-    { from: [f1.id, 'out'], to: [fe1.id, 'feat'] },
-    { from: [f2.id, 'out'], to: [fe2.id, 'feat'] },
-    { from: [fe1.id, 'fe'], to: [x1.id, 'fe'] },
-    { from: [fe2.id, 'fe'], to: [x2.id, 'fe'] },
-    { from: [x1.id, 'model'], to: [m.id, 'm1'] },
-    { from: [fe1.id, 'fe'], to: [m.id, 'f1'] },
-    { from: [x2.id, 'model'], to: [m.id, 'm2'] },
-    { from: [fe2.id, 'fe'], to: [m.id, 'f2'] },
-    { from: [m.id, 'factor'], to: [a.id, 'factor'] },
-  ];
-  return { nodes, edges };
+  // 单模型示例必须如实走 model → mf → factor；旧图把两条 XGB 分支
+  // 同时塞进 mf，但执行器只采用第一个模型报告，画面与实际计算不一致。
+  return tplG({ scope: '小池', code: '', universe: 'csi300', oos_frac: '0.3' }, [
+    { type: 'formula', params: { expr: 'rank(ts_sum(returns,20))' } },
+    { type: 'feature', params: { tag: 'IC' } },
+    { type: 'xgb', params: { trees: 100, depth: 3, lr: 0.1, sub: 1.0 } },
+    { type: 'mf', params: { combine: 'equal' } },
+    { type: 'analysis', params: { rebal: 'month', groups: 10, dir: '0' } },
+  ]);
 }
 
-// ───────── 链式建图 (左→右线性自动连线) ─────────
+// ───────── 链式建图 (左→右、按端口类型自动连线) ─────────
+function compatiblePorts(sourceNode, targetNode) {
+  const sourceSpec = SPECS[sourceNode && sourceNode.type];
+  const targetSpec = SPECS[targetNode && targetNode.type];
+  if (!sourceSpec || !targetSpec) return null;
+  // 目标输入顺序表达节点作者的首选语义，例如 feature.feat、mf.m1、
+  // backtest.factor。src 只可能匹配 source.data，不会抢走普通 series。
+  for (const targetPort of targetSpec.inputs) {
+    for (const sourcePort of sourceSpec.outputs) {
+      if (dtCompatible(sourcePort.dt, targetPort.dt, targetNode.type, sourceNode.type, targetPort.id)) {
+        return { sourcePort, targetPort };
+      }
+    }
+  }
+  return null;
+}
+
+function connectCompatible(sourceNode, targetNode) {
+  const ports = compatiblePorts(sourceNode, targetNode);
+  if (!ports) {
+    const from = SPECS[sourceNode.type] ? SPECS[sourceNode.type].title : sourceNode.type;
+    const to = SPECS[targetNode.type] ? SPECS[targetNode.type].title : targetNode.type;
+    throw new Error('无法自动连接「' + from + '」→「' + to + '」：没有兼容端口');
+  }
+  return { from: [sourceNode.id, ports.sourcePort.id], to: [targetNode.id, ports.targetPort.id] };
+}
+
 function chain(steps) {
-  const nodes = steps.map((s, i) => ({ id: nid(), type: s.type, x: 60 + i * 282, y: 230 - nodeHeight(SPECS[s.type]) / 2, params: Object.assign({}, ...SPECS[s.type].params.map(p => ({ [p.id]: p.value })), s.params || {}) }));
+  const nodes = steps.map((s, i) => {
+    const spec = SPECS[s && s.type];
+    if (!spec) throw new Error('未知节点类型: ' + (s && s.type));
+    return { id: nid(), type: s.type, x: 60 + i * 282, y: 230 - nodeHeight(spec) / 2, params: Object.assign({}, ...spec.params.map(p => ({ [p.id]: p.value })), s.params || {}) };
+  });
   const edges = [];
   for (let i = 0; i < nodes.length - 1; i++) {
-    const out = SPECS[nodes[i].type].outputs[0], inp = SPECS[nodes[i + 1].type].inputs[0];
-    if (out && inp) edges.push({ from: [nodes[i].id, out.id], to: [nodes[i + 1].id, inp.id] });
+    edges.push(connectCompatible(nodes[i], nodes[i + 1]));
   }
   return { nodes, edges };
 }
@@ -124,9 +205,9 @@ function tplG(srcParams, steps) {
   const src = { id: nid(), type: 'source', x: 60, y: 230, params: Object.assign({}, ...SPECS.source.params.map(p => ({ [p.id]: p.value })), srcParams || {}) };
   const c = chain(steps);
   c.nodes.forEach(n => { n.x += 282; });   // 给 source 腾出最左列
-  const feat = c.nodes.find(n => n.type === 'feature');
+  const contextNode = c.nodes.find(n => n.type === 'data_screen') || c.nodes.find(n => n.type === 'feature') || c.nodes.find(n => n.type === 'orthogonalize');
   const edges = c.edges.slice();
-  if (feat) edges.push({ from: [src.id, 'data'], to: [feat.id, 'src'] });
+  if (contextNode) edges.push(connectCompatible(src, contextNode));
   return { nodes: [src, ...c.nodes], edges };
 }
 
@@ -157,6 +238,7 @@ function workspaceFactorGraph(asset) {
   return tplG({ scope: '自选', code: '', codes: '', universe: '自动', oos_frac: '0.3', _workspace_pool_unresolved: true }, [
     { type: 'formula', params: { expr } },
     { type: 'feature', params: { tag: 'IC' } },
+    { type: 'spearman', params: {} },
     { type: 'analysis', params: { rebal: 'month', groups: 10, dir: '0' } },
   ]);
 }
@@ -174,36 +256,86 @@ function graphNeedsPoolReview(nodes) {
 // W8a 一键策略模板:全用真 16 字段、数据源真连线、载入即可跑;并示范这轮新能力
 // (e1/e3 样本外体检、e3 全绩效回测、e7 大盘共振、e8 行业共振)。质量/成长财务因子 W1b 未接 → 不做。
 const CARD_GRAPH = {
-  e1: () => tplG({ universe: 'csi300', oos_frac: '0.3' }, [ { type: 'formula', params: { expr: 'rank(ts_sum(returns,20))' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'analysis', params: { rebal: 'month', groups: 10, dir: '0' } } ]),
-  e2: () => tplG({ universe: 'csi500' }, [ { type: 'formula', params: { expr: '-rank(ts_sum(returns,5))' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'iccalc', params: { period: 5 } }, { type: 'analysis', params: { rebal: 'week', groups: 10, dir: '0' } } ]),
+  e1: () => tplG({ universe: 'csi300', oos_frac: '0.3' }, [ { type: 'formula', params: { expr: 'rank(ts_sum(returns,20))' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'spearman', params: {} }, { type: 'analysis', params: { rebal: 'month', groups: 10, dir: '0' } } ]),
+  e2: () => tplG({ universe: 'csi500' }, [ { type: 'formula', params: { expr: '-rank(ts_sum(returns,5))' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'spearman', params: {} }, { type: 'iccalc', params: { period: 5 } } ]),
   e3: () => tplG({ universe: 'csi800', oos_frac: '0.3' }, [ { type: 'formula', params: { expr: 'rank(-stddev(returns,20))' } }, { type: 'feature', params: { tag: 'fwd_ret' } }, { type: 'backtest', params: { topn: 50, rebalance: 'month' } } ]),
-  e4: () => tplG({ universe: 'csi300' }, [ { type: 'formula', params: { expr: 'rank(-pb)' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'analysis', params: { rebal: 'month', groups: 10, dir: '0' } } ]),
-  e5: () => tplG({ universe: 'csi300' }, [ { type: 'formula', params: { expr: 'rank(dv_ttm)' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'analysis', params: { rebal: 'month', groups: 5, dir: '0' } } ]),
-  e6: () => tplG({ universe: 'csi500' }, [ { type: 'formula', params: { expr: '-rank(turnover_rate)' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'analysis', params: { rebal: 'week', groups: 5, dir: '0' } } ]),
-  e7: () => tplG({ universe: 'csi300', benchmark: 'csi300' }, [ { type: 'formula', params: { expr: 'correlation(returns, idx_ret, 20)' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'analysis', params: { rebal: 'week', groups: 10, dir: '0' } } ]),
-  e8: () => tplG({ universe: 'csi300' }, [ { type: 'formula', params: { expr: 'correlation(returns, indmean(returns, industry), 20)' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'analysis', params: { rebal: 'week', groups: 10, dir: '0' } } ]),
+  e4: () => tplG({ universe: 'csi300' }, [ { type: 'formula', params: { expr: 'rank(-pb)' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'spearman', params: {} }, { type: 'analysis', params: { rebal: 'month', groups: 10, dir: '0' } } ]),
+  e5: () => tplG({ universe: 'csi300' }, [ { type: 'formula', params: { expr: 'rank(dv_ttm)' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'spearman', params: {} }, { type: 'analysis', params: { rebal: 'month', groups: 5, dir: '0' } } ]),
+  e6: () => tplG({ universe: 'csi500' }, [ { type: 'formula', params: { expr: '-rank(turnover_rate)' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'spearman', params: {} }, { type: 'analysis', params: { rebal: 'week', groups: 5, dir: '0' } } ]),
+  e7: () => tplG({ universe: 'csi300', benchmark: 'csi300' }, [ { type: 'formula', params: { expr: 'correlation(returns, idx_ret, 20)' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'spearman', params: {} }, { type: 'analysis', params: { rebal: 'week', groups: 10, dir: '0' } } ]),
+  e8: () => tplG({ universe: 'csi300' }, [ { type: 'formula', params: { expr: 'correlation(returns, indmean(returns, industry), 20)' } }, { type: 'feature', params: { tag: 'IC' } }, { type: 'spearman', params: {} }, { type: 'analysis', params: { rebal: 'week', groups: 10, dir: '0' } } ]),
 };
 
 // ───────── LLM 一句话 → 工作流 (关键词解析) ─────────
 function generateFromText(q) {
-  const t = (q || '').toLowerCase();
-  const steps = [{ type: 'source', params: { scope: /自选/.test(q) ? '自选' : /全市场|全部/.test(q) ? '全市场' : '小池', code: /500/.test(q) ? 'csi500' : /800/.test(q) ? 'csi800' : 'csi300' } }];
-  steps.push({ type: 'formula', params: { expr: /反转/.test(q) ? '-rank(ts_sum(returns,5))' : /动量/.test(q) ? 'rank(ts_sum(returns,20))' : /低波|波动/.test(q) ? 'rank(-stddev(returns,20))' : /价值|估值|低估/.test(q) ? 'rank(-pb)' : /股息/.test(q) ? 'rank(dv_ttm)' : 'close' } });
-  steps.push({ type: 'feature', params: { tag: 'IC' } });
-  if (/lightgbm|lgbm/.test(t)) steps.push({ type: 'lgbm', params: {} });
-  else if (/随机森林|forest|rf/.test(t)) steps.push({ type: 'rf', params: {} });
-  else if (/svm/.test(t)) steps.push({ type: 'svm', params: {} });
-  else if (/机器学习|ml|xgb|模型/.test(t)) steps.push({ type: 'xgb', params: {} });
-  if (/ic|体检|相关/.test(t)) steps.push({ type: 'iccalc', params: {} });
-  if (/回测|backtest|实战/.test(t)) steps.push({ type: 'backtest', params: {} });
+  const raw = String(q || '');
+  const t = raw.toLowerCase();
+  const srcParams = { scope: /自选/.test(raw) ? '自选' : /全市场|全部/.test(raw) ? '全市场' : '小池', universe: /500/.test(raw) ? 'csi500' : /800/.test(raw) ? 'csi800' : 'csi300' };
+  const expr = /反转/.test(raw) ? '-rank(ts_sum(returns,5))' : /动量/.test(raw) ? 'rank(ts_sum(returns,20))' : /低波|波动/.test(raw) ? 'rank(-stddev(returns,20))' : /价值|估值|低估/.test(raw) ? 'rank(-pb)' : /股息/.test(raw) ? 'rank(dv_ttm)' : 'close';
+  const wantsOrthogonalize = /正交|去相关|去共线|剥离.{0,6}暴露/.test(raw);
+  const wantsAudit = /过拟合|审计|\bpbo\b|\bpsr\b|\bdsr\b|mintrl/.test(t);
+  const explicitDataScreen = /\bdata[_\s-]*screen(?:\s+skill)?\b/.test(t) || /数据筛选\s*skill/i.test(raw);
+  const chineseDataScreen = /筛出|找出|选出|选股|沿.{0,8}(日线|均线)|不破.{0,6}(日线|均线)/.test(raw)
+    && /(日线|均线|ma[\s_-]*\d+)/i.test(raw);
+  const englishDataScreen = /\b(?:screen|select|find)\b/.test(t) && /\bma[\s_-]*\d{1,3}\b/.test(t);
+  const wantsDataScreen = explicitDataScreen || chineseDataScreen || englishDataScreen;
+  if (wantsDataScreen) {
+    const m = raw.match(/(\d{1,3})\s*日(?:线|均线)/) || raw.match(/\bma[\s_-]*(\d{1,3})\b/i);
+    const maWindow = m ? Math.max(2, Math.min(250, +m[1])) : 5;
+    const fastPool = /\bcsi[\s_-]*fast\b/.test(t) || /快速测试池/.test(raw);
+    const screenSource = fastPool
+      ? { scope: '小池', universe: 'csi_fast' }
+      : { scope: '全市场', universe: 'all_a' };
+    return tplG(screenSource, [
+      { type: 'data_screen', params: { preset: 'ma_trend', ma_window: maWindow,
+        rising_transitions: 3, below_lookback: 5, max_consecutive_below: 1,
+        min_bias: 0, max_bias: 0.03, top_n: 5, min_avg_amount_yi: 1, amount_window: 20 } },
+    ]);
+  }
+  if (wantsOrthogonalize) {
+    const steps = [
+      { type: 'formula', params: { expr } },
+      { type: 'orthogonalize', params: {} },
+      { type: 'backtest', params: wantsAudit ? { start: new Date(Date.now() - 3 * 365.25 * 86400000).toISOString().slice(0, 10), rebalance: 'month' } : {} },
+    ];
+    if (wantsAudit) steps.push({ type: 'overfit', params: {} });
+    return tplG(srcParams, steps);
+  }
+  if (wantsAudit) {
+    return tplG(srcParams, [
+      { type: 'formula', params: { expr } },
+      { type: 'feature', params: { tag: 'IC' } },
+      { type: 'spearman', params: {} },
+      { type: 'backtest', params: { start: new Date(Date.now() - 3 * 365.25 * 86400000).toISOString().slice(0, 10), rebalance: 'month' } },
+      { type: 'overfit', params: {} },
+    ]);
+  }
+  // srcParams 在函数入口已经按用户文本解析完成。source 不能放进 chain：
+  // formula 无入口，那会使 source 孤立。统一交给 tplG 建 source.data→feature.src。
+  const steps = [{ type: 'formula', params: { expr } }, { type: 'feature', params: { tag: 'IC' } }];
+  let modelType = '';
+  if (/lightgbm|lgbm/.test(t)) modelType = 'lgbm';
+  else if (/随机森林|forest|\brf\b/.test(t)) modelType = 'rf';
+  else if (/\bsvm\b/.test(t)) modelType = 'svm';
+  else if (/机器学习|\bml\b|xgb|模型/.test(t)) modelType = 'xgb';
+  if (modelType) steps.push({ type: modelType, params: {} }, { type: 'mf', params: {} });
+
+  const wantsBacktest = /回测|backtest|实战/.test(t);
+  const wantsIC = /\bic\b|体检|相关/.test(t);
+  // feature.fe 是特征工程产物，不是可直接交给 analysis/iccalc 的 factor。
+  // 非 ML 链先经 spearman 物化为 factor；ML 链由 mf 将 model 物化为 factor。
+  if (!modelType && !wantsBacktest) steps.push({ type: 'spearman', params: {} });
+  if (wantsBacktest) steps.push({ type: 'backtest', params: {} });
+  else if (wantsIC) steps.push({ type: 'iccalc', params: {} });
   else steps.push({ type: 'analysis', params: {} });
-  return chain(steps);
+  return tplG(srcParams, steps);
 }
 
 // ───────── 克隆图 (重新分配 id，保留位置/参数) ─────────
 function cloneGraph(nodes, edges) {
   const map = {};
   const ns = nodes.map(n => { const id = nid(); map[n.id] = id; return { ...n, id, params: { ...n.params } }; });
+  ns.forEach(n => { if (n.params.context_source_id) n.params.context_source_id = map[n.params.context_source_id] || n.params.context_source_id; });
   const es = edges.map(e => ({ from: [map[e.from[0]], e.from[1]], to: [map[e.to[0]], e.to[1]] }));
   return { nodes: ns, edges: es };
 }
@@ -261,6 +393,262 @@ function wfReportKey(name, scope) {
 const WF_LAST_KEY = 'guanlan:wf:last:v1' + WW_NS;     // 帷幄嵌入按会话隔离(WW_NS),独立页全局
 function wfLoadLast() { try { return JSON.parse(localStorage.getItem(WF_LAST_KEY) || 'null'); } catch (e) { return null; } }
 function wfSaveLast(obj) { try { localStorage.setItem(WF_LAST_KEY, JSON.stringify(obj)); } catch (e) {} }
+// 服务端持有的长回测只在浏览器保存 run_id + 图快照。切页/刷新回来按 id
+// 重连进度和结果；不再让 React 组件或一次 fetch 充当任务所有者。
+const WF_RUN_KEY = 'guanlan:wf:run:v1' + WW_NS;
+function wfLoadRunRef() { try { return JSON.parse(localStorage.getItem(WF_RUN_KEY) || 'null'); } catch (e) { return null; } }
+function wfSaveRunRef(ref) { try { localStorage.setItem(WF_RUN_KEY, JSON.stringify(ref)); } catch (e) {} }
+function wfClearRunRef() { try { localStorage.removeItem(WF_RUN_KEY); } catch (e) {} }
+function wfNewRunId() {
+  const raw = (window.crypto && crypto.randomUUID)
+    ? crypto.randomUUID().replace(/-/g, '')
+    : (Date.now().toString(16) + Math.random().toString(16).slice(2));
+  return 'wr_' + raw.slice(0, 24).padEnd(12, '0');
+}
+function wfRunStatusLabel(status, rec) {
+  const displayStatus = wfRunIsInterrupted(rec) ? 'interrupted' : status;
+  return ({ queued: '排队中', running: '运行中', completed: '已完成', completed_with_errors: '完成 · 含节点错误', failed: '失败', interrupted: '已中断' })[displayStatus] || String(displayStatus || '状态未知');
+}
+function wfRunIsInterrupted(rec) {
+  // Older server records retain status=failed for compatibility; this is display-only.
+  return !!rec && (rec.status === 'interrupted' || (rec.status === 'failed' &&
+    (rec.interrupted === true || rec.failure_kind === 'orphaned' || rec.failure_kind === 'interrupted')));
+}
+function wfPinRunLocation(runId) {
+  // 从历史图手动启动新任务后，刷新必须跟随新 id，不能仍打开旧 ?run 图。
+  if (!/^wr_[0-9a-f]{12,40}$/.test(String(runId || ''))) return;
+  try {
+    const url = new URL(location.href);
+    ['run', 'import', 'load', 'asset', 'q'].forEach(key => url.searchParams.delete(key));
+    url.searchParams.set('run', runId);
+    window.history.replaceState(null, '', url.pathname + url.search + url.hash);
+  } catch (e) { /* URL 不可更新时仍保留本地 run_id 和服务端历史 */ }
+}
+function wfRunRecordError(rec, workspaceId) {
+  if (!rec || rec.ok === false || !/^wr_[0-9a-f]{12,40}$/.test(String(rec.id || ''))) return (rec && rec.reason) || '缺少有效运行记录';
+  if (String(rec.workspace_id || '') !== String(workspaceId || '')) return '运行记录不属于当前研究空间';
+  if (!rec.graph || !Array.isArray(rec.graph.nodes) || !rec.graph.nodes.length || !Array.isArray(rec.graph.edges)) return '运行记录没有可恢复的图快照';
+  return validateGraph(rec.graph.nodes, rec.graph.edges) || '';
+}
+function wfAcceptGraphMessage(event, token, workspaceId, sessionId) {
+  if (!token || event.origin !== location.origin || event.source !== window.parent || window.parent === window) return null;
+  const msg = event.data || {}, p = msg.payload || {};
+  if (msg.type !== 'guanlan.workflow.import' || msg.token !== token || p.workspace_id !== workspaceId || (p.session_id || '') !== (sessionId || '')) return null;
+  return p;
+}
+function wfNeedsReview(w) {
+  const pending = w && w.migration && w.migration.needs_review;
+  return !!(w && ((w.legacy_recovery && w.legacy_recovery.auto_repairable === false) || (Array.isArray(pending) && pending.length) || (w.validation && w.validation.ok === false)));
+}
+function wfReviewReason(w) {
+  const legacy = w && w.legacy_recovery;
+  if (legacy && legacy.auto_repairable === false) {
+    const label = legacy.classification === 'historical_model_board' ? '历史模型看板' : '旧研究草图';
+    const blocker = (legacy.blockers || []).find(x => x && x.reason);
+    return label + '不可自动执行；原图保持不变，需要另建研究工作流。' + (blocker ? ' ' + blocker.reason : '');
+  }
+  const pending = w && w.migration && w.migration.needs_review;
+  const first = Array.isArray(pending) && pending.length ? pending[0] : null;
+  return (first && first.reason) || ((w && w.validation && w.validation.errors) || [])[0] || '旧版节点没有现行执行契约，请保留原图并按新节点重建';
+}
+
+// 画布端口的“可执行兼容”必须与两套执行器保持一致。公式/因子库的
+// series 本来就能由因子分析、回测和组合按 expr/name 物化；特征工程
+// fe 则只有回测/组合能直接消费多特征 spec，不能放宽给 analysis/iccalc。
+function dtCompatible(sourceDt, targetDt, targetType, sourceType, targetPort) {
+  if (targetDt === 'screen_history' || sourceDt === 'screen_history') return sourceDt === 'screen_history' && targetDt === 'screen_history' && sourceType === 'history_screen' && targetType === 'daily_backtest' && targetPort === 'history';
+  // source.data 是上下文载体，不是可计算因子序列；即使 dt 同为 series 也只能进 src。
+  if (targetPort === 'src') return sourceType === 'source' && sourceDt === 'series' && targetDt === 'series';
+  if (sourceType === 'source') return false;
+  if (sourceDt === targetDt) return true;
+  if (sourceDt === 'series' && targetDt === 'factor'
+      && (sourceType === 'formula' || sourceType === 'factorlib')) return true;
+  if (sourceDt === 'fe' && targetDt === 'factor' && sourceType === 'feature'
+      && (targetType === 'backtest' || targetType === 'portfolio')) return true;
+  return false;
+}
+
+const WF_TERMINAL_DT = { data_screen: 1, report: 1, ic: 1, result: 1, audit: 1, portfolio: 1, tsic: 1, event: 1, relstat: 1, risk: 1, garch: 1, attrib: 1, tvbeta: 1, validation: 1 };
+
+function requiredInputGroups(node) {
+  const type = node && node.type;
+  const params = (node && node.params) || {};
+  if (type === 'source' || type === 'formula' || type === 'factorlib' || type === 'model') return [];
+  if (type === 'feature') return [['feat']];                         // label/src 可选
+  if (type === 'mf') return [['m1', 'm2', 'f1', 'f2']];            // 至少一个可物化信号
+  if (type === 'backtest') return [['factor', 'pf']];                // factor 或已构建组合
+  if (type === 'history_screen') return [['src']];
+  if (type === 'daily_backtest') return [['history']];
+  if (type === 'validate') return String(params.model_id || '').trim() ? [] : [['model']];
+  if (type === 'orthogonalize') return [['signal']];                 // src 可选
+  if (type === 'tsic' || type === 'relstat') return [['factor']];    // src 可选
+  if (type === 'event') return [['trigger']];                        // src 可选
+  const spec = SPECS[type];
+  return spec ? spec.inputs.filter(p => p.id !== 'src' && p.id !== 'label').map(p => [p.id]) : [];
+}
+
+// 唯一图契约入口。保存、导入、载入、深链、AI 和运行都调用同一个纯函数；
+// 画布拖线规则也复用 dtCompatible，避免“能画不能跑”或“能导入但一运行才报错”。
+function graphValidationErrors(gn, ge) {
+  const errors = [];
+  const add = msg => { if (msg && !errors.includes(msg)) errors.push(msg); };
+  if (!Array.isArray(gn) || !gn.length) return ['图为空 — 无节点'];
+  if (!Array.isArray(ge)) return ['图的 edges 必须是列表'];
+
+  const byId = {};
+  for (let i = 0; i < gn.length; i++) {
+    const n = gn[i];
+    if (!n || typeof n !== 'object') { add('第 ' + (i + 1) + ' 个节点不是对象'); continue; }
+    if (typeof n.id !== 'string' || !n.id.trim()) { add('存在无 id 节点'); continue; }
+    if (byId[n.id]) add('节点 id 重复: ' + n.id);
+    else byId[n.id] = n;
+    if (!SPECS[n.type]) add('未知节点类型: ' + n.type);
+    if (n.params != null && (typeof n.params !== 'object' || Array.isArray(n.params))) add('节点 ' + n.id + ' 的 params 必须是对象');
+    const p = (n.params && typeof n.params === 'object') ? n.params : {};
+    if (n.type === 'formula') {
+      const expr = String(p.expr || '').trim();
+      if (!expr) add('公式输入 ' + n.id + ' 缺少表达式');
+      else if (/__|\bimport\b|\blambda\b/i.test(expr)) add('公式输入 ' + n.id + ' 含不允许的表达式片段');
+    }
+    if (n.type === 'factorlib' && !String(p.name || p.expr || '').trim()) add('因子库 ' + n.id + ' 尚未选择因子或填写表达式');
+    if (n.type === 'model' && !String(p.model_id || '').trim()) add('模型节点 ' + n.id + ' 尚未选择研究库模型');
+    if (n.type === 'history_screen') {
+      try { wfParseHistoryBranches(JSON.stringify(p.branches)); } catch (e) { add('历史逐日筛选 ' + n.id + ': ' + e.message); }
+      if ((p.ranking || 'nearest_ma10_ma20') !== 'nearest_ma10_ma20') add('历史逐日筛选只支持固定贴线度排序');
+    }
+    if (n.type === 'daily_backtest') {
+      if ((p.rebalance || 'day') !== 'day' || (p.weight_mode || 'fixed_slots') !== 'fixed_slots') add('日频模拟调仓仅支持日频与固定槽位，未用槽位保留现金');
+    }
+    if (n.type === 'source' && p.universe != null && String(p.universe).trim()) {
+      const universeParam = SPECS.source.params.find(x => x.id === 'universe');
+      const allowed = (universeParam && universeParam.options || []).map(x => typeof x === 'object' ? String(x.value) : String(x));
+      if (!allowed.includes(String(p.universe))) add('数据源 ' + n.id + ' 的股票池不在可选范围: ' + p.universe);
+    }
+  }
+  if (gn.filter(n => n && n.type === 'overfit').length > 1) add('每张工作流最多一个「过拟合审计」节点');
+
+  const validEdges = [];
+  const structuralEdges = [];
+  const seenEdge = new Set();
+  const seenInput = new Set();
+  const incoming = {};
+  const screenSource = {};
+  const allASourceEdges = {};
+  gn.filter(n => n && n.type === 'source' && String((n.params && n.params.universe) || '').trim() === 'all_a')
+    .forEach(n => { allASourceEdges[n.id] = 0; });
+
+  for (let i = 0; i < ge.length; i++) {
+    const e = ge[i];
+    if (!e || typeof e !== 'object' || !Array.isArray(e.from) || e.from.length !== 2 || !Array.isArray(e.to) || e.to.length !== 2) {
+      add('第 ' + (i + 1) + ' 条连线的 from/to 必须是 [节点id, 端口id]'); continue;
+    }
+    const sN = byId[e.from[0]], tN = byId[e.to[0]];
+    if (!sN || !tN) { add('连线指向不存在的节点: ' + e.from[0] + ' → ' + e.to[0]); continue; }
+    if (!SPECS[sN.type] || !SPECS[tN.type]) continue;
+    if (sN.id === tN.id) { add('存在自连线: ' + sN.id); continue; }
+    structuralEdges.push(e);
+    const sP = SPECS[sN.type].outputs.find(o => o.id === e.from[1]);
+    const tP = SPECS[tN.type].inputs.find(x => x.id === e.to[1]);
+    if (!sP) { add('输出端口不存在: ' + sN.type + '.' + e.from[1]); continue; }
+    if (!tP) { add('输入端口不存在: ' + tN.type + '.' + e.to[1]); continue; }
+    if (tP.id === 'src' && !(sN.type === 'source' && sP.id === 'data')) { add('上下文 src 口只能由「数据源」的 data 口连接'); continue; }
+    if (sN.type === 'source' && sP.id === 'data' && tP.id !== 'src') { add('数据源 data 口只能连接下游的上下文 src 口'); continue; }
+    if (!dtCompatible(sP.dt, tP.dt, tN.type, sN.type, tP.id)) { add('连线类型不匹配: ' + sN.type + '.' + sP.id + '(' + sP.dt + ') → ' + tN.type + '.' + tP.id + '(' + tP.dt + ')'); continue; }
+    if (sP.dt === 'model' && !(tN.type === 'mf' && (tP.id === 'm1' || tP.id === 'm2'))) { add('model 只能经「多因子构建」的 m1/m2 接入'); continue; }
+
+    const edgeKey = sN.id + '\u0000' + sP.id + '\u0000' + tN.id + '\u0000' + tP.id;
+    if (seenEdge.has(edgeKey)) { add('存在重复连线: ' + sN.id + '.' + sP.id + ' → ' + tN.id + '.' + tP.id); continue; }
+    seenEdge.add(edgeKey);
+    const inputKey = tN.id + '\u0000' + tP.id;
+    const multiInput = tN.type === 'feature' && tP.id === 'feat';
+    if (seenInput.has(inputKey) && !multiInput) { add('输入端口 ' + tN.type + '.' + tP.id + ' 只能接一条连线'); continue; }
+    seenInput.add(inputKey);
+    validEdges.push(e);
+    (incoming[tN.id] = incoming[tN.id] || new Set()).add(tP.id);
+
+    if (Object.prototype.hasOwnProperty.call(allASourceEdges, sN.id)) {
+      allASourceEdges[sN.id] += 1;
+      if (!(sP.id === 'data' && tN.type === 'data_screen' && tP.id === 'src')) add('「全A·筛选 Skill 专用」数据源只能连接「数据筛选 Skill」的 src 口');
+    }
+    if (sN.type === 'source' && sP.id === 'data' && tN.type === 'data_screen' && tP.id === 'src') screenSource[tN.id] = sN;
+  }
+
+  for (const n of gn) {
+    if (!n || !SPECS[n.type]) continue;
+    const got = incoming[n.id] || new Set();
+    for (const group of requiredInputGroups(n)) {
+      if (!group.some(port => got.has(port))) add('节点「' + SPECS[n.type].title + '」(' + n.id + ') 缺少必填输入: ' + group.join(' / '));
+    }
+    if (n.type === 'history_screen') {
+      const edge = validEdges.find(e => e.to[0] === n.id && e.to[1] === 'src');
+      const p = edge && byId[edge.from[0]] && byId[edge.from[0]].params || {};
+      if (edge && (p.research_freq || p.freq || 'day') !== 'day') add('历史逐日筛选仅支持日线研究，不能把周/月频静默改成日频');
+      if (edge && !_parseCodes(p.codes).length && (!p.universe || p.universe === '自动')) add('历史逐日筛选的数据源必须指定股票池或自选代码');
+    }
+    if (n.type === 'data_screen') {
+      const source = screenSource[n.id];
+      if (!source) add('「数据筛选 Skill」必须显式连接「数据源」的 data → src');
+      else {
+        const universe = String((source.params && source.params.universe) || '').trim();
+        const explicitCodes = _parseCodes(source.params && source.params.codes);
+        if (!explicitCodes.length && (!universe || universe === '自动')) add('数据筛选的数据源必须选择「全A·筛选 Skill 专用」、具名指数，或填写自选代码；空代码时不能使用「自动」');
+      }
+    }
+  }
+  for (const sourceId of Object.keys(allASourceEdges)) if (!allASourceEdges[sourceId]) add('「全A·筛选 Skill 专用」数据源必须连接「数据筛选 Skill」');
+
+  // Kahn：拓扑执行要求整张图无环，不能像旧 topoOrder 那样把环节点追加到末尾继续跑。
+  const indegree = {}; const next = {};
+  Object.keys(byId).forEach(id => { indegree[id] = 0; next[id] = []; });
+  structuralEdges.forEach(e => { indegree[e.to[0]] += 1; next[e.from[0]].push(e.to[0]); });
+  const queue = Object.keys(indegree).filter(id => indegree[id] === 0); let visited = 0;
+  for (let qi = 0; qi < queue.length; qi++) {
+    const id = queue[qi]; visited += 1;
+    for (const to of next[id]) { indegree[to] -= 1; if (indegree[to] === 0) queue.push(to); }
+  }
+  if (visited !== Object.keys(indegree).length) add('工作流存在环路，无法按拓扑顺序执行');
+
+  const validNext = {}; Object.keys(byId).forEach(id => { validNext[id] = []; });
+  validEdges.forEach(e => validNext[e.from[0]].push(e.to[0]));
+  const roots = gn.filter(n => n && SPECS[n.type] && requiredInputGroups(n).length === 0).map(n => n.id);
+  const reachable = new Set(roots);
+  for (let ri = 0; ri < roots.length; ri++) {
+    for (const to of validNext[roots[ri]] || []) if (!reachable.has(to)) { reachable.add(to); roots.push(to); }
+  }
+
+  const terminals = gn.filter(n => n && SPECS[n.type] && SPECS[n.type].outputs.some(o => WF_TERMINAL_DT[o.dt]));
+  if (!terminals.length) add('缺少终端节点 (数据筛选 / 因子分析 / IC / 回测 / 审计)');
+  else if (!terminals.some(n => reachable.has(n.id))) add('终端节点不可从任何数据或因子根节点到达');
+  return errors;
+}
+
+function validateGraph(gn, ge) {
+  return graphValidationErrors(gn, ge)[0] || '';
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return '[' + value.map(stableJson).join(',') + ']';
+  if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + stableJson(value[k])).join(',') + '}';
+  return JSON.stringify(value);
+}
+function wfGraphSnapshot(nodes, edges) {
+  return {
+    nodes: (nodes || []).map(n => ({ ...n, params: { ...(n.params || {}) } })),
+    edges: (edges || []).map(e => ({ from: [e.from[0], e.from[1]], to: [e.to[0], e.to[1]] })),
+  };
+}
+const WF_DURABLE_TYPES = {
+  source: 1, data_screen: 1, history_screen: 1, daily_backtest: 1, formula: 1, factorlib: 1, feature: 1,
+  xgb: 1, lgbm: 1, svm: 1, rf: 1, nn: 1, lstm: 1,
+  pca: 1, spearman: 1, mf: 1, analysis: 1, iccalc: 1,
+  orthogonalize: 1, backtest: 1, overfit: 1, portfolio: 1,
+  tsic: 1, event: 1, relstat: 1, risk: 1, garch: 1, attrib: 1, tvbeta: 1,
+};
+const WF_DURABLE_MAIN_TYPES = { daily_backtest: 1, overfit: 1, backtest: 1, analysis: 1, iccalc: 1, data_screen: 1, portfolio: 1, tsic: 1, event: 1, relstat: 1, risk: 1, garch: 1, attrib: 1, tvbeta: 1 };
+function wfCanRunDurably(nodes) {
+  return Array.isArray(nodes) && nodes.some(n => n && WF_DURABLE_MAIN_TYPES[n.type])
+    && nodes.every(n => n && WF_DURABLE_TYPES[n.type]);
+}
 function wfAgo(ts) {
   const d = (Date.now() - ts) / 1000;
   if (d < 60) return '刚刚'; if (d < 3600) return Math.floor(d / 60) + ' 分钟前';
@@ -280,7 +668,14 @@ async function _post(path, payload) {
   if (!base) throw new Error('无后端 — 请经 http://127.0.0.1:9999/ 同源打开');
   const res = await fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   let b = null; try { b = await res.json(); } catch (e) {}
-  if (!res.ok && (!b || b.error)) throw new Error((b && b.error) || ('HTTP ' + res.status));
+  if (!res.ok) {
+    const detail = b && (b.error || b.detail || b.reason);
+    const message = detail == null ? ('HTTP ' + res.status)
+      : (typeof detail === 'string' ? detail : JSON.stringify(detail));
+    const err = new Error(message);
+    err.httpStatus = res.status;
+    throw err;
+  }
   return b;
 }
 function _withWorkspace(payload) {
@@ -386,30 +781,88 @@ function _modelReport(m) {
 //   ctx   : { universe, node, post, list, allExprs } — universe 由 runGraph 全局算好; post 即 _post; list 即 _list (GET 因子清单)
 // 返回值 = { [本节点输出端口id]: 载荷 }; executor 按边喂给下游。载荷形状对齐 SPECS 的 dt。
 const NODE_EXEC = {
+  history_screen: async (inputs, params, ctx) => {
+    if (!inputs.src || inputs.src.__dt !== 'series') throw new Error('历史逐日筛选必须连接日线数据源');
+    wfParseHistoryBranches(JSON.stringify(params.branches));
+    const r = await ctx.post('/workflow/history-screen', { params, context: { universe: ctx.universe, start: ctx.start, end: ctx.end, codes: ctx.codes || [], research_freq: 'day' }, workspace_id: WW_WORKSPACE_ID || null });
+    if (!r || r.ok === false) throw new Error((r && r.reason) || '历史逐日筛选失败');
+    return { history: { ...r, __dt: 'screen_history' } };
+  },
+  daily_backtest: async (inputs, params, ctx) => {
+    if (!inputs.history || inputs.history.__dt !== 'screen_history') throw new Error('日频模拟调仓仅接受历史逐日筛选，不能使用单日候选快照');
+    const r = await ctx.post('/backtest/daily-screen', { history: inputs.history, params, workspace_id: WW_WORKSPACE_ID || null });
+    if (!r || r.ok === false) throw new Error((r && r.reason) || '日频模拟调仓失败');
+    return { result: { ...r, __dt: 'result', method: 'daily_screen_backtest', _label: r._label || inputs.history.label || '日频模拟调仓' } };
+  },
   // —— IO 层: source 给 universe series, formula 透传表达式 ——
   source: async (inputs, params, ctx) => ({ data: { __dt: 'series', universe: _universeOf(params) } }),
   formula: async (inputs, params, ctx) => ({ out: { __dt: 'series', expr: String(params.expr || '').trim() } }),
   // —— 因子库: 拉 /factorlib/list (无则回退引擎 /factor/list), 按「指定名」精确或「检索」模糊匹配,
   //    输出选中因子的 名/表达式 作 series.expr 给下游 (analysis/iccalc/mf 经 expr_or_name 求值) ——
   factorlib: async (inputs, params, ctx) => {
-    // 「浏览因子库」选中后写入 params.expr(+name)→ 直接输出该因子表达式给下游。
+    // 名称是因子库的权威引用。结构化因子若退回缓存的 params.expr，会静默丢掉
+    // factor_spec 里的正交变换；因此有 name 时先向服务端解析，普通旧因子仍兼容 expr。
     const picked = String(params.expr || '').trim();
-    if (picked) return { out: { __dt: 'series', expr: picked, _label: String(params.name || '因子'), _factorName: String(params.name || '') } };
-    // 未选 → 回退:按 name 在 /factor/list 精确查(兼容旧用法 / 直接填注册名)。
+    const requestedName = String(params.name || '').trim();
+    const expectedSpec = (params.factor_spec && params.factor_spec.schema === 'guanlan.factor_spec.v1') ? params.factor_spec : null;
+    const expectedDigest = String(params.factor_spec_digest || '').trim();
+    const structuredRef = !!(expectedSpec || expectedDigest);
+    if (structuredRef && !requestedName) throw new Error('因子库: 结构化因子快照缺名称，拒绝退回基础公式');
+    if (!requestedName && picked) return { out: { __dt: 'series', expr: picked, _label: '因子', _factorName: '' } };
+    if (!requestedName) throw new Error('因子库: 未选因子 —— 点节点里「浏览因子库」选一个');
     const lib = await ctx.list();           // 引擎 /factor/list {registered,user} 或 仓内 /factorlib/list {factors}
     const reg = (lib && lib.registered) || [];
     const usr = (lib && lib.user) || [];
     const fac = (lib && lib.factors) || [];
     const all = [
-      ...reg.map(s => ({ name: s.name, expr: s.formula || s.name, family: s.family || 'zoo' })),
-      ...usr.map(u => ({ name: u.name, expr: u.expr || u.formula || u.name, family: u.family || 'user' })),
-      ...fac.map(u => ({ name: u.name, expr: u.expr || u.formula || u.name, family: u.family || 'library' })),
+      ...reg.map(s => ({ name: s.name, expr: s.formula || s.name, family: s.family || 'zoo', factor_spec: s.factor_spec, factor_spec_digest: s.factor_spec_digest })),
+      ...usr.map(u => ({ name: u.name, expr: u.expr || u.formula || u.name, family: u.family || 'user', factor_spec: u.factor_spec, factor_spec_digest: u.factor_spec_digest })),
+      ...fac.map(u => ({ name: u.name, expr: u.expr || u.formula || u.name, family: u.family || 'library', factor_spec: u.factor_spec, factor_spec_digest: u.factor_spec_digest })),
     ];
-    if (!all.length) throw new Error('因子库: 后端无可用因子 (/factorlib/list 与 /factor/list 均空)');
-    const name = String(params.name || '').trim().toLowerCase();
-    let hit = name ? (all.find(f => String(f.name).toLowerCase() === name) || all.find(f => String(f.name).toLowerCase().includes(name))) : null;
-    if (!hit) throw new Error('因子库: 未选因子 —— 点节点里「浏览因子库」选一个');
+    const name = requestedName.toLowerCase();
+    const exactHit = name ? all.find(f => String(f.name).toLowerCase() === name) : null;
+    let hit = exactHit || (!structuredRef && name ? all.find(f => String(f.name).toLowerCase().includes(name)) : null);
+    if (structuredRef && !exactHit) throw new Error('因子库: 结构化因子「' + requestedName + '」已缺失，拒绝用缓存基础公式降级运行');
+    if (!hit && picked) return { out: { __dt: 'series', expr: picked, _label: requestedName, _factorName: requestedName } };
+    if (!hit) throw new Error('因子库: 查无因子「' + requestedName + '」');
+    if (structuredRef) {
+      if (!hit.factor_spec || hit.factor_spec.schema !== 'guanlan.factor_spec.v1') {
+        throw new Error('因子库: 「' + requestedName + '」已不再是原结构化因子，拒绝降级运行');
+      }
+      if (expectedDigest && (!hit.factor_spec_digest || hit.factor_spec_digest !== expectedDigest)) {
+        throw new Error('因子库: 「' + requestedName + '」定义摘要已变化，拒绝执行非原始版本');
+      }
+      if (expectedSpec && stableJson(hit.factor_spec) !== stableJson(expectedSpec)) {
+        throw new Error('因子库: 「' + requestedName + '」结构化定义已变化，拒绝执行非原始版本');
+      }
+    }
+    if (hit.factor_spec && hit.factor_spec.schema === 'guanlan.factor_spec.v1') {
+      return { out: { __dt: 'series', expr: hit.name, _label: hit.name, _factorName: hit.name,
+        factor_spec: hit.factor_spec, factor_spec_digest: hit.factor_spec_digest || null,
+        fe: { features: [hit.name] } } };
+    }
     return { out: { __dt: 'series', expr: hit.expr, _label: hit.name, _factorName: hit.name, _matched: all.length } };
+  },
+  // 正交化节点只生成可重放 factor-spec；真残差由下游分析/组合/回测在同一面板上统一物化。
+  orthogonalize: async (inputs, params, ctx) => {
+    const src = inputs.signal;
+    const expr = src && (src.expr || src._factorName || src._label) ? String(src.expr || src._factorName || src._label).trim() : '';
+    if (!expr) throw new Error('因子正交化: 上游缺可复算公式/因子库表达式');
+    const styles = String(params.styles || '').split(',').map(s => s.trim()).filter(Boolean);
+    const oldText = String(params.old_factors || '').trim();
+    let old_factors = oldText ? oldText.split(/[;；\r\n]+/).map(s => s.trim()).filter(Boolean) : [];
+    if (old_factors.length === 1 && oldText.indexOf('(') < 0 && oldText.indexOf(')') < 0) old_factors = oldText.replace(/，/g, ',').split(',').map(s => s.trim()).filter(Boolean);
+    old_factors = [...new Set(old_factors)];
+    const size = ({ '总市值': 'total_mv', '流通市值': 'circ_mv', '不控制': 'none' })[params.size] || String(params.size || 'total_mv');
+    const spec = {
+      version: 'orthogonalization-v1', method: 'ols', industry: params.industry !== '否', size,
+      styles, existing_factors: old_factors,
+      min_obs: (params.min_obs != null && !isNaN(+params.min_obs)) ? +params.min_obs : 20,
+      max_condition_number: (params.max_condition_number != null && !isNaN(+params.max_condition_number)) ? +params.max_condition_number : 1e8,
+    };
+    if (!spec.industry && size === 'none' && !styles.length && !old_factors.length) throw new Error('因子正交化: 至少选择一个控制项');
+    const label = String(src._label || expr) + ' · 正交';
+    return { factor: { __dt: 'factor', expr, features: [expr], fe: { features: [expr], orthogonalization: spec }, _label: label, _universe: ctx.universe, _orthogonalization: spec, factor_spec: { schema: 'guanlan.factor_spec.v1', kind: 'orthogonalized', base_features: [expr], transform: spec } } };
   },
   // —— 模型(研究库): 引用一个 registry 模型(prod/工坊/工作流变体)→ 拉其最新截面排名
   //    GET /screen/model/ranking?id=<id> → {date, rows:[{code,score}]} → 输出 ranking 载荷
@@ -546,10 +999,12 @@ const NODE_EXEC = {
     const period = (params.period != null && params.period !== '' && !isNaN(+params.period)) ? +params.period : 5;
     const freq = period >= 20 ? 'month' : period >= 5 ? 'week' : 'day';
     // #3: period 作精确前向窗口(fwd_days)→ IC 按该周期真算(经 /factor/report2);freq 仅驱动调仓重采样。
-    const r = await ctx.post('/factor/report2', { expr_or_name: expr, universe: ctx.universe, freq, fwd_days: period });
+    const orthogonalization = f._orthogonalization || (f.fe && f.fe.orthogonalization) || null;
+    const r = await ctx.post('/factor/report2', { expr_or_name: expr, universe: ctx.universe, freq, fwd_days: period, orthogonalization });
     if (r && r.ok === false) throw new Error('IC 计算: ' + (r.reason || '/factor/report2 失败'));
     if (r && r.status && r.status !== 'ok') throw new Error(r.status + (r.error ? ' · ' + r.error : ''));
-    return { ic: Object.assign({ __dt: 'ic' }, r, { _label: expr, _universe: ctx.universe, _warnings: r.warnings || [] }) };
+    return { ic: Object.assign({ __dt: 'ic' }, r, { factor_spec: f.factor_spec || r.factor_spec || null,
+      _label: f._label || expr, _universe: ctx.universe, _warnings: r.warnings || [] }) };
   },
   // —— 因子分析: /factor/report (已通); 上游 mf 合成结果直接透传当报告 (终端 dt=report) ——
   analysis: async (inputs, params, ctx) => {
@@ -567,11 +1022,14 @@ const NODE_EXEC = {
     const freq = String(params.rebal || 'month');
     const n_groups = (params.groups != null && params.groups !== '' && !isNaN(+params.groups)) ? +params.groups : 10;
     const direction = (params.dir != null && params.dir !== '' && !isNaN(+params.dir)) ? +params.dir : 0;
-    const neutralize = (params.neutral === '是');   // #1 行业+市值中性化(残差替代原值,经 report2 真算)
-    const r = await ctx.post('/factor/report2', { expr_or_name: expr, universe: ctx.universe, freq, n_groups, direction, neutralize });
+    const orthogonalization = f._orthogonalization || (f.fe && f.fe.orthogonalization) || null;
+    // 正交化已包含明确的控制项，不再叠加旧的“行业+市值”快捷中性化，避免二次残差化。
+    const neutralize = orthogonalization ? false : (params.neutral === '是');
+    const r = await ctx.post('/factor/report2', { expr_or_name: expr, universe: ctx.universe, freq, n_groups, direction, neutralize, orthogonalization });
     if (r && r.ok === false) throw new Error('因子分析: ' + (r.reason || '/factor/report2 失败'));
     if (r && r.status && r.status !== 'ok') throw new Error(r.status + (r.error ? ' · ' + r.error : ''));
-    return { report: Object.assign({}, r, { _label: expr, _universe: ctx.universe, _warnings: r.warnings || [] }) };
+    return { report: Object.assign({}, r, { factor_spec: f.factor_spec || r.factor_spec || null,
+      _label: f._label || expr, _universe: ctx.universe, _warnings: r.warnings || [] }) };
   },
   // —— 个股时序IC: 收 inputs.factor (公式/因子库 series 带 expr) → POST /factor/tsic(单票/小池:
   //    每股因子 vs 自身未来收益 Spearman 相关)。src 口接 source 仅供 universe/codes 回溯,值不用。——
@@ -667,9 +1125,13 @@ const NODE_EXEC = {
     const weighting = (pfIn && pfIn.weighting) ? String(pfIn.weighting) : String(params.weighting || 'equal');
     const industry_neutral = pfIn ? !!pfIn.industry_neutral : false;
     const vol_forecast = (pfIn && pfIn.vol_forecast) ? String(pfIn.vol_forecast) : String(params.vol_forecast || 'hist');   // (b) 波动口径
+    const btStart = String(params.start || spec.start || '').trim();
+    const btEnd = String(params.end || spec.end || '').trim();
     const payload = Object.assign({}, spec, {
       features,
       universe: (ctx.universe || spec.universe || 'csi_fast'),
+      ...(btStart ? { start: btStart } : {}), ...(btEnd ? { end: btEnd } : {}),
+      orthogonalization: f._orthogonalization || spec.orthogonalization || null,
       topn, cash, rebalance, commission, stamp_tax, slippage_bps: slippage, combine,
       weighting, industry_neutral, vol_forecast,
       params: { topn, cash, rebalance, commission, stamp_tax, slippage, combine, weighting, vol_forecast },
@@ -682,7 +1144,45 @@ const NODE_EXEC = {
     const label = (f._label || (features.length && features.join('+')) || ('TopN' + topn));
     // 若经「组合」端口喂入 → 目标持仓权重带进结果抽屉展示;其 weighting/行业中性已用于回测逐期定权(W5-1 真按权重序列)。
     const pfExtra = pfIn ? { _pf_weights: (pfIn.weights || pfIn.holdings || []), _pf_weighting: pfIn.weighting, _pf_asof: pfIn.asof, _pf_industry_neutral: pfIn.industry_neutral } : {};
-    return { result: Object.assign({ __dt: 'result' }, r, pfExtra, { composite: true, topn, cash, _label: label, _universe: payload.universe, _compose: true, _warnings: r.warnings || f._warnings || [] }) };
+    return { result: Object.assign({ __dt: 'result' }, r, pfExtra, { composite: true, topn, cash,
+      // 后端会把运行时真正采用的依赖版本写进 canonical factor_spec；必须优先保留它，
+      // 否则上游缓存的 raw spec 会遮住 dependency pins，保存后无法精确重放本次回测。
+      factor_spec: r.factor_spec || f.factor_spec || null,
+      factor_spec_digest: r.factor_spec_digest || f.factor_spec_digest || null,
+      _label: label, _universe: payload.universe, _compose: true, _warnings: r.warnings || f._warnings || [] }) };
+  },
+  // 过拟合审计只消费回测的逐期净值和同一研究家族的完整试验矩阵。缺证据会返回 INCOMPLETE，不会伪装 PASS。
+  overfit: async (inputs, params, ctx) => {
+    const src = inputs.result;
+    if (!src) throw new Error('过拟合审计: 上游缺回测结果');
+    const pf = src.portfolio || {};
+    const auditContext = src.audit_context || {};
+    const bt = src.backtest || {};
+    const rebalance = String(bt.rebalance || bt.rebalance_freq || 'month');
+    const ppy = (src.meta && src.meta.periods_per_year) || ({ day: 252, week: 52, month: 12 }[rebalance] || 12);
+    const r = await ctx.post('/workflow/overfit-audit', {
+      return_series: Array.isArray(pf.return_series) ? pf.return_series : null,
+      nav_series: Array.isArray(pf.nav_series) ? pf.nav_series : null,
+      trial_returns: Array.isArray(auditContext.trial_returns) ? auditContext.trial_returns : null,
+      trial_dates: Array.isArray(auditContext.trial_dates) ? auditContext.trial_dates : null,
+      n_trials: auditContext.n_trials == null ? null : +auditContext.n_trials,
+      family_id: auditContext.family_id || null,
+      selected_trial_id: auditContext.selected_trial_id || null,
+      audit_context_id: params.audit_context_id || auditContext.audit_context_id || null,
+      periods_per_year: +ppy || 252,
+      confidence: (params.confidence != null && !isNaN(+params.confidence)) ? +params.confidence : 0.95,
+      pbo_max: (params.pbo_max != null && !isNaN(+params.pbo_max)) ? +params.pbo_max : 0.30,
+      n_blocks: (params.n_blocks != null && !isNaN(+params.n_blocks)) ? +params.n_blocks : 8,
+      overlapping_returns: !!bt.overlapping_returns,
+    });
+    if (!r || r.ok === false) throw new Error('过拟合审计: ' + ((r && (r.reason || r.note)) || '/workflow/overfit-audit 失败'));
+    return { audit: Object.assign({ __dt: 'overfit_audit' }, r, {
+      portfolio: src.portfolio, ic: src.ic, oos: src.oos, headline_ic: src.headline_ic,
+      orthogonalization: src.orthogonalization || null,
+      factor_spec: src.factor_spec || null,
+      _label: src._label || '回测过拟合审计', _universe: src._universe || ctx.universe,
+      _warnings: (src._warnings || []).concat(r.warnings || []),
+    }) };
   },
   // —— 风险度量 (VaR/CVaR/EVT/Kupiec): 收 inputs.factor → 复用回测建 TopN 组合 → 损失分布尾部风险。
   //    后端 FactorRiskIn 默认周频 + _factor_risk 默认 3 年窗(VaR 需更密更长的组合收益样本)。
@@ -780,6 +1280,7 @@ const NODE_EXEC = {
     const payload = Object.assign({}, spec, {
       features,
       universe: (ctx.universe || spec.universe || 'csi_fast'),
+      orthogonalization: f._orthogonalization || spec.orthogonalization || null,
       topn, weighting, max_weight, industry_neutral, vol_forecast,
       params: { topn, weighting, max_weight, industry_neutral, vol_forecast },
     });
@@ -787,7 +1288,7 @@ const NODE_EXEC = {
     if (!r || r.ok === false) throw new Error('组合构建: ' + ((r && r.reason) || '/portfolio/build 失败'));
     if (r.status && r.status !== 'ok') throw new Error('组合构建: ' + r.status + (r.error ? ' · ' + r.error : ''));
     const label = (f._label || (features.length && features.join('+')) || ('组合 Top' + topn));
-    return { pf: Object.assign({ __dt: 'portfolio' }, r, { composite: true, weights: (r.holdings || []), weighting: r.weighting, vol_forecast: (r.vol_forecast || vol_forecast), asof: r.asof, industry_neutral: r.industry_neutral, fe: (r.fe || spec), _label: label, _universe: payload.universe, _compose: true, _warnings: r.warnings || f._warnings || [] }) };
+    return { pf: Object.assign({ __dt: 'portfolio' }, r, { composite: true, weights: (r.holdings || []), weighting: r.weighting, vol_forecast: (r.vol_forecast || vol_forecast), asof: r.asof, industry_neutral: r.industry_neutral, fe: (r.fe || spec), factor_spec: f.factor_spec || r.factor_spec || null, factor_spec_digest: f.factor_spec_digest || r.factor_spec_digest || null, _label: label, _universe: payload.universe, _compose: true, _warnings: r.warnings || f._warnings || [] }) };
   },
 };
 
@@ -819,9 +1320,12 @@ function topoOrder(nodes, edges) {
 
 // ───────── 通用拓扑 DAG 执行器 (逐节点 await exec, 沿边喂数据, 经 hooks 写回) ─────────
 // 需要 universe(股票池)的节点类型 —— 纯 IO 出 series 的(source/formula/factorlib)不吃 universe。
-const _NEEDS_UNIVERSE = { feature: 1, xgb: 1, lgbm: 1, svm: 1, rf: 1, nn: 1, lstm: 1, pca: 1, spearman: 1, iccalc: 1, mf: 1, analysis: 1, backtest: 1, portfolio: 1 };
+const _NEEDS_UNIVERSE = { history_screen: 1, data_screen: 1, feature: 1, xgb: 1, lgbm: 1, svm: 1, rf: 1, nn: 1, lstm: 1, pca: 1, spearman: 1, orthogonalize: 1, iccalc: 1, mf: 1, analysis: 1, backtest: 1, portfolio: 1 };
 // 自选代码串 → 归一 list(逗号/空格/分号/中文逗号顿号/换行分隔)。
-function _parseCodes(s) { return String(s == null ? '' : s).split(/[\s,;，、]+/).map(x => x.trim()).filter(Boolean); }
+function _parseCodes(s) {
+  const parts = Array.isArray(s) ? s : String(s == null ? '' : s).split(/[\s,;，、]+/);
+  return parts.map(x => String(x).trim()).filter(Boolean);
+}
 // 沿入边反向回溯, 找本节点上游最近的「数据源」节点 → 用它的股票池 + 起止日 + 自选代码(连了才生效)。
 // BFS 带 visited 防环;找不到上游 source → { wired:false }, 调用方回退全局默认。传递闭包: source→feature→model→mf 多跳也能回溯到。
 function _universeForNode(nodeId, nodes, edges) {
@@ -830,17 +1334,29 @@ function _universeForNode(nodeId, nodes, edges) {
   let frontier = [nodeId];
   while (frontier.length) {
     const next = [];
+    const sources = new Map();
     for (const cur of frontier) {
+      const current = byId(cur) || {};
+      const contextId = (current.params || {}).context_source_id;
+      if (contextId !== undefined) {
+        const context = byId(contextId);
+        if (!context || context.type !== 'source') throw new Error('数据上下文引用失效：' + cur);
+        sources.set(context.id, context);
+      } else if (current.type === 'source') sources.set(current.id, current);
       for (const e of edges) {
         if (e.to[0] === cur && !seen.has(e.from[0])) {
-          const up = byId(e.from[0]);
-          if (up && up.type === 'source') return { universe: _universeOf(up.params), start: (up.params.start || '').trim(), end: (up.params.end || '').trim(), codes: _parseCodes(up.params.codes), benchmark: (up.params.benchmark || '').trim(), leader: (up.params.leader || '').trim(), oos_frac: parseFloat(up.params.oos_frac) || 0, wf_refit: (up.params.wf_refit === '是'), wired: true };
           seen.add(e.from[0]); next.push(e.from[0]);
         }
       }
     }
+    if (sources.size > 1) throw new Error('多个等距数据源，请显式指定 context_source_id');
+    if (sources.size === 1) {
+      const p = sources.values().next().value.params || {};
+      return { universe: _universeOf(p), start: (p.start || '').trim(), end: (p.end || '').trim(), codes: _parseCodes(p.codes), benchmark: (p.benchmark || '').trim(), leader: (p.leader || '').trim(), oos_frac: parseFloat(p.oos_frac) || 0, wf_refit: p.wf_refit === '是' || p.wf_refit === true, wired: true };
+    }
     frontier = next;
   }
+  if (nodes.filter(n => n.type === 'source').length > 1 && _NEEDS_UNIVERSE[(byId(nodeId) || {}).type]) throw new Error('未连接的数据节点不能猜测多个股票池，请连接数据源');
   return { universe: null, start: '', end: '', codes: [], benchmark: '', leader: '', oos_frac: 0, wf_refit: false, wired: false };
 }
 
@@ -894,7 +1410,7 @@ async function runGraph(nodes, edges, hooks) {
   const src = nodes.find(n => n.type === 'source');
   const universe = src ? _universeOf(src.params) : 'csi_fast';
   const allExprs = (deriveCall(nodes) || {}).exprs || [];  // mf 兜底 (上游占位拿不到逐端口 expr 时退回全图表达式集合)
-  const TERMINAL_DT = { report: 1, ic: 1, result: 1, portfolio: 1, tsic: 1, event: 1, relstat: 1, risk: 1, garch: 1, attrib: 1, tvbeta: 1, validation: 1 };
+  const TERMINAL_DT = { data_screen: 1, report: 1, ic: 1, result: 1, audit: 1, portfolio: 1, tsic: 1, event: 1, relstat: 1, risk: 1, garch: 1, attrib: 1, tvbeta: 1, validation: 1 };
   let lastResult = null, firstErr = '', anyFellBack = false; const nodeErrs = []; const multiEdgeWarns = [];
 
   for (const id of order) {
@@ -941,7 +1457,7 @@ async function runGraph(nodes, edges, hooks) {
       // 终端: 若本节点有任一 output 端口 dt ∈ TERMINAL_DT 且其载荷是真报告 → 记为结果
       spec.outputs.forEach(p => {
         const payload = outputs[id][p.id];
-        if (TERMINAL_DT[p.dt] && payload && !payload.__pending && (payload.ic || payload.portfolio || payload.composite || payload._compose != null || payload.holdings || payload.weights || payload.codes_tsic || payload.car_curve || payload.codes_relstat || payload.method === 'risk' || payload.method === 'garch' || payload.method === 'attrib' || payload.method === 'tvbeta' || payload.__dt === 'validation')) {
+        if (TERMINAL_DT[p.dt] && payload && !payload.__pending && (payload.ic || payload.portfolio || payload.composite || payload._compose != null || payload.holdings || payload.weights || payload.codes_tsic || payload.car_curve || payload.codes_relstat || payload.method === 'risk' || payload.method === 'garch' || payload.method === 'attrib' || payload.method === 'tvbeta' || payload.__dt === 'validation' || payload.__dt === 'overfit_audit' || payload.__dt === 'data_screen')) {
           lastResult = payload;
         }
       });
@@ -960,7 +1476,10 @@ async function runGraph(nodes, edges, hooks) {
   }
   // 部分节点失败但下游仍产出结果 → 在结果里诚实标出哪些节点挂了(否则用户看到「成功」却不知有节点降级)。
   if (nodeErrs.length && lastResult && typeof lastResult === 'object') {
-    lastResult._warnings = ['⚠ ' + nodeErrs.length + ' 个节点执行失败(下游已降级,结果可能不完整):' + nodeErrs.join(' / '), ...(lastResult._warnings || [])];
+    lastResult._completed_with_errors = true;
+    lastResult._run_status = 'completed_with_errors';
+    lastResult._node_errors = nodeErrs.slice();
+    lastResult._warnings = ['运行完成 · 含节点错误(completed_with_errors)：' + nodeErrs.length + ' 个节点执行失败，下游结果可能不完整。' + nodeErrs.join(' / '), ...(lastResult._warnings || [])];
   }
   // 非白名单口多边 last-wins → 诚实显形 (镜像后端 run_graph warnings; 画布拖线本不会造出这种图, 导入/粘贴图会)。
   if (multiEdgeWarns.length && lastResult && typeof lastResult === 'object') {
@@ -986,36 +1505,58 @@ function WorkflowApp() {
   const [repOpen, setRepOpen] = useState(false); // #9 报告库弹窗
   const [loop, setLoop] = useState(null);         // W8b AI 闭环编排状态 {running,goal,rounds,step}
   const [runErr, setRunErr] = useState('');
+  const [durableWaiting, setDurableWaiting] = useState(false); // 仅表示本页正在跟踪服务端持久任务
   const [cards] = useState(EXP_CARDS);
   const [toast, setToast] = useState(null);
   const [past, setPast] = useState([]);
   const [future, setFuture] = useState([]);
-  const [wfName, setWfName] = useState('因子示例 · XGBoost 多因子');
+  const [wfName, setWfName] = useState('因子示例 · XGBoost 因子');
   const [wfScope, setWfScope] = useState(WW_WORKSPACE_ID ? 'workspace' : 'global');
   const [assetNeedsPool, setAssetNeedsPool] = useState(false);
   const [saved, setSaved] = useState(wfLoadList);
   const [resCache, setResCache] = useState(wfLoadReports);  // scope + 工作流名 → 最近一次报告
   const [saveOpen, setSaveOpen] = useState(null); // {name}
   const [histOpen, setHistOpen] = useState(false);
+  const [serverRuns, setServerRuns] = useState([]);
+  const [serverRunsLoading, setServerRunsLoading] = useState(false);
+  const [serverRunsError, setServerRunsError] = useState('');
+  const [historyOpening, setHistoryOpening] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
   const fileRef = useRef(null);
   const wrapRef = useRef(null);
+  const runPollRef = useRef(null);
+  const runBusyRef = useRef(false);        // 同步互斥:挡住 React 重绘前的双击并发启动
+  const durableWaitIdRef = useRef('');     // 本地跟踪 token；清空即使在途 fetch 结果失效
+  const mountedRef = useRef(true);
+  const historyRequestRef = useRef(0);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    durableWaitIdRef.current = '';
+    if (runPollRef.current) clearTimeout(runPollRef.current);
+  }, []);
 
   const flash = (title, build, ms) => { setToast({ title, build }); setTimeout(() => setToast(null), ms || 3000); };
   // #9 报告库: 导出当前抽屉结果 → /report/save 真存盘;从报告库「重看」→ 载回抽屉。
   const exportReport = () => {
     const r = result;
     // 可导出 = 任一终端载荷(与 runGraph 终端判定同源):因子/回测/组合 + 个股时序IC(codes_tsic)/事件(car_curve)/关系稳定(codes_relstat)。
-    const hasPayload = r && (r.ic || r.portfolio || r.composite || r._compose != null || r.holdings || r.weights || r.codes_tsic || r.car_curve || r.codes_relstat || r.method === 'risk' || r.method === 'garch' || r.method === 'attrib' || r.method === 'tvbeta');
+    const hasPayload = r && (r.ic || r.portfolio || r.composite || r._compose != null || r.holdings || r.weights || r.codes_tsic || r.car_curve || r.codes_relstat || r.method === 'risk' || r.method === 'garch' || r.method === 'attrib' || r.method === 'tvbeta' || r.__dt === 'overfit_audit' || r.__dt === 'data_screen');
     if (!hasPayload) { flash('导出报告', '当前无可导出的报告(先运行出结果)'); return; }
     const isTsic = !!r.codes_tsic;
-    const method = r.method || (isTsic ? 'tsic' : (r.car_curve ? 'event' : (r.codes_relstat ? 'relstat' : undefined)));
-    const nm = window.prompt('报告命名', r._label || (isTsic ? '个股时序IC' : ''));
+    const isAudit = r.__dt === 'overfit_audit' || r.method === 'overfit_audit';
+    const isDataScreen = r.__dt === 'data_screen';
+    const method = r.method || (isDataScreen ? 'data_screen' : (isTsic ? 'tsic' : (r.car_curve ? 'event' : (r.codes_relstat ? 'relstat' : undefined))));
+    const nm = window.prompt('报告命名', r._label || (isDataScreen ? '数据筛选 · ' + (r.as_of || '') : (isTsic ? '个股时序IC' : '')));
     if (nm == null) return;
-    const ic = r.ic || {}, pf = r.portfolio || {}, sm = r.summary || {}, tp = (sm.timing_pool || {});
-    const kpi = isTsic
+    const ic = r.ic || {}, pf = r.portfolio || {}, sm = r.summary || {}, tp = (sm.timing_pool || {}), am = r.metrics || {}, ah = am.haircut || {}, ae = r.evidence || {};
+    const kpi = isDataScreen
+      ? { as_of: r.as_of, n_loaded: r.n_loaded, n_evaluated: r.n_evaluated, n_matched: r.n_matched, returned: (r.candidates || []).length }
+      : isTsic
       ? { mean_pearson: sm.mean_pearson, mean_icir: sm.mean_icir, pool_sharpe: tp.pool_sharpe, mean_r2os: sm.mean_r2os }
-      : { rank_ic: ic.rank_ic_mean, sharpe: pf.sharpe, ann_return: (pf.net_ann != null ? pf.net_ann : pf.ann_return), max_drawdown: pf.max_drawdown };
+      : (isAudit
+          ? { audit_status: r.status, passes_gate: r.passes_gate === true, psr: am.psr, dsr: am.dsr, pbo: am.pbo, adjusted_psr: ah.adjusted_psr, n_trials: ae.n_trials }
+          : { rank_ic: ic.rank_ic_mean, sharpe: pf.sharpe, ann_return: (pf.net_ann != null ? pf.net_ann : pf.ann_return), max_drawdown: pf.max_drawdown });
     // 快照产出该报告的工作流:名 + 全图 → 「重看」时铺回画布,真正回到对应工作流。
     if (WW_READONLY) { flash('归档空间只读', '历史工作流不能新增报告'); return; }
     _post('/report/save', _withWorkspace({ name: (nm || '').trim(), universe: r._universe, label: r._label, method, workflow_name: wfName, workflow_scope: wfScope, graph: { nodes, edges }, kpi, result: r }))
@@ -1028,7 +1569,8 @@ function WorkflowApp() {
     const g = rec && rec.graph;
     const nm = (rec && rec.workflow_name) || wfName;
     const scope = (rec && rec.workflow_scope) || wfScope;
-    if (g && Array.isArray(g.nodes) && g.nodes.length) {
+    const graphBad = (g && Array.isArray(g.nodes) && g.nodes.length) ? validateGraph(g.nodes, g.edges || []) : '';
+    if (g && Array.isArray(g.nodes) && g.nodes.length && !graphBad) {
       pushHist();
       const cg = cloneGraph(g.nodes, g.edges || []);
       setNodes(cg.nodes); setEdges(cg.edges); setAssetNeedsPool(graphNeedsPoolReview(cg.nodes)); setSel(null);
@@ -1038,7 +1580,7 @@ function WorkflowApp() {
     }
     setResult(r); setShowRes(true); setRepOpen(false);
     setResCache(c => { const n = { ...c, [wfReportKey(nm, scope)]: r }; wfSaveReports(n); return n; });
-    flash('已打开报告', (rec && rec.name) ? (rec.name + (g && g.nodes ? ' · 已回到对应工作流' : '')) : '');
+    flash(graphBad ? '已打开报告 · 附图未载入' : '已打开报告', graphBad || ((rec && rec.name) ? (rec.name + (g && g.nodes ? ' · 已回到对应工作流' : '')) : ''), graphBad ? 6500 : 3000);
   };
   const pushHist = () => { setPast(p => [...p.slice(-49), { nodes, edges, assetNeedsPool }]); setFuture([]); };
   const undo = () => setPast(p => { if (!p.length) return p; const prev = p[p.length - 1]; setFuture(f => [{ nodes, edges, assetNeedsPool }, ...f]); setNodes(prev.nodes); setEdges(prev.edges); setAssetNeedsPool(!!prev.assetNeedsPool); setSel(null); return p.slice(0, -1); });
@@ -1047,6 +1589,8 @@ function WorkflowApp() {
   const saveLocal = () => WW_READONLY ? flash('归档空间只读', '历史工作流不能保存或覆盖') : setSaveOpen({ name: wfName });
   const saveNamed = (name) => {
     if (WW_READONLY) { flash('归档空间只读', '历史工作流不能保存或覆盖'); return; }
+    const bad = validateGraph(nodes, edges);
+    if (bad) { flash('保存前校验未通过', bad, 6500); return; }
     const nm = (name || '').trim() || ('工作流 ' + new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }));
     const entry = { id: 'w' + Date.now(), name: nm, ts: Date.now(), nodes, edges,
       scope: WW_WORKSPACE_ID ? 'workspace' : 'global', workspace_id: WW_WORKSPACE_ID || null, read_only: false };
@@ -1075,6 +1619,11 @@ function WorkflowApp() {
       if (r && r.ok && rec && rec.graph) full = { ...entry, ...wfNormalizeRemote(rec), nodes: rec.graph.nodes, edges: rec.graph.edges };
     }
     if (!Array.isArray(full.nodes) || !full.nodes.length) { flash('载入失败', '该工作流无图数据'); return; }
+    if (full.legacy_recovery && full.legacy_recovery.auto_repairable === false) {
+      flash('历史图保留 · 不能自动恢复执行', wfReviewReason(full), 10000); return;
+    }
+    const bad = validateGraph(full.nodes, full.edges || []);
+    if (bad) { flash('载入失败 · 图未通过校验', bad, 6500); return; }
     pushHist();
     const g = cloneGraph(full.nodes, full.edges || []);
     const scope = wfScopeOf(full);
@@ -1092,7 +1641,7 @@ function WorkflowApp() {
     _post('/workflow/delete', _withWorkspace({ id })).catch(() => flash('本地已删 · 服务端不可达', '若该条曾同步到服务端,刷新后会回来;后端恢复后再删一次', 5000)); // ok:false(如纯本地条目服务端本就没有)不提示
   };
   const exportJSON = () => { const blob = new Blob([JSON.stringify({ nodes, edges }, null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'guanlan-workflow.json'; a.click(); flash('已导出', 'guanlan-workflow.json'); };
-  const importJSON = (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; if (WW_READONLY) { flash('归档空间只读', '历史工作流不能导入覆盖'); e.target.value = ''; return; } const rd = new FileReader(); rd.onload = () => { try { const g = JSON.parse(rd.result); if (!Array.isArray(g.nodes)) throw new Error('格式不符'); pushHist(); setNodes(g.nodes); setEdges(g.edges || []); setAssetNeedsPool(graphNeedsPoolReview(g.nodes)); setSel(null); flash('已导入', f.name); } catch (err) { flash('导入失败', String(err.message)); } }; rd.readAsText(f); e.target.value = ''; };
+  const importJSON = (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; if (WW_READONLY) { flash('归档空间只读', '历史工作流不能导入覆盖'); e.target.value = ''; return; } const rd = new FileReader(); rd.onload = () => { try { const g = JSON.parse(rd.result); const bad = validateGraph(g && g.nodes, g && g.edges); if (bad) throw new Error(bad); pushHist(); setNodes(g.nodes); setEdges(g.edges); setAssetNeedsPool(graphNeedsPoolReview(g.nodes)); setSel(null); flash('已导入', f.name); } catch (err) { flash('导入失败 · 图未通过校验', String(err.message), 6500); } }; rd.readAsText(f); e.target.value = ''; };
 
   // 屏幕 → 画布坐标
   const toCanvas = useCallback((cx, cy) => {
@@ -1142,7 +1691,10 @@ function WorkflowApp() {
         const sP = sNode && SPECS[sNode.type].outputs.find(o => o.id === portId);
         const dP = dNode && SPECS[dNode.type].inputs.find(i => i.id === tp);
         if (tn === nodeId) { /* 不能自连 */ }
-        else if (sP && dP && sP.dt && dP.dt && sP.dt !== dP.dt) {
+        else if ((tp === 'src' && !(sNode && sNode.type === 'source' && portId === 'data'))
+            || (sNode && sNode.type === 'source' && portId === 'data' && tp !== 'src')) {
+          setToast({ title: '上下文连线不合法', build: 'src 口只能连接「数据源」的 data 口，用于下传股票池、日期与样本外参数' }); setTimeout(() => setToast(null), 3600);
+        } else if (sP && dP && sP.dt && dP.dt && !dtCompatible(sP.dt, dP.dt, dNode && dNode.type, sNode && sNode.type, tp)) {
           setToast({ title: '连线类型不匹配', build: `输出 ${sP.dt} ✗ 需要 ${dP.dt}` }); setTimeout(() => setToast(null), 2800);
         } else {
           pushHist();
@@ -1159,24 +1711,57 @@ function WorkflowApp() {
   };
 
   const buildFromCard = (card) => {
-    pushHist();
     const g = card.snapshot ? cloneGraph(card.snapshot.nodes, card.snapshot.edges)
       : CARD_GRAPH[card.id] ? CARD_GRAPH[card.id]() : seedGraph();
+    const bad = validateGraph(g.nodes, g.edges || []);
+    if (bad) { flash('经验模板未通过校验', bad, 6500); return; }
+    pushHist();
     setNodes(g.nodes); setEdges(g.edges); setAssetNeedsPool(false); setSel(null); setShowRes(false); setRunState({});
     setToast({ title: '已据「' + card.title + '」搭建示例模板', build: '点 ▶ 运行出真结果 · ' + (card.build || g.nodes.map(n => SPECS[n.type].title).join(' → ')) });
     setTimeout(() => setToast(null), 6500);
   };
-  // 把复合因子结果存入因子库: 表达式取值链 expr → fe.features 等权 → _label; 起名默认 _label; POST /factorlib/save。
+  const factorSpecOf = (r) => {
+    if (r && r.factor_spec && r.factor_spec.schema === 'guanlan.factor_spec.v1') return r.factor_spec;
+    const orth = r && (r.orthogonalization || r._orthogonalization || (r.fe && r.fe.orthogonalization));
+    const artifact = orth && orth.artifact;
+    const transform = (artifact && artifact.transform) || (orth && orth.version ? orth : null);
+    let base = (artifact && artifact.base_features && artifact.base_features[0])
+      || (r && r.expr) || (r && r.fe && r.fe.features && r.fe.features.length === 1 && r.fe.features[0]);
+    if (!base) {
+      const formulas = nodes.filter(n => n.type === 'formula').map(n => String((n.params || {}).expr || '').trim()).filter(Boolean);
+      if (formulas.length === 1) base = formulas[0];
+    }
+    return (transform && base) ? { schema: 'guanlan.factor_spec.v1', kind: 'orthogonalized', base_features: [String(base)], transform } : null;
+  };
+  const auditAllowsPersistence = (r) => {
+    const isAudit = !!(r && (r.__dt === 'overfit_audit' || r.method === 'overfit_audit'));
+    return !isAudit || (String(r.status || '').toUpperCase() === 'PASS' && r.evidence_verified === true);
+  };
+
+  // 普通结果保存 expr；结构化结果保存完整 factor_spec，服务端注册可执行名称并在重放时保留变换顺序。
   const saveFactor = () => {
     if (WW_READONLY) { flash('归档空间只读', '历史结果不能发布到全局因子库'); return; }
     const r = result || {};
-    const expr = r.expr || (r.fe && r.fe.features && r.fe.features.join(' + ')) || r._label;
+    if (!auditAllowsPersistence(r)) { flash('审计硬门未通过', '只有服务端 TrialLedger 验证的 PASS 结果可以存入因子库', 6500); return; }
+    const factorSpec = factorSpecOf(r);
+    if (r.factor_artifact) { flash('这是拟合信号，不能保存成原始因子公式', '完整信号随运行报告保留；树模型请在模型节点使用「存入模型库」保存重训配方。', 8000); return; }
+    const expr = factorSpec ? factorSpec.base_features[0]
+      : r.expr;
     if (!expr) { setToast({ title: '存入因子库', build: '该结果无可保存的因子表达式' }); setTimeout(() => setToast(null), 6500); return; }
     const name = window.prompt('为因子命名', r._label || '');
     if (name == null) return;                               // 取消
     const nm = (name || '').trim() || (r._label || '复合因子');
-    _post('/factorlib/save', { name: nm, expr, family: 'library_mined', meta: { _label: r._label, universe: r._universe, ic: r.ic, portfolio: r.portfolio } })
-      .then(res => { setToast({ title: '存入因子库 · ' + nm, build: (res && res.ok) ? '已存入因子库' : ((res && res.reason) || '保存失败') }); setTimeout(() => setToast(null), 6500); })
+    _post('/factorlib/save', { name: nm, expr, factor_spec: factorSpec, family: 'library_mined',
+      meta: { _label: r._label, universe: r._universe, ic: r.ic, portfolio: r.portfolio } })
+      .then(res => {
+        const saved = !!(res && res.ok);
+        const replayable = saved && !!res.registered;
+        const build = !saved ? ((res && res.reason) || '保存失败')
+          : (factorSpec
+              ? (replayable ? '结构化因子已保存并注册 · 可按名称完整重放' : '结构化因子已落盘，但运行时注册失败；重启服务并复验后才可称为可重放')
+              : (replayable ? '已存入因子库并注册' : '已落盘，但运行时注册失败'));
+        setToast({ title: '存入因子库 · ' + nm, build }); setTimeout(() => setToast(null), 6500);
+      })
       .catch(e => { setToast({ title: '存入因子库', build: '保存失败 · ' + String(e.message || e) }); setTimeout(() => setToast(null), 6500); });
   };
 
@@ -1186,9 +1771,11 @@ function WorkflowApp() {
   const saveCard = () => {
     if (WW_READONLY) { flash('归档空间只读', '历史结果不能沉淀新经验卡'); return; }
     const r = result || {};
+    if (!auditAllowsPersistence(r)) { flash('审计硬门未通过', '只有服务端 TrialLedger 验证的 PASS 结果可以沉淀经验卡', 6500); return; }
+    const factorSpec = factorSpecOf(r);
     const ic = r.ic || {}, pf = r.portfolio || {}, sm = r.summary || {};
-    const expr = r.expr || (r.fe && r.fe.features && r.fe.features.join(' + '))
-      || nodes.filter(n => n.type === 'formula').map(n => (n.params.expr || '').toString().trim()).filter(Boolean).join(' + ');
+    if (r.factor_artifact) { flash('拟合信号请先导出报告', '不能用原始特征之和冒充本次模型结果；模型配方可从模型节点入库。', 8000); return; }
+    const expr = (factorSpec && factorSpec.base_features[0]) || r.expr;
     if (!expr) { flash('沉淀为经验卡', '该结果无可沉淀的因子表达式', 6500); return; }
     const name = window.prompt('为经验卡命名', wfName || r._label || '');
     if (name == null) return;
@@ -1199,58 +1786,52 @@ function WorkflowApp() {
     if (ic.icir != null) bits.push('ICIR=' + (+ic.icir).toFixed(2));
     if (pf.sharpe != null) bits.push('Sharpe=' + (+pf.sharpe).toFixed(2));
     if (pf.max_drawdown != null) bits.push('回撤=' + (pf.max_drawdown * 100).toFixed(1) + '%');
-    const insight = '工作流验证:' + (bits.join(' · ') || '指标见报告') + '(池 ' + (r._universe || '—') + ')。表达式:' + expr.slice(0, 90);
+    const baseInsight = '工作流验证:' + (bits.join(' · ') || '指标见报告') + '(池 ' + (r._universe || '—') + ')。';
     const verdict = (icv != null && Math.abs(+icv) >= 0.02) ? '通过' : '存疑';   // 粗判,人审定夺
     const conf = (icv != null ? Math.max(40, Math.min(90, Math.round(Math.abs(+icv) * 1500))) : 50);
-    _post('/cards', { title: nm, cat: '量化', tags: ['工作流', r._universe || ''].filter(Boolean).slice(0, 3),
-      verdict, conf, ic: (icv != null ? (+icv).toFixed(4) : ''), expr, insight,
-      src: '工作流 · ' + (wfName || '验证'), status: 'draft' })
-      .then(res => {
+    let stagedStructuredName = '';
+    (async () => {
+      let replayExpr = expr, refs = [], structuredName = null;
+      if (factorSpec) {
+        structuredName = nm + '·正交·' + Date.now().toString(36).slice(-5);
+        const saved = await _post('/factorlib/save', { name: structuredName, expr,
+          factor_spec: factorSpec, family: 'library_mined', status: 'draft', source: 'workflow_card',
+          description: '经验卡「' + nm + '」的可重放结构化因子',
+          meta: { _label: r._label, universe: r._universe, ic: r.ic, portfolio: r.portfolio } });
+        if (saved && saved.ok) stagedStructuredName = saved.name || structuredName;
+        if (!saved || !saved.ok || !saved.registered) throw new Error((saved && saved.reason) || '结构化因子注册失败');
+        replayExpr = saved.name || structuredName;
+        refs = [replayExpr];
+      }
+      const insight = baseInsight + (factorSpec
+        ? ('可重放结构化因子:' + replayExpr + '；原因子:' + expr.slice(0, 90))
+        : ('表达式:' + expr.slice(0, 90)));
+      const res = await _post('/cards', { title: nm, cat: '量化', tags: ['工作流', factorSpec ? '结构化因子' : '', r._universe || ''].filter(Boolean).slice(0, 3),
+        verdict, conf, ic: (icv != null ? (+icv).toFixed(4) : ''), expr: replayExpr, insight, refs,
+        src: '工作流 · ' + (wfName || '验证'), status: 'draft' });
+      if (!res || !res.id) throw new Error('经验卡服务未返回卡片 id');
+      return { res, insight, replayExpr, refs };
+    })()
+      .then(({ res, insight, replayExpr, refs }) => {
         const cid = res && res.id;
         if (window.GL && cid) {
           GL.put({ type: 'card', id: cid, title: nm, cat: '量化', tags: ['工作流'], verdict, conf,
-            ic: (icv != null ? (+icv).toFixed(4) : ''), insight, expr, status: 'draft', real: true, refs: [] });
+            ic: (icv != null ? (+icv).toFixed(4) : ''), insight, expr: replayExpr, status: 'draft', real: true, refs });
         }
-        flash('已沉淀为经验卡 · ' + nm, cid ? (cid + ' · 草稿;卡片页批准后可被对话/研报引用') : '已提交', 6500);
+        flash('已沉淀为经验卡 · ' + nm, cid + (factorSpec ? ' · 已绑定可重放结构化因子' : '') + ' · 草稿;卡片页批准后可被对话/研报引用', 6500);
       })
-      .catch(e => flash('沉淀为经验卡', '失败 · ' + String(e.message || e), 6500));
+      .catch(e => flash('沉淀为经验卡', '失败 · ' + String(e.message || e) + (stagedStructuredName ? ' · 结构化因子草稿已落盘:' + stagedStructuredName : ''), 6500));
   };
   const generate = (q) => {
     if (WW_READONLY) { flash('归档空间只读', '历史工作流不能生成或改写'); return; }
     if (!q || !q.trim()) return;
-    pushHist();
     const g = generateFromText(q);
+    const bad = validateGraph(g.nodes, g.edges || []);
+    if (bad) { flash('本地生成未通过校验', bad, 6500); return; }
+    pushHist();
     setNodes(g.nodes); setEdges(g.edges); setAssetNeedsPool(false); setSel(null); setShowRes(false); setRunState({});
     setToast({ title: '已据「' + q.trim().slice(0, 22) + '」搭建工作流', build: g.nodes.map(n => SPECS[n.type].title).join(' → ') });
     setTimeout(() => setToast(null), 6500);
-  };
-  // 客户端再校验 (审核): 用 SPECS 复核 LLM 图, 与画布既有连线规则同源 (type∈目录 / 每条边 from.dt===to.dt / ≥1 终端 / model 只经 mf)。返回 '' 即合法, 否则首个违例文案。
-  const validateGraph = (gn, ge) => {
-    if (!Array.isArray(gn) || !gn.length) return '图为空 — 无节点';
-    const TERM = { report: 1, ic: 1, result: 1, portfolio: 1, tsic: 1, event: 1, relstat: 1, validation: 1 };   // 与 runGraph 的 TERMINAL_DT 同源 (analysis/iccalc/backtest/portfolio/tsic/event/relstat)
-    const byId = {};
-    for (const n of gn) {
-      if (!n || typeof n.id !== 'string' || !n.id) return '存在无 id 节点';
-      if (!SPECS[n.type]) return '未知节点类型: ' + (n && n.type);
-      if (byId[n.id]) return '节点 id 重复: ' + n.id;
-      byId[n.id] = n;
-    }
-    let hasTerm = false;
-    for (const n of gn) if (SPECS[n.type].outputs.some(o => TERM[o.dt])) { hasTerm = true; break; }
-    if (!hasTerm) return '缺少终端节点 (因子分析 / IC / 回测)';
-    for (const e of (ge || [])) {
-      if (!e || !Array.isArray(e.from) || !Array.isArray(e.to)) return '存在残缺连线';
-      const sN = byId[e.from[0]], tN = byId[e.to[0]];
-      if (!sN || !tN) return '连线指向不存在的节点';
-      if (e.from[0] === e.to[0]) return '存在自连线: ' + e.from[0];
-      const sP = SPECS[sN.type].outputs.find(o => o.id === e.from[1]);
-      const tP = SPECS[tN.type].inputs.find(i => i.id === e.to[1]);
-      if (!sP) return '输出端口不存在: ' + sN.type + '.' + e.from[1];
-      if (!tP) return '输入端口不存在: ' + tN.type + '.' + e.to[1];
-      if (sP.dt !== tP.dt) return '连线类型不匹配: ' + sP.dt + ' ✗ ' + tP.dt;
-      if (sP.dt === 'model' && tN.type !== 'mf') return 'model 只能经「多因子构建」(mf) 接入';
-    }
-    return '';
   };
   // AI 生成工作流 (真 LLM 联网): _post 后端 → 诚实失败判 resp.ok → SPECS 再校验 → 仅渲染待审阅, 绝不自动 run()。端点不可达 → 降级 generateFromText(关键词)。
   const aiGenerate = async (text) => {
@@ -1272,12 +1853,14 @@ function WorkflowApp() {
       // LLM 端点不可达 → 降级到本地关键词解析 (现有 generateFromText), 永不白屏
       try {
         const g = generateFromText(text);
-        if (g && Array.isArray(g.nodes) && g.nodes.length) {
+        const bad = g && validateGraph(g.nodes, g.edges || []);
+        if (g && Array.isArray(g.nodes) && g.nodes.length && !bad) {
           pushHist();
           setNodes(g.nodes); setEdges(g.edges); setAssetNeedsPool(false); setSel(null); setShowRes(false); setRunState({});
           flash('AI 不可达 · 本地关键词规则生成(非 LLM · 仅供参考)', g.nodes.map(n => SPECS[n.type].title).join(' → '), 6500);
           return;
         }
+        if (bad) throw new Error(bad);
       } catch (e2) { /* 降级也失败 → 落到下面统一提示 */ }
       flash('AI 生成失败', String(err && err.message || err));
     } finally { setAiBusy(false); }
@@ -1297,11 +1880,18 @@ function WorkflowApp() {
       n_dates: r && r.n_dates, factor: r && r._label,
     });
     const factorOf = g => { const f = (g.nodes || []).find(n => n.type === 'formula'); return (f && f.params && f.params.expr) || (g.nodes || []).map(n => SPECS[n.type] ? SPECS[n.type].title : n.type).join(' → '); };
-    const runHeadless = g => new Promise(res => { let last = null, errMsg = null; runGraph(g.nodes, g.edges, { onState() {}, onResult(r) { last = r; }, onError(m) { errMsg = m; } }).then(() => res({ result: last, error: last ? null : errMsg })).catch(e => res({ result: last, error: (e && e.message) || String(e) })); });
+    const runHeadless = g => new Promise(res => {
+      const bad = validateGraph(g && g.nodes, (g && g.edges) || []);
+      if (bad) { res({ result: null, error: bad }); return; }
+      let last = null, errMsg = null;
+      runGraph(g.nodes, g.edges, { onState() {}, onResult(r) { last = r; }, onError(m) { errMsg = m; } }).then(() => res({ result: last, error: last ? null : errMsg })).catch(e => res({ result: last, error: (e && e.message) || String(e) }));
+    });
     try {
-      let graph = null;
-      try { const gen = await _post('/workflow/generate', { goal }); if (gen && gen.ok && gen.graph && Array.isArray(gen.graph.nodes)) graph = cloneGraph(gen.graph.nodes, gen.graph.edges || []); } catch (e) {}
-      if (!graph) { const gg = generateFromText(goal); graph = cloneGraph(gg.nodes, gg.edges); }
+      const gen = await _post('/workflow/generate', { goal });
+      if (!gen || !gen.ok || !gen.graph || !Array.isArray(gen.graph.nodes)) throw new Error('AI 初始提案失败：' + ((gen && gen.reason) || '未返回合法图') + '；未使用模板，未执行');
+      const proposalError = validateGraph(gen.graph.nodes, gen.graph.edges || []);
+      if (proposalError) throw new Error('AI 初始图未通过校验：' + proposalError + '；未使用模板，未执行');
+      let graph = cloneGraph(gen.graph.nodes, gen.graph.edges || []);
       const rounds = [];
       let diag = '初始生成(AI propose)';
       for (let k = 0; k < 2; k++) {
@@ -1314,6 +1904,8 @@ function WorkflowApp() {
         let crit = null;
         try { crit = await _post('/workflow/critique', { goal, metrics: rounds[k].metrics, graph }); } catch (e) {}
         if (!crit || !crit.ok || !crit.graph || !Array.isArray(crit.graph.nodes)) { diag = (crit && crit.diagnosis) || 'AI 自评不可用,停止迭代'; break; }
+        const critBad = validateGraph(crit.graph.nodes, crit.graph.edges || []);
+        if (critBad) { diag = 'AI 改进图未通过校验：' + critBad; break; }
         diag = (crit.source === 'rule' ? '(规则兜底·非 LLM) ' : '') + (crit.diagnosis || '已据指标改进'); graph = cloneGraph(crit.graph.nodes, crit.graph.edges || []);
       }
       const nFail = rounds.filter(r => r.failed).length;
@@ -1336,26 +1928,277 @@ function WorkflowApp() {
   const zoom = (d) => setView(v => ({ ...v, z: Math.max(0.4, Math.min(1.8, +(v.z + d).toFixed(2))) }));
   const fit = () => setView({ x: 0, y: 0, z: 1 });
   const onWheel = (e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoom(e.deltaY > 0 ? -0.1 : 0.1); } };
+
+  const applyDurableRun = (rec, ref, surfaceOnDone) => {
+    const nodeStates = {};
+    const rawNodeStates = (rec && (rec.node_state || rec.node_states)) || {};
+    Object.keys(rawNodeStates).forEach(id => {
+      const row = rawNodeStates[id];
+      nodeStates[id] = (row && typeof row === 'object') ? row.state : row;
+    });
+    setRunState(nodeStates);
+    const status = String((rec && rec.status) || 'failed');
+    const active = status === 'queued' || status === 'running';
+    const nextRef = { ...(ref || {}), id: rec.id || (ref && ref.id), status, updatedAt: rec.updated_at || Date.now() };
+    if (active) {
+      wfSaveRunRef(nextRef);
+      runBusyRef.current = true;
+      setDurableWaiting(true);
+      // 页面重挂载时 resCache 可能先恢复上一份报告；活动任务必须清掉它，
+      // 否则抽屉会把旧报告伪装成本次运行结果。
+      setResult(null); setRunning(true); setShowRes(true); setRunErr('');
+      return true;
+    }
+
+    durableWaitIdRef.current = '';
+    setDurableWaiting(false);
+    runBusyRef.current = false;
+    setRunning(false);
+    const outcome = rec && rec.result;
+    let rep = outcome && outcome.terminal && outcome.terminal.payload;
+    const durableNodeErrors = Array.isArray(outcome && outcome.node_errors) ? outcome.node_errors : [];
+    const completedWithErrors = status === 'completed_with_errors' || (outcome && outcome.completed_with_errors === true) || durableNodeErrors.length > 0;
+    const allTerminals = Array.isArray(outcome && outcome.all_terminals) ? outcome.all_terminals : [];
+    const mainNodeId = outcome && outcome.terminal && outcome.terminal.node_id;
+    const secondaryTerminals = allTerminals.filter(t => t && t.node_id !== mainNodeId && t.payload).map(t => ({ kind: t.kind, node_id: t.node_id, run_id: t.payload.screen_run_id || t.payload.run_id || null, as_of: t.payload.as_of || null }));
+    const secondaryScreens = allTerminals.filter(t => t && t.kind === 'data_screen' && t.node_id !== mainNodeId && t.payload).map(t => ({ node_id: t.node_id, run_id: t.payload.screen_run_id || t.payload.run_id, as_of: t.payload.as_of, n_matched: t.payload.n_matched, returned: (t.payload.candidates || []).length }));
+    const auditGate = outcome && outcome.audit;
+    if (auditGate && auditGate.declared && (!rep || rep.__dt !== 'overfit_audit')) {
+      const sourceRep = (rep && typeof rep === 'object') ? rep : {};
+      const auditReasons = (auditGate.nodes || []).map(n => n && (n.reason || (n.node_id + ': ' + n.status))).filter(Boolean);
+      rep = {
+        __dt: 'overfit_audit', method: 'overfit_audit', ok: true,
+        status: auditGate.status || 'INCOMPLETE', passes_gate: auditGate.passes_gate === true,
+        metrics: {}, evidence: {}, thresholds: {}, reasons: auditReasons.length ? auditReasons : ['审计未产出完整证据'],
+        audit_aggregate: auditGate, portfolio: sourceRep.portfolio, ic: sourceRep.ic,
+        oos: sourceRep.oos, headline_ic: sourceRep.headline_ic,
+        orthogonalization: sourceRep.orthogonalization || null, factor_spec: sourceRep.factor_spec || null,
+        _label: sourceRep._label || '回测过拟合审计', _universe: sourceRep._universe,
+      };
+    }
+    if (rep && typeof rep === 'object') {
+      const extraWarnings = [];
+      ((outcome && outcome.warnings) || []).forEach(w => extraWarnings.push(String(w)));
+      durableNodeErrors.forEach(e => extraWarnings.push('节点 ' + (e.nid || '') + '(' + (e.type || '') + '):' + (e.error || '执行失败')));
+      if (completedWithErrors) extraWarnings.unshift('运行完成 · 含节点错误(completed_with_errors)：' + durableNodeErrors.length + ' 个节点失败，主终端结果仍已保留。');
+      if (secondaryTerminals.length) extraWarnings.push('并行终端结果已独立保留（当前抽屉仅展示主终端）: ' + secondaryTerminals.map(x => (x.kind || '未知') + '@' + (x.node_id || '未标注')).join(' · '));
+      if (secondaryScreens.length) extraWarnings.push('并行数据筛选结果已独立保留（当前抽屉展示主终端）: ' + secondaryScreens.map(x => (x.run_id || x.node_id) + (x.as_of ? '@' + x.as_of : '')).join(' · '));
+      if (secondaryTerminals.length) rep = { ...rep, _parallel_terminal_refs: secondaryTerminals };
+      if (secondaryScreens.length) rep = { ...rep, _data_screen_runs: secondaryScreens };
+      if (extraWarnings.length) rep = { ...rep, _warnings: [...extraWarnings, ...(rep._warnings || [])] };
+      rep = { ...rep, _run_status: completedWithErrors ? 'completed_with_errors' : status,
+        _completed_with_errors: completedWithErrors, _node_errors: durableNodeErrors };
+      const name = nextRef.name || wfName;
+      const scope = nextRef.scope || wfScope;
+      setResult(rep); setRunErr('');
+      setResCache(c => { const n = { ...c, [wfReportKey(name, scope)]: rep }; wfSaveReports(n); return n; });
+      if (nextRef.nodes && nextRef.nodes.length) wfSaveLast({ name, scope, nodes: nextRef.nodes, edges: nextRef.edges || [] });
+      if (surfaceOnDone) setShowRes(true);
+    } else {
+      setResult(null);
+      setRunErr(String((rec && rec.reason) || (outcome && outcome.reason) || '运行未产出可用结果'));
+      if (surfaceOnDone) setShowRes(true);
+    }
+    wfSaveRunRef({ ...nextRef, status: completedWithErrors ? 'completed_with_errors' : status, acknowledged: true });
+    return false;
+  };
+
+  const pollDurableRun = (runId, ref, surfaceOnDone, misses) => {
+    // 放弃重连或启动了新 run_id 后，旧轮询不得清掉新 timer、
+    // 重新上锁或把旧结果投影回页面。
+    if (durableWaitIdRef.current !== runId) return;
+    if (runPollRef.current) clearTimeout(runPollRef.current);
+    const missN = misses || 0;
+    const tick = async () => {
+      const rec = await _get(_scopedPath('/workflow/run/status/' + encodeURIComponent(runId), false));
+      if (!mountedRef.current || durableWaitIdRef.current !== runId) return;
+      if (!rec) {
+        // A board switch can race the service for a moment. Keep the durable
+        // reference and retry instead of declaring that the computation died.
+        // 连续失联后降低轮询频率，但不解锁第二次运行：只有服务端
+        // 明确 ok:false 或终态才能释放同一个 run_id，避免网络抖动制造重复重任务。
+        runBusyRef.current = true; setRunning(true); setShowRes(true);
+        if (missN === 20) setRunErr('暂时无法连接运行记录；任务编号已保留，正在低频重连');
+        const retryMs = missN < 20 ? 1500 : 5000;
+        runPollRef.current = setTimeout(() => pollDurableRun(runId, ref, surfaceOnDone, missN + 1), retryMs);
+        return;
+      }
+      if (rec.ok === false) {
+        durableWaitIdRef.current = ''; setDurableWaiting(false);
+        runBusyRef.current = false; setRunning(false); setShowRes(true); setRunErr(rec.reason || '运行记录不存在'); wfClearRunRef(); return;
+      }
+      const active = applyDurableRun(rec, ref, surfaceOnDone);
+      if (active) runPollRef.current = setTimeout(() => pollDurableRun(runId, { ...ref, status: rec.status }, surfaceOnDone, 0), 900);
+    };
+    tick();
+  };
+
+  const stopWaitingForDurableRun = () => {
+    const runId = durableWaitIdRef.current;
+    if (!durableWaiting || !runId) { flash('当前没有可放弃的重连', '本页未在跟踪持久任务'); return; }
+    const warning = '这只会停止本页轮询并清除本地任务引用；不会取消服务端任务。服务端任务可能仍在运行，重新运行可能重复计算。';
+    if (!window.confirm('停止等待 / 放弃重连？\n\n' + warning + '\n\n任务编号：' + runId)) return;
+    // 纯本地恢复口：不调服务端取消接口。token 先失效，
+    // 即使此时有 status/start fetch 在途，返回后也不会重新上锁。
+    durableWaitIdRef.current = '';
+    if (runPollRef.current) clearTimeout(runPollRef.current);
+    runPollRef.current = null;
+    wfClearRunRef();
+    runBusyRef.current = false;
+    setDurableWaiting(false);
+    setRunning(false);
+    setRunErr('');
+    setShowRes(false);
+    flash('已停止本地等待', '未取消服务端任务 · 服务端可能仍在运行 · 重新运行可能重复计算', 10000);
+  };
+
+  const loadServerRuns = async () => {
+    setServerRunsLoading(true); setServerRunsError('');
+    try {
+      const response = await _get(_scopedPath('/workflow/run/list?limit=30', false));
+      if (!mountedRef.current) return;
+      if (!response || response.ok !== true || !Array.isArray(response.items)) throw new Error((response && response.reason) || '无法读取服务端运行历史');
+      setServerRuns(response.items.filter(rec => String(rec.workspace_id || '') === String(WW_WORKSPACE_ID || '')));
+    } catch (error) { if (mountedRef.current) setServerRunsError(String(error.message || error)); }
+    finally { if (mountedRef.current) setServerRunsLoading(false); }
+  };
+  const openHistoricalRun = async (entry, fromLink) => {
+    const runId = String((entry && entry.id) || '');
+    if (!/^wr_[0-9a-f]{12,40}$/.test(runId)) { flash('任务载入失败', '无效任务编号'); return; }
+    if (!fromLink && (runBusyRef.current || running) && durableWaitIdRef.current !== runId
+      && !window.confirm('切换查看这项历史任务？只停止本页对旧任务的跟踪，不取消服务端任务，也不会重新执行。')) return;
+    if (!fromLink && !runBusyRef.current && !window.confirm('载入这项任务的原图与结果？当前画布会进入撤销历史，不会重新执行。')) return;
+    const request = ++historyRequestRef.current;
+    setHistoryOpening(runId);
+    try {
+      const rec = await _get(_scopedPath('/workflow/run/status/' + encodeURIComponent(runId), false));
+      if (!mountedRef.current || historyRequestRef.current !== request) return;
+      const error = wfRunRecordError(rec, WW_WORKSPACE_ID);
+      if (error) throw new Error(error);
+      if (runPollRef.current) clearTimeout(runPollRef.current);
+      durableWaitIdRef.current = '';
+      pushHist();
+      // 恢复服务端原节点 id，状态和终端引用才能准确对应；绝不 cloneGraph 重编号。
+      const snap = wfGraphSnapshot(rec.graph.nodes, rec.graph.edges);
+      wfPinRunLocation(rec.id);
+      const ref = { id: rec.id, name: rec.name || '历史工作流', scope: WW_WORKSPACE_ID ? 'workspace' : 'global',
+        nodes: snap.nodes, edges: snap.edges, status: rec.status, pageQuery: location.search };
+      setNodes(snap.nodes); setEdges(snap.edges); setWfName(ref.name); setWfScope(ref.scope);
+      setAssetNeedsPool(graphNeedsPoolReview(snap.nodes)); setSel(null); setHistOpen(false);
+      wfSaveLast({ name: ref.name, scope: ref.scope, nodes: snap.nodes, edges: snap.edges });
+      durableWaitIdRef.current = rec.id;
+      const active = applyDurableRun(rec, ref, true);
+      if (active) pollDurableRun(rec.id, ref, true, 0);
+      flash('已载入 · ' + wfRunStatusLabel(rec.status, rec), active ? '仅继续查看服务端运行，没有重跑' : '已恢复原图与历史结果；中断任务不支持断点续算，没有重跑', 6500);
+    } catch (error) { if (mountedRef.current && historyRequestRef.current === request) flash('任务载入失败', String(error.message || error), 6500); }
+    finally { if (mountedRef.current && historyRequestRef.current === request) setHistoryOpening(''); }
+  };
+  useEffect(() => {
+    loadServerRuns();
+    if (!histOpen) return;
+    const timer = setInterval(loadServerRuns, 5000);
+    return () => clearInterval(timer);
+  }, [histOpen]);
+
   const run = async () => {
     if (WW_READONLY) { flash('归档空间只读', '可查看历史图，但不能运行或生成新结果'); return; }
+    const bad = validateGraph(nodes, edges);
+    if (bad) { flash('运行前校验未通过', bad, 6500); return; }
     if (graphNeedsPoolReview(nodes)) {
       flash('请先选择真实股票池', '该因子的成分/自定义池尚未结构化，不能用默认池冒充'); return;
     }
+    if (runBusyRef.current || running) { flash('已有工作流正在运行', '请等待当前任务完成；切换板块后回来会按任务编号自动重连'); return; }
+    historyRequestRef.current += 1; setHistoryOpening(''); // 新执行意图使在途历史载入失效
+    runBusyRef.current = true;
     setRunning(true); setShowRes(true); setRunState({}); setResult(null); setRunErr('');
+    const snap = wfGraphSnapshot(nodes, edges);
+    wfSaveLast({ name: wfName, scope: wfScope, nodes: snap.nodes, edges: snap.edges });
+
+    // Backtests whose node vocabulary is mirrored by the Python executor run
+    // as durable server jobs. Special browser-only nodes keep the original
+    // path below, preserving existing behavior rather than partially running.
+    if (wfCanRunDurably(snap.nodes)) {
+      const ref = { id: wfNewRunId(), name: wfName, scope: wfScope, nodes: snap.nodes, edges: snap.edges,
+        pageQuery: location.search, status: 'starting', startedAt: Date.now(), acknowledged: false };
+      wfPinRunLocation(ref.id); ref.pageQuery = location.search;
+      durableWaitIdRef.current = ref.id;
+      setDurableWaiting(true);
+      wfSaveRunRef(ref);
+      try {
+        const started = await _post('/workflow/run/start', _withWorkspace({ run_id: ref.id, name: wfName, graph: snap }));
+        if (!mountedRef.current || durableWaitIdRef.current !== ref.id) return;
+        if (!started || !started.ok) {
+          durableWaitIdRef.current = ''; setDurableWaiting(false); runBusyRef.current = false; wfClearRunRef();
+          setRunning(false); setRunErr((started && (started.reason || started.detail)) || '未能启动持久回测');
+          return;
+        }
+        const nextRef = { ...ref, status: started.status || 'queued' };
+        wfSaveRunRef(nextRef);
+        pollDurableRun(ref.id, nextRef, true, 0);
+      } catch (err) {
+        if (mountedRef.current && durableWaitIdRef.current === ref.id) {
+          if (err && err.httpStatus) {
+            durableWaitIdRef.current = ''; setDurableWaiting(false); runBusyRef.current = false; wfClearRunRef(); setRunning(false); setRunErr(String(err.message || err));
+          } else {
+            // 请求响应中断不等于服务端没接单；保留同一个 run_id 并转状态轮询，
+            // 防止用户重试制造第二个重任务。
+            setRunning(true); setRunErr('');
+            flash('启动响应中断 · 正在重连', '任务编号 ' + ref.id + ' 已保留，不会重复启动', 5000);
+            pollDurableRun(ref.id, ref, true, 0);
+          }
+        }
+      }
+      return;
+    }
+
+    durableWaitIdRef.current = '';
+    setDurableWaiting(false);
+    wfClearRunRef();
     // 通用拓扑 DAG 执行器: 按 edges 拓扑序逐节点 await NODE_EXEC, 沿边喂数据, 经 hooks 写回 runState / 结果。
-    await runGraph(nodes, edges, {
-      onState: (id, st) => setRunState(s => ({ ...s, [id]: st })),
-      onResult: (rep) => { setResult(rep); setResCache(c => { const n = { ...c, [wfReportKey(wfName, wfScope)]: rep }; wfSaveReports(n); return n; }); wfSaveLast({ name: wfName, scope: wfScope, nodes, edges }); },
-      onError: (msg) => setRunErr(msg),
-    });
-    setRunning(false);
+    try {
+      await runGraph(nodes, edges, {
+        onState: (id, st) => setRunState(s => ({ ...s, [id]: st })),
+        onResult: (rep) => { setResult(rep); setResCache(c => { const n = { ...c, [wfReportKey(wfName, wfScope)]: rep }; wfSaveReports(n); return n; }); wfSaveLast({ name: wfName, scope: wfScope, nodes, edges }); },
+        onError: (msg) => setRunErr(msg),
+      });
+    } finally {
+      runBusyRef.current = false; setRunning(false);
+    }
   };
 
   const nodeById = (id) => nodes.find(n => n.id === id);
 
   // 带入经验验证区 / 研究图谱传来的经验·因子 → 预填工作流
-  const prefilledRef = useRef(false);   // 立旗:有交棒/?q 预填时,会话恢复(下方 effect)必须让位,否则预填图被上次图覆盖
+  const prefilledRef = useRef(!!(WW_QUERY.get('run') || WW_QUERY.get('import')));   // 显式整图/运行链接先占位，不被旧任务恢复覆盖
   useEffect(() => {
+    const runId = WW_QUERY.get('run');
+    if (runId) openHistoricalRun({ id: runId }, true);
+  }, []);
+  useEffect(() => {
+    const token = WW_QUERY.get('import');
+    if (!token) return;
+    let consumed = false;
+    const receive = (event) => {
+      if (consumed) return;
+      const payload = wfAcceptGraphMessage(event, token, WW_WORKSPACE_ID, WW_SESSION_ID);
+      if (!payload) return;
+      consumed = true;
+      const graph = payload.graph;
+      const bad = validateGraph(graph && graph.nodes, graph && graph.edges);
+      if (bad) { flash('工作流图未通过校验', bad, 6500); return; }
+      pushHist();
+      const snap = wfGraphSnapshot(graph.nodes, graph.edges);
+      setNodes(snap.nodes); setEdges(snap.edges); setWfName(String(payload.name || 'Agent 工作流'));
+      setWfScope(WW_WORKSPACE_ID ? 'workspace' : 'global'); setAssetNeedsPool(graphNeedsPoolReview(snap.nodes));
+      setSel(null); setResult(null); setShowRes(false); setRunState({});
+      flash('已打开 Agent 流程图', '尚未执行，也未发布到全局；审阅后再决定是否运行或保存', 6500);
+    };
+    window.addEventListener('message', receive);
+    if (window.parent !== window) window.parent.postMessage({ type: 'guanlan.workflow.ready', token }, location.origin);
+    return () => window.removeEventListener('message', receive);
+  }, []);
+  useEffect(() => {
+    if (WW_QUERY.get('run') || WW_QUERY.get('import') || WW_QUERY.get('load')) return;
     if (new URLSearchParams(location.search).get('asset')) return;
     const h = window.GL && GL.take('workflow', WW_WS);   // WW_WS=按帷幄会话取信箱,防跨会话串扰
     if (h && (h.name || h.factor || h.expr)) {
@@ -1367,9 +2210,12 @@ function WorkflowApp() {
         ? tplG({ universe: 'csi300', oos_frac: '0.3' }, [
             { type: 'formula', params: { expr: px } },
             { type: 'feature', params: { tag: 'IC' } },
+            { type: 'spearman', params: {} },
             { type: 'analysis', params: {} },
           ])
         : generateFromText((h.name || '') + ' 回测');   // 只有名字没表达式才退回关键词建图
+      const bad = validateGraph(g.nodes, g.edges || []);
+      if (bad) { setToast({ title: '交棒图未通过校验', build: bad }); setTimeout(() => setToast(null), 6500); return; }
       setNodes(g.nodes); setEdges(g.edges); setSel(null); setShowRes(false); setRunState({});
       setWfScope(WW_WORKSPACE_ID ? 'workspace' : 'global'); setAssetNeedsPool(false);
       if (h.name) setWfName(h.name + ' · 验证回测');
@@ -1381,9 +2227,15 @@ function WorkflowApp() {
   }, []);
 
   useEffect(() => {
+    if (WW_QUERY.get('run') || WW_QUERY.get('import') || WW_QUERY.get('load')) return;
     if (new URLSearchParams(location.search).get('asset')) return;
     const q = new URLSearchParams(location.search).get('q');
-    if (q && q.trim()) { prefilledRef.current = true; const g = generateFromText(q); setNodes(g.nodes); setEdges(g.edges); setAssetNeedsPool(false); setToast({ title: '已据「' + q.trim().slice(0, 24) + '」搭建工作流', build: g.nodes.map(n => SPECS[n.type].title).join(' → ') }); setTimeout(() => setToast(null), 7000); }
+    if (q && q.trim()) {
+      prefilledRef.current = true;
+      const g = generateFromText(q), bad = validateGraph(g.nodes, g.edges || []);
+      if (bad) { setToast({ title: '深链生成未通过校验', build: bad }); setTimeout(() => setToast(null), 6500); return; }
+      setNodes(g.nodes); setEdges(g.edges); setAssetNeedsPool(false); setToast({ title: '已据「' + q.trim().slice(0, 24) + '」搭建工作流', build: g.nodes.map(n => SPECS[n.type].title).join(' → ') }); setTimeout(() => setToast(null), 7000);
+    }
   }, []);
 
   // ?asset=<wa_id> 是右侧资产卡与 Agent 新产物共用的持久深链。
@@ -1403,6 +2255,8 @@ function WorkflowApp() {
         setTimeout(() => setToast(null), 6000); return;
       }
       const g = workspaceFactorGraph(a);
+      const bad = validateGraph(g.nodes, g.edges || []);
+      if (bad) { setToast({ title: '空间因子图未通过校验', build: bad }); setTimeout(() => setToast(null), 6500); return; }
       const nm = String(a.name || '空间因子') + ' · v' + String(a.version || 1) + ' 验证';
       const needsPool = graphNeedsPoolReview(g.nodes);
       setNodes(g.nodes); setEdges(g.edges); setWfName(nm); setWfScope('workspace'); setAssetNeedsPool(needsPool); setSel(null); setShowRes(false); setRunState({}); setRunErr('');
@@ -1416,6 +2270,7 @@ function WorkflowApp() {
   // 同步立旗 prefilledRef(否则「恢复上次会话」effect 抢画布,P0④ 坑);绝不自动运行。
   useEffect(() => {
     const wid = new URLSearchParams(location.search).get('load');
+    if (WW_QUERY.get('run') || WW_QUERY.get('import')) return;
     if (!wid || new URLSearchParams(location.search).get('asset')) return;
     prefilledRef.current = true;
     _get(_workflowPath('/workflow/get/' + encodeURIComponent(wid))).then(r => {
@@ -1424,6 +2279,11 @@ function WorkflowApp() {
         setToast({ title: '深链载入失败', build: '工作流 ' + wid + ' 不存在或无图数据' }); setTimeout(() => setToast(null), 6000); return;
       }
       const full = wfNormalizeRemote(rec);
+      if (full.legacy_recovery && full.legacy_recovery.auto_repairable === false) {
+        setToast({ title: '历史图保留 · 不能自动恢复执行', build: wfReviewReason(full) }); setTimeout(() => setToast(null), 10000); return;
+      }
+      const bad = validateGraph(full.graph.nodes, full.graph.edges || []);
+      if (bad) { setToast({ title: '深链载入失败 · 图未通过校验', build: bad }); setTimeout(() => setToast(null), 6500); return; }
       const g = cloneGraph(full.graph.nodes, full.graph.edges || []);
       const scope = wfScopeOf(full);
       setNodes(g.nodes); setEdges(g.edges); if (full.name) setWfName(full.name); setWfScope(scope); setAssetNeedsPool(graphNeedsPoolReview(g.nodes)); setSel(null); setShowRes(false); setRunState({});
@@ -1452,12 +2312,47 @@ function WorkflowApp() {
     const name = (last && last.name) || wfName;
     const scope = (last && last.scope) || (WW_WORKSPACE_ID ? 'workspace' : 'global');
     if (last && Array.isArray(last.nodes) && last.nodes.length) {
-      const g = cloneGraph(last.nodes, last.edges || []);
-      setNodes(g.nodes); setEdges(g.edges); setWfName(name); setWfScope(scope); setAssetNeedsPool(graphNeedsPoolReview(g.nodes)); setSel(null);
+      const bad = validateGraph(last.nodes, last.edges || []);
+      if (!bad) {
+        const g = cloneGraph(last.nodes, last.edges || []);
+        setNodes(g.nodes); setEdges(g.edges); setWfName(name); setWfScope(scope); setAssetNeedsPool(graphNeedsPoolReview(g.nodes)); setSel(null);
+      } else {
+        setToast({ title: '上次会话图未通过校验', build: bad + ' · 已保留当前合法示例图' });
+        setTimeout(() => setToast(null), 6500);
+      }
     }
     const rep = resCache[wfReportKey(name, scope)] || resCache[name];
     if (rep) setResult(rep);   // showRes 保持 false:只亮重看入口,不抢画布
   }, []);   // 仅 mount 一次
+
+  // 长回测重连优先使用启动时的原节点 id（不能 cloneGraph 重发 id，否则
+  // 服务端 node_state 无法点亮原节点）。若离开时仍在运行，回来后自动打开
+  // 结果抽屉；已看过的完成任务只静默恢复“重看结果”。
+  useEffect(() => {
+    // 显式点击的 run/import/load 属于另一张图；不能让后台旧任务抢占。
+    if (WW_QUERY.get('run') || WW_QUERY.get('import')) return;
+    const ref = wfLoadRunRef();
+    if (!ref || !/^wr_[0-9a-f]{12,40}$/.test(String(ref.id || ''))) return;
+    const wasActive = ref.status === 'starting' || ref.status === 'queued' || ref.status === 'running';
+    const shouldWait = wasActive || !ref.acknowledged;
+    const sameLaunchQuery = typeof ref.pageQuery === 'string' && ref.pageQuery === location.search;
+    if (WW_QUERY.get('load') && !sameLaunchQuery) return;
+    // asset/q/load 预填通常应压过“上次会话”，但不能压过一个仍在运行或
+    // 尚未被本页确认终态的服务端任务。否则 URL 中长期保留的 q 参数会令
+    // 刷新/切页回来跳过 run_ref，用户看到默认/预填图并误以为回测已停止。
+    // 同一深链启动的已完成任务也要静默恢复“重看结果”；只有换了另一条
+    // q/asset/load 深链时，新的预填才压过旧任务。
+    if (prefilledRef.current && !shouldWait && !sameLaunchQuery) return;
+    if (Array.isArray(ref.nodes) && ref.nodes.length) {
+      const snap = wfGraphSnapshot(ref.nodes, ref.edges || []);
+      setNodes(snap.nodes); setEdges(snap.edges); setWfName(ref.name || wfName); setWfScope(ref.scope || wfScope);
+      setAssetNeedsPool(graphNeedsPoolReview(snap.nodes)); setSel(null);
+    }
+    durableWaitIdRef.current = ref.id;
+    setDurableWaiting(shouldWait);
+    if (shouldWait) { runBusyRef.current = true; setResult(null); setRunning(true); setShowRes(true); setRunErr(''); }
+    pollDurableRun(ref.id, ref, shouldWait, 0);
+  }, []);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -1475,9 +2370,11 @@ function WorkflowApp() {
 
   return (
     <div style={{ height: '100vh', display: 'grid', gridTemplateRows: '50px 1fr' }}>
-      <TopBar onRun={run} running={running} onGenerate={generate} wfName={wfName} onOpenHist={() => setHistOpen(true)} onAIGenerate={aiGenerate} onAILoop={aiLoop} aiBusy={aiBusy} onOpenReports={() => setRepOpen(true)} hasResult={!!result} resOpen={showRes} onReopenRes={() => setShowRes(true)} />
+      <TopBar onRun={run} running={running} onStopWaiting={stopWaitingForDurableRun} canStopWaiting={durableWaiting} onGenerate={generate} wfName={wfName} onOpenHist={() => setHistOpen(true)} onAIGenerate={aiGenerate} onAILoop={aiLoop} aiBusy={aiBusy} onOpenReports={() => setRepOpen(true)} hasResult={!!result} resOpen={showRes} onReopenRes={() => setShowRes(true)} />
       {loop && <AILoopModal loop={loop} onClose={() => setLoop(null)} onApply={g => {
         const ns = (g.nodes || []).map((n, i) => ({ ...n, x: (n.x != null ? n.x : 60 + i * 240), y: (n.y != null ? n.y : 210), params: { ...(n.params || {}) } }));
+        const bad = validateGraph(ns, g.edges || []);
+        if (bad) { flash('AI 闭环图未通过校验', bad, 6500); return; }
         pushHist(); setNodes(ns); setEdges((g.edges || []).map(e => ({ ...e }))); setAssetNeedsPool(false); setLoop(null); setSel(null); setShowRes(false); setRunState({});
         flash('已应用 AI 闭环工作流', ns.map(n => (SPECS[n.type] ? SPECS[n.type].title : n.type)).join(' → '), 6000);
       }} />}
@@ -1506,7 +2403,7 @@ function WorkflowApp() {
                 onParam={(pid, v) => setParam(n.id, pid, v)} onDel={() => delNode(n.id)} onSel={() => setSel(n.id)} />
             ))}
           </div>
-          <Rail zoom={zoom} fit={fit} onRun={run} onDel={() => sel && delNode(sel)}
+          <Rail zoom={zoom} fit={fit} onRun={run} running={running} onDel={() => sel && delNode(sel)}
             onDup={duplicate} onUndo={undo} onRedo={redo} canUndo={past.length > 0} canRedo={future.length > 0}
             onSave={saveLocal} onExport={exportJSON} onImport={() => fileRef.current && fileRef.current.click()} hasSel={!!sel} />
           <input ref={fileRef} type="file" accept="application/json,.json" onChange={importJSON} style={{ display: 'none' }} />
@@ -1517,9 +2414,14 @@ function WorkflowApp() {
             </div>
           )}
           <Minimap nodes={nodes} />
-          {showRes && <ResultsDrawer result={result} loading={running && !result && !runErr} error={runErr} onClose={() => setShowRes(false)} onSaveFactor={saveFactor} onSaveCard={saveCard} onExport={exportReport} />}
+          {showRes && result && (result._completed_with_errors || result._run_status === 'completed_with_errors') && (
+            <div className="mono" style={{ position: 'absolute', top: 14, right: 14, zIndex: 11, padding: '7px 10px', border: '1px solid #9a6b16', borderRadius: 7, background: 'var(--paper)', color: '#9a6b16', boxShadow: '0 3px 12px rgba(28,24,20,.12)', fontSize: 9.5 }}>
+              运行完成 · 含节点错误 · completed_with_errors
+            </div>
+          )}
+          {showRes && <ResultsDrawer result={result} loading={running && !result && !runErr} error={runErr} durableWaiting={durableWaiting} onStopWaiting={stopWaitingForDurableRun} onClose={() => setShowRes(false)} onSaveFactor={saveFactor} onSaveCard={saveCard} onExport={exportReport} />}
           {saveOpen && <SaveModal initial={saveOpen.name} onSave={saveNamed} onClose={() => setSaveOpen(null)} />}
-          {histOpen && <HistoryModal list={saved} onLoad={loadEntry} onDelete={deleteEntry} onClose={() => setHistOpen(false)} />}
+          {histOpen && <HistoryModal list={saved} runs={serverRuns} runsLoading={serverRunsLoading} runsError={serverRunsError} openingRun={historyOpening} onRefreshRuns={loadServerRuns} onOpenRun={openHistoricalRun} onLoad={loadEntry} onDelete={deleteEntry} onClose={() => setHistOpen(false)} />}
           {repOpen && <ReportLibModal onReopen={reopenReport} onClose={() => setRepOpen(false)} />}
           <div className="mono" style={{ position: 'absolute', bottom: 14, left: 14, fontSize: 9, color: 'var(--ink-3)', background: 'rgba(241,234,217,0.8)', border: '1px solid var(--line)', borderRadius: 6, padding: '4px 8px' }}>
             {nodes.length} 节点 · {edges.length} 连线 · 缩放 {Math.round(view.z * 100)}% · 拖空白平移 · ⌘滚轮缩放
@@ -1530,7 +2432,7 @@ function WorkflowApp() {
   );
 }
 
-function TopBar({ onRun, running, onGenerate, wfName, onOpenHist, onAIGenerate, onAILoop, aiBusy, onOpenReports, hasResult, resOpen, onReopenRes }) {
+function TopBar({ onRun, running, onStopWaiting, canStopWaiting, onGenerate, wfName, onOpenHist, onAIGenerate, onAILoop, aiBusy, onOpenReports, hasResult, resOpen, onReopenRes }) {
   const [q, setQ] = useState('');
   const [aiQ, setAiQ] = useState('');
   return (
@@ -1560,10 +2462,12 @@ function TopBar({ onRun, running, onGenerate, wfName, onOpenHist, onAIGenerate, 
           <span onClick={() => onAILoop(aiQ)} title="AI 闭环:生成→运行→读回真指标→自评→改进(rd-agent 式)" style={{ background: 'var(--yin)', color: 'var(--paper)', borderRadius: 14, padding: '4px 11px', fontFamily: 'var(--serif)', fontSize: 11.5, cursor: aiBusy ? 'default' : 'pointer', opacity: aiBusy ? 0.6 : 1, whiteSpace: 'nowrap' }}>{aiBusy ? '闭环中…' : 'AI 闭环 ✦'}</span>
         </div>
         )}
-        <span onClick={onRun} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--ink)', color: 'var(--paper)', borderRadius: 8, padding: '7px 14px', fontFamily: 'var(--serif)', fontSize: 12, cursor: 'pointer' }}>
+        {canStopWaiting && <span onClick={onStopWaiting} className="serif" title="仅停止本地轮询；不取消服务端任务，重新运行可能重复计算" style={{ color: '#9a6b16', border: '1px solid #9a6b16', borderRadius: 8, padding: '6px 10px', fontSize: 11.5, cursor: 'pointer', whiteSpace: 'nowrap' }}>停止等待 / 放弃重连</span>}
+        <span onClick={running ? undefined : onRun} aria-disabled={running ? 'true' : 'false'} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--ink)', color: 'var(--paper)', borderRadius: 8, padding: '7px 14px', fontFamily: 'var(--serif)', fontSize: 12, cursor: running ? 'default' : 'pointer', opacity: running ? 0.62 : 1 }}>
           {running ? '运行中…' : '▶ 运行工作流'}
         </span>
-        <a href="观澜 · 投研台.html" className="mono" style={{ fontSize: 11, color: 'var(--ink-3)', textDecoration: 'none' }}>← 对话</a>
+        <button type="button" onClick={wwBackToConversation} className="mono" title="返回当前帷幄对话"
+          style={{ border: 0, padding: 0, background: 'transparent', fontSize: 11, color: 'var(--ink-3)', cursor: 'pointer' }}>← 对话</button>
       </div>
     </div>
   );
@@ -1572,14 +2476,14 @@ function TopBar({ onRun, running, onGenerate, wfName, onOpenHist, onAIGenerate, 
 // ───────── 经验卡片 (个人知识库) ─────────
 // W8a 一键策略模板(经验卡 → 可跑工作流)。点卡即载入完整图,可直接「运行工作流」。
 const EXP_CARDS = [
-  { id: 'e1', title: '动量延续 · 样本外体检', insight: '过去20日相对强势短期倾向延续;含「样本外占比30%」自动过拟合体检 —— 样本内→样本外 RankIC 衰减一眼看出。', tags: ['动量', '沪深300', '样本外'], build: '数据源(沪深300·样本外30%) → 20日动量 → 特征 → 因子分析' },
-  { id: 'e2', title: '短期反转', insight: '近5日超跌的短线倾向反弹(A股反转异象);周频、十分位分层最直观。', tags: ['反转', '中证500', '周频'], build: '数据源(中证500) → 5日反转 → 特征 → IC计算 → 因子分析' },
+  { id: 'e1', title: '动量延续 · 样本外体检', insight: '过去20日相对强势短期倾向延续;含「样本外占比30%」自动过拟合体检 —— 样本内→样本外 RankIC 衰减一眼看出。', tags: ['动量', '沪深300', '样本外'], build: '数据源(沪深300·样本外30%) → 20日动量 → 特征 → Spearman 因子 → 因子分析' },
+  { id: 'e2', title: '短期反转', insight: '近5日超跌的短线倾向反弹(A股反转异象);用 Spearman 将特征物化为因子后计算 5 日 IC。', tags: ['反转', '中证500', 'IC'], build: '数据源(中证500) → 5日反转 → 特征 → Spearman 因子 → IC计算' },
   { id: 'e3', title: '低波防御 · 全绩效回测', insight: '低波动股长期风险调整后收益更优(低波异象);走真回测出 Sharpe/Sortino/信息比率/回撤水下图/月度热力图 + 样本外体检。', tags: ['低波', '回测', '绩效'], build: '数据源(中证800·样本外30%) → 20日低波 → 特征 → 向量化回测(TopN50·月频)' },
-  { id: 'e4', title: '低估值 PB', insight: '市净率越低越高分(价值/低估异象);月频、大盘股更稳。', tags: ['价值', '估值', '沪深300'], build: '数据源(沪深300) → 低PB → 特征 → 因子分析' },
-  { id: 'e5', title: '高股息', insight: '股息率高的股票偏防御、长期超额稳健;适合震荡/弱市底仓。', tags: ['股息', '防御'], build: '数据源(沪深300) → 高股息(dv_ttm) → 特征 → 因子分析' },
-  { id: 'e6', title: '低换手', insight: '换手率低(关注度低)的股票常有超额(流动性/博弈异象);取负为高分。', tags: ['流动性', '换手', '中证500'], build: '数据源(中证500) → 低换手 → 特征 → 因子分析' },
-  { id: 'e7', title: '大盘共振 · 对标沪深300', insight: '个股与真沪深300的20日滚动相关(共振系数):高=跟大盘、低/负=独立行情。数据源已挂「对标指数=沪深300」注入 idx_ret。', tags: ['共振', '大盘', 'B2'], build: '数据源(沪深300·对标沪深300) → correlation(returns,idx_ret,20) → 特征 → 因子分析' },
-  { id: 'e8', title: '行业共振', insight: '个股与所在行业当日均值的20日滚动相关:高=随板块、低=个股独立。用 indmean 算子,无需额外数据。', tags: ['共振', '行业', 'B2'], build: '数据源(沪深300) → correlation(returns,indmean(returns,industry),20) → 特征 → 因子分析' },
+  { id: 'e4', title: '低估值 PB', insight: '市净率越低越高分(价值/低估异象);月频、大盘股更稳。', tags: ['价值', '估值', '沪深300'], build: '数据源(沪深300) → 低PB → 特征 → Spearman 因子 → 因子分析' },
+  { id: 'e5', title: '高股息', insight: '股息率高的股票偏防御、长期超额稳健;适合震荡/弱市底仓。', tags: ['股息', '防御'], build: '数据源(沪深300) → 高股息(dv_ttm) → 特征 → Spearman 因子 → 因子分析' },
+  { id: 'e6', title: '低换手', insight: '换手率低(关注度低)的股票常有超额(流动性/博弈异象);取负为高分。', tags: ['流动性', '换手', '中证500'], build: '数据源(中证500) → 低换手 → 特征 → Spearman 因子 → 因子分析' },
+  { id: 'e7', title: '大盘共振 · 对标沪深300', insight: '个股与真沪深300的20日滚动相关(共振系数):高=跟大盘、低/负=独立行情。数据源已挂「对标指数=沪深300」注入 idx_ret。', tags: ['共振', '大盘', 'B2'], build: '数据源(沪深300·对标沪深300) → correlation(returns,idx_ret,20) → 特征 → Spearman 因子 → 因子分析' },
+  { id: 'e8', title: '行业共振', insight: '个股与所在行业当日均值的20日滚动相关:高=随板块、低=个股独立。用 indmean 算子,无需额外数据。', tags: ['共振', '行业', 'B2'], build: '数据源(沪深300) → correlation(returns,indmean(returns,industry),20) → 特征 → Spearman 因子 → 因子分析' },
 ];
 
 function ExpPanel({ onBuild, cards }) {
@@ -1630,7 +2534,7 @@ function SaveModal({ initial, onSave, onClose }) {
 }
 
 // ───────── 历史工作流 弹窗 ─────────
-function HistoryModal({ list, onLoad, onDelete, onClose }) {
+function HistoryModal({ list, runs, runsLoading, runsError, openingRun, onRefreshRuns, onOpenRun, onLoad, onDelete, onClose }) {
   return (
     <div onPointerDown={onClose} style={{ position: 'absolute', inset: 0, zIndex: 20, background: 'rgba(28,24,20,0.28)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: 70 }}>
       <div onPointerDown={e => e.stopPropagation()} style={{ width: 520, maxHeight: '76%', background: 'var(--paper)', border: '1px solid var(--ink)', borderRadius: 14, boxShadow: '0 12px 40px rgba(28,24,20,0.22)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -1640,13 +2544,25 @@ function HistoryModal({ list, onLoad, onDelete, onClose }) {
           <span onClick={onClose} style={{ marginLeft: 'auto', fontSize: 17, color: 'var(--ink-3)', cursor: 'pointer' }}>✕</span>
         </div>
         <div style={{ overflowY: 'auto', padding: '10px 14px 14px' }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', margin: '4px 8px 10px' }}><span className="serif" style={{ fontSize: 13 }}>服务端运行历史</span><span className="mono" style={{ color: 'var(--ink-3)', fontSize: 9 }}>不依赖浏览器缓存</span><button onClick={onRefreshRuns} disabled={runsLoading} style={{ marginLeft: 'auto', background: 'transparent', border: '1px solid var(--line)', borderRadius: 5, color: 'var(--ink-2)', cursor: 'pointer' }}>{runsLoading ? '读取中…' : '刷新'}</button></div>
+          {runsError && <div role="alert" style={{ color: 'var(--zhu)', padding: '8px', fontSize: 11 }}>{runsError} · 未用本地记录冒充服务端历史</div>}
+          {!runsError && !runsLoading && !(runs || []).length && <div className="mono" style={{ color: 'var(--ink-3)', fontSize: 10, padding: '8px' }}>当前空间尚无服务端运行记录</div>}
+          {(runs || []).map(rec => <div key={rec.id} style={{ border: '1px solid var(--line-soft)', borderRadius: 8, padding: '10px 12px', marginBottom: 7, background: 'rgba(255,255,255,.35)' }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}><span className="serif" style={{ flex: 1, fontSize: 13 }}>{rec.name || rec.id}</span><span className="mono" style={{ color: rec.status === 'failed' || rec.status === 'interrupted' ? 'var(--zhu)' : 'var(--yin)', fontSize: 9 }}>{wfRunStatusLabel(rec.status, rec)}</span></div>
+            <div className="mono" style={{ color: 'var(--ink-3)', fontSize: 9, marginTop: 5, overflowWrap: 'anywhere' }}>{rec.id} · {wfAgo(rec.updated_at || rec.created_at)}{rec.node_error_count ? ' · ' + rec.node_error_count + ' 个节点错误' : ''}</div>
+            {wfRunIsInterrupted(rec) && <div style={{ color: 'var(--ink-2)', fontSize: 10, marginTop: 6 }}>可恢复原图和已有记录；不支持断点续算，不会自动重跑。</div>}
+            <button disabled={!!openingRun} onClick={() => onOpenRun(rec, false)} style={{ marginTop: 8, border: '1px solid var(--line)', borderRadius: 5, padding: '5px 9px', color: 'var(--ink)', background: 'var(--paper)', cursor: 'pointer' }}>{openingRun === rec.id ? '读取状态…' : rec.status === 'running' || rec.status === 'queued' ? '继续查看运行' : '恢复原图 / 查看结果'}</button>
+          </div>)}
+          <div className="serif" style={{ borderTop: '1px solid var(--line)', margin: '17px 0 10px', padding: '12px 8px 0', fontSize: 13 }}>保存的工作流</div>
           {list.length === 0 && <div className="mono" style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', padding: '30px 0' }}>暂无保存的工作流 · 用右栏「存」保存当前画布</div>}
           {list.map(w => (
-            <div key={(w.scope || '') + ':' + w.id} className="hover-row" style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 12px', borderRadius: 9, border: '1px solid var(--line-soft)', marginBottom: 7, cursor: 'pointer', background: wfIsGlobalTemplate(w) ? 'rgba(138,111,63,.06)' : 'rgba(255,255,255,0.5)' }}
+            <div key={(w.scope || '') + ':' + w.id} className="hover-row" style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 12px', borderRadius: 9, border: wfNeedsReview(w) ? '1px solid rgba(166,61,48,.45)' : '1px solid var(--line-soft)', marginBottom: 7, cursor: 'pointer', background: wfNeedsReview(w) ? 'rgba(166,61,48,.055)' : (wfIsGlobalTemplate(w) ? 'rgba(138,111,63,.06)' : 'rgba(255,255,255,0.5)') }}
               onClick={() => onLoad(w)}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="serif" style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13.5, fontWeight: 500, color: 'var(--ink)' }}><span>{w.name}</span>{wfIsGlobalTemplate(w) && <span className="mono" style={{ fontSize: 8.5, color: 'var(--jin)', border: '1px solid var(--jin)', padding: '1px 5px', borderRadius: 4 }}>全局只读模板</span>}</div>
+                <div className="serif" style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13.5, fontWeight: 500, color: 'var(--ink)' }}><span>{w.name}</span>{wfIsGlobalTemplate(w) && <span className="mono" style={{ fontSize: 8.5, color: 'var(--jin)', border: '1px solid var(--jin)', padding: '1px 5px', borderRadius: 4 }}>全局只读模板</span>}{wfNeedsReview(w) && <span className="mono" title={wfReviewReason(w)} style={{ fontSize: 8.5, color: 'var(--zhu)', border: '1px solid var(--zhu)', padding: '1px 5px', borderRadius: 4 }}>旧版只读 · 需重建</span>}</div>
                 <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', marginTop: 3 }}>{wfAgo(w.ts)} · {((w.graph && w.graph.nodes) || w.nodes || []).length} 节点 · {((w.graph && w.graph.edges) || w.edges || []).length} 连线</div>
+                {wfNeedsReview(w) && <div className="mono" style={{ fontSize: 9, color: 'var(--zhu)', marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{wfReviewReason(w)}</div>}
+                {w.legacy_recovery && <details onClick={e => e.stopPropagation()} style={{ color: 'var(--ink-2)', fontSize: 10, marginTop: 7 }}><summary style={{ cursor: 'pointer' }}>查看保留说明与重建建议</summary><div style={{ lineHeight: 1.6, marginTop: 5 }}>{wfReviewReason(w)}<br />{(w.legacy_recovery.suggested_actions || []).join('；')}{(w.legacy_recovery.model_references || []).length > 0 && <div className="mono" style={{ overflowWrap: 'anywhere' }}>历史引用（尚未核验）：{w.legacy_recovery.model_references.map(x => x.model_id || x.model_name || x.node_id).join(' / ')}</div>}</div></details>}
                 <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{(((w.graph && w.graph.nodes) || w.nodes || [])).slice().sort((a, b) => a.x - b.x).map(n => SPECS[n.type] ? SPECS[n.type].title : n.type).join(' → ')}</div>
               </div>
               <span onClick={() => onLoad(w)} className="serif" style={{ flexShrink: 0, fontSize: 12, color: 'var(--paper)', background: 'var(--ink)', borderRadius: 7, padding: '6px 13px', cursor: 'pointer' }}>载入</span>
@@ -1820,14 +2736,16 @@ function FactorLibModal({ onPick, onClose, onPickModel, initialLibTab }) {
       setCur(c && c.ok ? c : { factors: [], cats: [] });
       try {
         const lib = await _get('/factorlib/list?validate=false');
-        const st = {}; ((lib && lib.factors) || []).forEach(x => { if (x.status) st[x.name] = x.status; });
+        const savedByName = {}; ((lib && lib.factors) || []).forEach(x => { savedByName[x.name] = x; });
         // 用引擎 /factor/list(含全部 442 内置 + 仓内已注册 = registered 481);兼容 /factorlib/list 的 factors 形。
         const l = (await _get('/factor/list')) || (await _list());
         const reg = (l && l.registered) || [], usr = (l && l.user) || [], fac = (l && l.factors) || [];
         setFull([
-          ...reg.map(s => ({ name: s.name, expr: s.formula || '', cat: s.family || 'zoo', status: st[s.name] })),
-          ...usr.map(u => ({ name: u.name, expr: u.expr || u.formula || '', cat: u.family || 'user', status: st[u.name] })),
-          ...fac.map(u => ({ name: u.name, expr: u.expr || u.formula || '', cat: u.family || 'library', status: st[u.name] || u.status })),
+          ...reg.map(s => { const z = savedByName[s.name] || {}; const fs = z.factor_spec || s.factor_spec; return { name: s.name, expr: s.formula || z.expr || '', cat: s.family || 'zoo', status: z.status, registered: true, structured: !!(z.structured || s.structured || fs), factor_spec: fs, factor_spec_digest: z.factor_spec_digest || s.factor_spec_digest }; }),
+          ...usr.map(u => { const z = savedByName[u.name] || {}; const fs = z.factor_spec || u.factor_spec; return { name: u.name, expr: u.expr || u.formula || z.expr || '', cat: u.family || 'user', status: z.status, registered: true, structured: !!(z.structured || u.structured || fs), factor_spec: fs, factor_spec_digest: z.factor_spec_digest || u.factor_spec_digest }; }),
+          // /factorlib/list 只能证明已落盘；在 /factor/list 不可用的回退路径上，
+          // 宁可显示“未证实注册”，也不把 structured 冒充为可重放。
+          ...fac.map(u => { const z = savedByName[u.name] || u; return { name: u.name, expr: u.expr || u.formula || z.expr || '', cat: u.family || 'library', status: z.status || u.status, registered: false, structured: !!z.structured, factor_spec: z.factor_spec, factor_spec_digest: z.factor_spec_digest }; }),
         ]);
       } catch (e) { setFull([]); setErr('因子清单加载失败 — 后端不可达或出错(检查 9999 是否在跑)'); }
     })();
@@ -1898,6 +2816,8 @@ function FactorLibModal({ onPick, onClose, onPickModel, initialLibTab }) {
                     <span className="serif" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>{f.name}</span>
                     {f.cat && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 4, padding: '0 5px' }}>{f.cat}</span>}
                     {f.status === 'draft' && <span className="mono" style={{ fontSize: 8.5, color: 'var(--zhu)', border: '1px solid var(--zhu-soft)', borderRadius: 4, padding: '0 5px' }}>draft·待审</span>}
+                    {f.structured && f.registered && <span className="mono" style={{ fontSize: 8.5, color: 'var(--dai)', border: '1px solid var(--dai)', borderRadius: 4, padding: '0 5px' }}>factor_spec·可重放</span>}
+                    {f.structured && !f.registered && <span className="mono" style={{ fontSize: 8.5, color: '#9a6b16', border: '1px dashed #9a6b16', borderRadius: 4, padding: '0 5px' }}>结构化·未证实注册</span>}
                     {f.dir && <span className="mono" style={{ fontSize: 8.5, color: f.dir === '正向' ? 'var(--dai)' : 'var(--zhu)' }}>{f.dir}</span>}
                     <span onClick={() => onPick(f)} className="serif" style={{ marginLeft: 'auto', fontSize: 11.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 6, padding: '4px 12px', cursor: 'pointer' }}>用此因子</span>
                   </div>
@@ -1923,7 +2843,14 @@ function FactorLibPanel({ node, onParam }) {
       {picked
         ? <div style={{ marginTop: 5, fontSize: 10, color: 'var(--ink-2)' }}>已选:<b style={{ color: 'var(--ink)' }}>{picked}</b></div>
         : <div style={{ marginTop: 5, fontSize: 9.5, color: 'var(--ink-3)' }}>未选 —— 点上方按钮挑一个因子</div>}
-      {open && <FactorLibModal onClose={() => setOpen(false)} onPick={f => { onParam('name', f.name); onParam('expr', f.expr); setOpen(false); }} />}
+      {open && <FactorLibModal onClose={() => setOpen(false)} onPick={f => {
+        onParam('name', f.name); onParam('expr', f.expr);
+        // 结构化因子把完整定义和摘要写进工作流快照。执行时仍按注册名
+        // 取数，但会核对这两项；库项缺失/变更绝不退回 base expr。
+        onParam('factor_spec', f.factor_spec || null);
+        onParam('factor_spec_digest', f.factor_spec_digest || '');
+        setOpen(false);
+      }} />}
     </div>
   );
 }
@@ -2046,7 +2973,7 @@ function SourceProbe({ node }) {
   };
   return (
     <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--line)' }}>
-      <div style={{ fontSize: 9, color: 'var(--ink-3)', lineHeight: 1.4, marginBottom: 5 }} title="数据源 = 全局股票池:放上画布即生效,自动作用于下游所有节点,无需从它拉线连接(执行器全局读取本节点的股票池)。">ℹ 全局股票池 · 无需连线,自动作用全图</div>
+      <div style={{ fontSize: 9, color: 'var(--ink-3)', lineHeight: 1.4, marginBottom: 5 }} title="股票池可作全局默认；日期、基准和滚动重训必须通过数据连接或 context_source_id 明确传递。多个数据源不会自动猜选。">ℹ 日期 / 基准 / 重训需数据连接或明确引用</div>
       <div onPointerDown={e => e.stopPropagation()} onClick={run}
         style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, height: 22, borderRadius: 6, cursor: busy ? 'default' : 'pointer', fontSize: 11, fontWeight: 500, color: busy ? 'var(--ink-3)' : 'var(--yin)', border: '1px solid ' + (busy ? 'var(--line)' : 'var(--yin)'), background: busy ? 'rgba(28,24,20,0.03)' : 'rgba(168,57,45,0.05)' }}>
         {busy ? '体检中…' : '数据体检 ✦'}
@@ -2064,8 +2991,128 @@ function SourceProbe({ node }) {
   );
 }
 
+// Bounded JSON authoring only; the server remains authoritative for each rule's grammar.
+function wfParseHistoryBranches(text) {
+  if (typeof text !== 'string' || text.length > 131072) throw new Error('分支 JSON 必须是文本且不超过128 KiB');
+  let value;
+  try { value = JSON.parse(text); } catch (_) { throw new Error('分支 JSON 语法无效，原配置未修改'); }
+  if (!Array.isArray(value) || value.length < 1 || value.length > 8) throw new Error('需要1至8个筛选分支');
+  value.forEach((branch, i) => {
+    const selector = branch && branch.selector;
+    if (!branch || typeof branch !== 'object' || Array.isArray(branch) || !selector || typeof selector !== 'object' || Array.isArray(selector)) throw new Error('分支' + (i + 1) + '缺少合法selector');
+    if (selector.preset === 'ma_trend' && !Object.prototype.hasOwnProperty.call(selector, 'conditions')) return;
+    if (Object.prototype.hasOwnProperty.call(selector, 'preset') || (selector.combine != null && selector.combine !== 'all') || !Array.isArray(selector.conditions) || selector.conditions.length < 1 || selector.conditions.length > 16) throw new Error('分支' + (i + 1) + '需包含combine=all的1至16条硬规则，或显式ma_trend模板');
+    if (selector.conditions.some(rule => !rule || !['compare', 'range', 'strict_rise', 'max_consecutive'].includes(rule.type))) throw new Error('分支' + (i + 1) + '含不支持的规则类型');
+  });
+  return value;
+}
+
+function HistoryBranchesEditor({ value, onChange }) {
+  const [editing, setEditing] = useState(false), [draft, setDraft] = useState(''), [error, setError] = useState('');
+  const branches = Array.isArray(value) ? value : [];
+  const summaries = branches.map(params => wfCustomScreenSummary({ type: 'data_screen', params }, [], []));
+  const open = () => { setDraft(JSON.stringify(value || [], null, 2)); setError(''); setEditing(true); };
+  const apply = () => { try { const parsed = wfParseHistoryBranches(draft); onChange(parsed); setEditing(false); } catch (e) { setError(e.message); } };
+  return <div data-history-branches="true" onPointerDown={e => e.stopPropagation()} style={{ height: ROW * 8, display: 'flex', flexDirection: 'column', gap: 5, overflow: 'hidden', fontSize: 10, paddingTop: 4, boxSizing: 'border-box' }}>
+    <div style={{ color: 'var(--dai)', fontWeight: 600 }}>{branches.length} 个分支 · 分支间取并集（OR）</div>
+    <div style={{ color: 'var(--ink-3)', lineHeight: 1.4 }}>逐日执行全部规则；先合并去重再排名，不使用单日快照回填历史。</div>
+    <div aria-label="历史筛选真实规则" onWheel={e => e.stopPropagation()} style={{ flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', borderBlock: '1px solid var(--line)', padding: '3px 0' }}>
+      {!branches.length && <div style={{ color: 'var(--zhu)' }}>尚未配置规则，不能运行。</div>}
+      {summaries.map((summary, i) => <div key={i} style={{ marginBottom: 7 }}>
+        <b>分支 {i + 1} · 全部满足（AND）</b>
+        {summary ? <React.Fragment><div style={{ color: 'var(--ink-3)' }}>{summary.liquidity} · ST剔除 {summary.excludeST}</div>{summary.rules.map((rule, j) => <div key={j} title={rule.detail} style={{ paddingTop: 3, overflowWrap: 'anywhere' }}>{j + 1}. {rule.label}</div>)}</React.Fragment> : <React.Fragment><div style={{ color: 'var(--ink-3)' }}>模板/待校验配置 · 原样JSON，未补默认条件</div><pre style={{ fontSize: 9, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(branches[i], null, 2)}</pre></React.Fragment>}
+      </div>)}
+    </div>
+    <button type="button" disabled={WW_READONLY} onClick={open} style={{ fontSize: 10, padding: '4px 7px', border: '1px solid var(--line)', borderRadius: 5, color: 'var(--ink-2)', background: 'transparent', cursor: 'pointer' }}>编辑规则 JSON</button>
+    {editing && ReactDOM.createPortal(<div onPointerDown={e => e.stopPropagation()} style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(28,24,20,.35)', display: 'grid', placeItems: 'center' }}>
+      <div role="dialog" aria-modal="true" aria-label="编辑历史筛选规则" style={{ width: 'min(760px,90vw)', maxHeight: '85vh', display: 'flex', flexDirection: 'column', gap: 10, padding: 18, background: 'var(--paper)', borderRadius: 12, boxShadow: '0 16px 48px rgba(0,0,0,.2)' }}>
+        <b>历史逐日筛选 · 完整分支 JSON</b>
+        <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>最多8分支、每支16条有界规则。仅解析JSON；服务端运行前再次校验。取消或解析失败保留原配置。</div>
+        <textarea aria-label="分支JSON" spellCheck={false} value={draft} maxLength={131072} onChange={e => setDraft(e.target.value)} style={{ width: '100%', height: '48vh', minHeight: 160, boxSizing: 'border-box', resize: 'vertical', border: '1px solid var(--line)', borderRadius: 6, padding: 10, fontFamily: 'var(--mono)', fontSize: 11, background: 'var(--paper-2)', color: 'var(--ink)' }} />
+        {error && <div role="alert" style={{ color: 'var(--zhu)', fontSize: 12 }}>{error}</div>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}><button type="button" onClick={() => setEditing(false)}>取消</button><button type="button" disabled={WW_READONLY} onClick={apply}>应用 JSON</button></div>
+      </div>
+    </div>, document.body)}
+  </div>;
+}
+
+function wfCustomScreenSummary(node, nodes, edges) {
+  const p = (node && node.params) || {};
+  const has = (o, k) => Object.prototype.hasOwnProperty.call(o || {}, k);
+  const selector = p.selector && typeof p.selector === 'object' && !Array.isArray(p.selector) ? p.selector : null;
+  if (!node || node.type !== 'data_screen' || !(has(selector, 'conditions') || has(p, 'conditions'))) return null;
+  const raw = has(selector, 'conditions') ? selector.conditions : p.conditions;
+  const conditions = Array.isArray(raw) ? raw : [];
+  const customFilters = p.filters && typeof p.filters === 'object' && !Array.isArray(p.filters) ? p.filters : null;
+  const f = customFilters || {};
+  const amountWindow = customFilters ? (has(f, 'amount_window') ? f.amount_window : 20) : (has(p, 'amount_window') ? p.amount_window : 20);
+  const amount = customFilters ? (has(f, 'min_avg_amount_yuan') ? f.min_avg_amount_yuan : 100000000) : (has(p, 'min_avg_amount_yi') ? p.min_avg_amount_yi * 100000000 : 100000000);
+  const amountMin = has(f, 'amount_min_observations') ? f.amount_min_observations : amountWindow;
+  const filterFlag = (key, fallback) => has(customFilters || p, key) ? (customFilters || p)[key] : fallback;
+  const flagText = v => v === true ? '是' : v === false ? '否' : '无效配置';
+  const sources = (edges || []).filter(e => e && e.to && e.from && e.to[0] === node.id && e.to[1] === 'src' && e.from[1] === 'data')
+    .map(e => (nodes || []).find(n => n.id === e.from[0] && n.type === 'source')).filter(Boolean);
+  const sourceEnd = sources.length === 1 ? String((sources[0].params || {}).end || '').trim() : '';
+  const explicitAsOf = typeof p.as_of === 'string' ? p.as_of.trim() : '';
+  const amountText = typeof amount === 'number' && Number.isFinite(amount) ? String(amount / 100000000) + ' 亿元' : '无效配置';
+  return {
+    rules: conditions.map((rule, i) => ({ id: String((rule && rule.id) || ('rule_' + (i + 1))),
+      label: rule && typeof rule.label === 'string' && rule.label.trim() ? rule.label.trim() : String((rule && (rule.id || rule.type)) || ('规则 ' + (i + 1))),
+      detail: JSON.stringify(rule) })),
+    valid: Array.isArray(raw) && conditions.length > 0 && (!selector || !has(selector, 'combine') || selector.combine === 'all'),
+    asOf: explicitAsOf || sourceEnd || (sources.length > 1 ? '数据源不明确，须校验' : '最新有效交易日（运行时确定）'),
+    asOfSource: explicitAsOf ? '节点截止日' : sourceEnd ? '来自所连数据源' : '未固定截止日',
+    topN: has(p, 'top_n') ? p.top_n : has(p, 'topN') ? p.topN : 5,
+    liquidity: String(amountWindow) + ' 日均额 ≥ ' + amountText,
+    observations: String(amountMin) + '/' + String(amountWindow) + ' 日有效成交额',
+    excludeST: flagText(filterFlag('exclude_st', true)),
+    requireTrade: flagText(filterFlag('require_asof_trade', true)),
+    strictPIT: flagText(filterFlag('require_strict_metadata_pit', false)),
+  };
+}
+
+function CustomScreenSummary({ summary }) {
+  // Replace exactly the old template-parameter area: fixed node bounds and
+  // unchanged port coordinates, with scrolling confined to the rule list.
+  return <div data-screen-custom-summary="true" onPointerDown={e => e.stopPropagation()}
+    style={{ height: SPECS.data_screen.params.length * ROW, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 5, overflow: 'hidden', fontSize: 10.5, lineHeight: 1.45 }}>
+    <div style={{ flexShrink: 0, color: summary.valid ? 'var(--yin)' : 'var(--zhu)', fontWeight: 600 }}>
+      {summary.valid ? '自定义硬条件 · 全部满足（AND）' : '自定义规则配置无效，请先校验'} · {summary.rules.length} 条
+    </div>
+    <div style={{ flexShrink: 0, color: 'var(--ink-2)', overflowWrap: 'anywhere' }}>
+      <div title={summary.asOfSource}>截止：{summary.asOf} · 日线</div>
+      <div>最多返回 {String(summary.topN)} 只 · {summary.liquidity}</div>
+      <div style={{ color: 'var(--ink-3)', fontSize: 9.5 }}>{summary.observations} · 剔 ST：{summary.excludeST}</div>
+      <div style={{ color: 'var(--ink-3)', fontSize: 9.5 }}>截止日须成交：{summary.requireTrade} · 严格 PIT：{summary.strictPIT}</div>
+    </div>
+    <div role="list" aria-label="全部筛选规则" tabIndex={0} onWheel={e => e.stopPropagation()}
+      style={{ flex: '1 1 0', minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', borderTop: '1px solid var(--line)', borderBottom: '1px solid var(--line)', padding: '5px 2px' }}>
+      {summary.rules.map((rule, index) => <div role="listitem" key={rule.id + ':' + index} title={rule.detail}
+        style={{ display: 'flex', gap: 5, padding: '3px 0', overflowWrap: 'anywhere', color: 'var(--ink-2)' }}>
+        <span className="mono" style={{ color: 'var(--ink-3)', flexShrink: 0 }}>{index + 1}.</span><span>{rule.label}</span>
+      </div>)}
+    </div>
+    <div style={{ flexShrink: 0, fontSize: 9.5, color: 'var(--ink-3)' }}>只读摘要 · 自定义规则由帷幄／完整图配置，旧模板控件不适用。</div>
+  </div>;
+}
+
+function wfParamSelectValue(nodeType, paramId, value) {
+  // Agent graphs may use JSON booleans; keep the persisted graph untouched.
+  // Explicit user edits still use the existing 是/否 option values understood by both executors.
+  if (nodeType === 'source' && paramId === 'wf_refit' && typeof value === 'boolean') return value ? '是' : '否';
+  return value;
+}
+
 function Node({ node, sel, onDrag, onStartWire, onParam, onDel, onSel, status, nodes, edges, onNotify }) {
-  const spec = SPECS[node.type]; const cat = CAT[spec.cat]; const rows = rowsOf(spec);
+  const spec = SPECS[node.type]; const cat = CAT[spec.cat];
+  const customScreen = wfCustomScreenSummary(node, nodes, edges);
+  const rows = rowsOf(spec).filter(r => !customScreen || r.kind !== 'param');
+  const orthManaged = node.type === 'analysis' && (edges || []).some(e => {
+    if (!e || !e.to || !e.from || e.to[0] !== node.id || e.to[1] !== 'factor') return false;
+    const upstream = (nodes || []).find(n => n.id === e.from[0]);
+    return upstream && upstream.type === 'orthogonalize';
+  });
+  const governedAudit = node.type === 'overfit' && !!String((node.params || {}).audit_context_id || '').trim();
   return (
     <div className="nodrag" onPointerDown={(e) => { e.stopPropagation(); onSel(); }}
       style={{ position: 'absolute', left: node.x, top: node.y, width: W, background: 'var(--paper)', border: '1px solid ' + (sel ? cat.c : 'var(--line)'), borderRadius: 9, boxShadow: sel ? '0 3px 16px rgba(28,24,20,0.16)' : '0 2px 10px rgba(28,24,20,0.1)' }}>
@@ -2090,6 +3137,9 @@ function Node({ node, sel, onDrag, onStartWire, onParam, onDel, onSel, status, n
             </div>
           );
           const p = r.param; const v = node.params[p.id] !== undefined ? node.params[p.id] : p.value;
+          if (node.type === 'history_screen' && p.id === 'branches') return <HistoryBranchesEditor key={i} value={v} onChange={branches => onParam('branches', branches)} />;
+          const paramDisabled = (orthManaged && p.id === 'neutral')
+            || (governedAudit && ['confidence', 'pbo_max', 'n_blocks'].includes(p.id));
           // 公式/因子库节点的「表达式」特例: 整宽、随内容长高的文本域(普通小输入框放不下长公式)。
           if ((node.type === 'formula' || node.type === 'factorlib') && p.id === 'expr') {
             return (
@@ -2105,23 +3155,24 @@ function Node({ node, sel, onDrag, onStartWire, onParam, onDel, onSel, status, n
             <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, height: ROW }}>
               <span title={p.hint || p.label} style={{ fontSize: 11, color: 'var(--ink-2)' }}>{p.label}</span>
               {p.type === 'step' ? (
-                <span style={{ display: 'inline-flex', alignItems: 'center', border: '1px solid var(--line)', borderRadius: 6, overflow: 'hidden' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', border: '1px solid var(--line)', borderRadius: 6, overflow: 'hidden', pointerEvents: paramDisabled ? 'none' : 'auto', opacity: paramDisabled ? 0.45 : 1 }}>
                   <span onPointerDown={e => { e.stopPropagation(); onParam(p.id, +(v - p.step).toFixed(p.dec || 0)); }} style={{ padding: '2px 6px', color: 'var(--ink-3)', cursor: 'pointer', fontSize: 10 }}>◀</span>
                   <span className="mono" style={{ fontSize: 10.5, color: 'var(--ink)', padding: '2px 8px', borderLeft: '1px solid var(--line)', borderRight: '1px solid var(--line)', minWidth: 36, textAlign: 'right' }}>{p.dec ? Number(v).toFixed(p.dec) : v}</span>
                   <span onPointerDown={e => { e.stopPropagation(); onParam(p.id, +(v + p.step).toFixed(p.dec || 0)); }} style={{ padding: '2px 6px', color: 'var(--ink-3)', cursor: 'pointer', fontSize: 10 }}>▶</span>
                 </span>
               ) : p.type === 'select' ? (
-                <select value={v} onChange={e => onParam(p.id, e.target.value)} onPointerDown={e => e.stopPropagation()}
-                  style={{ width: 96, border: '1px solid var(--line)', borderRadius: 5, padding: '3px 6px', fontFamily: 'var(--sans)', fontSize: 10.5, color: 'var(--ink)', background: 'rgba(28,24,20,0.03)', appearance: 'none', WebkitAppearance: 'none', cursor: 'pointer' }}>
+                <select value={wfParamSelectValue(node.type, p.id, v)} disabled={paramDisabled} onChange={e => onParam(p.id, e.target.value)} onPointerDown={e => e.stopPropagation()}
+                  style={{ width: 96, border: '1px solid var(--line)', borderRadius: 5, padding: '3px 6px', fontFamily: 'var(--sans)', fontSize: 10.5, color: 'var(--ink)', background: 'rgba(28,24,20,0.03)', appearance: 'none', WebkitAppearance: 'none', cursor: paramDisabled ? 'not-allowed' : 'pointer', opacity: paramDisabled ? 0.45 : 1 }}>
                   {p.options.map(o => { const ov = (o && typeof o === 'object') ? o.value : o; const ol = (o && typeof o === 'object') ? o.label : o; return <option key={ov} value={ov}>{ol}</option>; })}
                 </select>
               ) : (
-                <input value={v} onChange={e => onParam(p.id, e.target.value)} onPointerDown={e => e.stopPropagation()}
-                  style={{ width: 92, border: '1px solid var(--line)', borderRadius: 5, padding: '2px 7px', fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink)', background: 'rgba(28,24,20,0.03)', textAlign: 'right' }} />
+                <input value={v} disabled={paramDisabled} onChange={e => onParam(p.id, e.target.value)} onPointerDown={e => e.stopPropagation()}
+                  style={{ width: 92, border: '1px solid var(--line)', borderRadius: 5, padding: '2px 7px', fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink)', background: 'rgba(28,24,20,0.03)', textAlign: 'right', opacity: paramDisabled ? 0.45 : 1 }} />
               )}
             </div>
           );
         })}
+        {customScreen ? <CustomScreenSummary summary={customScreen} /> : null}
         {node.type === 'source' ? <SourceProbe node={node} /> : null}
         {node.type === 'formula' ? <FormulaPanel node={node} onParam={onParam} /> : null}
         {node.type === 'factorlib' ? <FactorLibPanel node={node} onParam={onParam} /> : null}
@@ -2129,13 +3180,14 @@ function Node({ node, sel, onDrag, onStartWire, onParam, onDel, onSel, status, n
         {node.type === 'validate' ? <ModelLibPanel node={node} onParam={onParam} /> : null}
         {(node.type === 'xgb' || node.type === 'lgbm' || node.type === 'rf') ? <PromoteModelPanel node={node} nodes={nodes} edges={edges} onNotify={onNotify} /> : null}
         {node.type === 'lstm' ? <PublishDlPanel node={node} nodes={nodes} edges={edges} onNotify={onNotify} /> : null}
-        {node.type === 'analysis' ? <div title="单因子(直连公式 / 单特征 Spearman·PCA)→ 分组/调仓/方向 经壳内 /factor/report2 真生效;经多模型或多因子合成的复合因子,报告已在上游按其设置算好,此处透传(这三项对其不适用)。" style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--line)', fontSize: 9, color: 'var(--ink-3)', lineHeight: 1.4 }}>ⓘ 分组/调仓/方向:单因子时生效;多因子复合为透传</div> : null}
+        {governedAudit ? <div title={String(node.params.audit_context_id)} style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--line)', fontSize: 9, color: 'var(--dai)', lineHeight: 1.45 }}>ⓘ 已绑定服务端 TrialLedger；置信度、PBO 与分块由 Governor 固定策略接管</div> : null}
+        {node.type === 'analysis' ? <div title="单因子(直连公式 / 单特征 Spearman·PCA)→ 分组/调仓/方向 经壳内 /factor/report2 真生效;经多模型或多因子合成的复合因子,报告已在上游按其设置算好,此处透传。" style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--line)', fontSize: 9, color: orthManaged ? '#9a6b16' : 'var(--ink-3)', lineHeight: 1.4 }}>{orthManaged ? 'ⓘ 上游正交化已接管暴露控制；旧“中性化”已置灰，不二次残差化' : 'ⓘ 分组/调仓/方向:单因子时生效;多因子复合为透传'}</div> : null}
       </div>
     </div>
   );
 }
 
-function Rail({ zoom, fit, onRun, onDel, onDup, onUndo, onRedo, canUndo, canRedo, onSave, onExport, onImport, hasSel }) {
+function Rail({ zoom, fit, onRun, running, onDel, onDup, onUndo, onRedo, canUndo, canRedo, onSave, onExport, onImport, hasSel }) {
   const btn = { width: 32, height: 32, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--ink-2)', cursor: 'pointer', fontSize: 14 };
   const cbtn = { ...btn, fontFamily: 'var(--serif)', fontSize: 14.5, fontWeight: 500 };
   const dim = { opacity: 0.32, pointerEvents: 'none' };
@@ -2156,7 +3208,9 @@ function Rail({ zoom, fit, onRun, onDel, onDup, onUndo, onRedo, canUndo, canRedo
       <div style={cbtn} onMouseEnter={hov} onMouseLeave={out} onClick={onImport} title="导入 JSON 文件">入</div>
       <div style={{ height: 1, background: 'var(--line)', margin: '2px 4px' }} />
       <div style={{ ...cbtn, ...(hasSel ? {} : dim) }} onMouseEnter={hov} onMouseLeave={out} onClick={onDel} title="删除选中 (Del)">删</div>
-      <div style={{ ...btn, background: 'var(--yin)', color: 'var(--paper)' }} onClick={onRun} title="运行">▶</div>
+      <div aria-disabled={running ? 'true' : 'false'}
+        style={{ ...btn, background: 'var(--yin)', color: 'var(--paper)', ...(running ? dim : {}) }}
+        onClick={running ? undefined : onRun} title={running ? '工作流运行中' : '运行'}>▶</div>
     </div>
   );
 }
@@ -2236,7 +3290,7 @@ function ReportLibModal({ onReopen, onClose }) {
   useEffect(() => { load(); }, []);
   const del = (id) => { if (busy || WW_READONLY) return; setBusy(true); _post('/report/delete', _withWorkspace({ id })).then(() => { load(); setBusy(false); }).catch(() => setBusy(false)); };
   const open = (rec) => { _get(_reportPath('/report/get/' + encodeURIComponent(rec.id))).then(full => { if (full && full.ok) onReopen(full); }).catch(() => {}); };
-  const METH = { report2: '因子分析', backtest_vector: '向量化回测', portfolio_build: '组合构建', tsic: '个股时序IC', event: '事件研究', relstat: '关系稳定度' };
+  const METH = { daily_screen_backtest: '日频模拟调仓', report2: '因子分析', backtest_vector: '向量化回测', portfolio_build: '组合构建', tsic: '个股时序IC', event: '事件研究', relstat: '关系稳定度', overfit_audit: '过拟合审计' };
   return ReactDOM.createPortal(
     <div onPointerDown={onClose} style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,24,20,0.32)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div onPointerDown={e => e.stopPropagation()} style={{ width: 620, maxHeight: '82%', background: 'var(--paper)', border: '1px solid var(--ink)', borderRadius: 14, display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 12px 40px rgba(28,24,20,0.25)' }}>
@@ -2257,7 +3311,9 @@ function ReportLibModal({ onReopen, onClose }) {
                   </div>
                   <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', marginTop: 2 }}>{(METH[r.method] || r.method || '—')} · {r.universe || '—'} · {r.ts} · {r.method === 'tsic'
                     ? <span>Pearson-IC {_n2((r.kpi || {}).mean_pearson, 3)} · ICIR {_n2((r.kpi || {}).mean_icir, 2)} · 择时Sh {_n2((r.kpi || {}).pool_sharpe, 2)}</span>
-                    : <span>RankIC {_n2((r.kpi || {}).rank_ic, 3)} · 年化 {_pct((r.kpi || {}).ann_return, 1)}</span>}</div>
+                    : (r.method === 'overfit_audit'
+                        ? <span>{(r.kpi || {}).audit_status || 'INCOMPLETE'} · PSR {_pct((r.kpi || {}).psr, 1)} · DSR {_pct((r.kpi || {}).dsr, 1)} · PBO {_pct((r.kpi || {}).pbo, 1)}</span>
+                        : <span>RankIC {_n2((r.kpi || {}).rank_ic, 3)} · 年化 {_pct((r.kpi || {}).ann_return, 1)}</span>)}</div>
                 </div>
                 <span onClick={() => open(r)} className="serif" style={{ fontSize: 11.5, color: 'var(--yin)', border: '1px solid var(--zhu-soft)', borderRadius: 7, padding: '5px 10px', cursor: 'pointer', whiteSpace: 'nowrap' }}>重看</span>
                 {!WW_READONLY && <span onClick={() => del(r.id)} style={{ fontSize: 11.5, color: 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 9px', cursor: busy ? 'default' : 'pointer', whiteSpace: 'nowrap' }}>删除</span>}
@@ -2270,7 +3326,7 @@ function ReportLibModal({ onReopen, onClose }) {
   );
 }
 
-// 关键指标悬停释义(鼠标移到指标上显示)。年化(净/毛)走兜底。
+// 指标文案按当前终端报告区分；分析收益不冒充交易成本后的回测净收益。
 const _KPI_TIP = {
   'RankIC': '因子值与未来收益的截面秩相关均值;>0 正向有效,绝对值越大越强',
   'ICIR': 'RankIC 均值 ÷ RankIC 标准差;IC 的稳定性,越大越稳',
@@ -2287,14 +3343,297 @@ const _KPI_TIP = {
   '单调性': '十分位组序与组收益的秩相关;越接近 ±1 因子越单调可信',
   '年化(毛)': '未扣交易成本的年化收益',
 };
-const _kpiTip = l => _KPI_TIP[l] || (String(l).indexOf('年化') === 0 ? '扣除交易成本后的年化收益(净)' : '');
+const _kpiTip = (l, isBacktest = false) => {
+  if (String(l).indexOf('年化') === 0) {
+    if (!isBacktest) return '因子分析的未扣交易成本年化指示值，不是实际净回测收益';
+    if (l === '年化(净)') return '扣除已配置交易成本后的回测年化收益(净)，不代表实盘收益';
+    return _KPI_TIP[l] || '回测报告的年化收益；扣费口径以报告字段为准';
+  }
+  return _KPI_TIP[l] || '';
+};
+function wfResultPresentation(result) {
+  const isBacktest = !!(result && result.ok !== false && result.method === 'backtest_vector');
+  const pf = (result && result.portfolio) || {};
+  return {
+    isBacktest,
+    metricTitle: isBacktest ? '回测指标' : '分析指标 · 非净回测',
+    annualLabel: isBacktest ? '年化' + (pf.net_ann != null ? '(净)' : '') : '年化(指示)',
+    diagnostic: isBacktest ? '引擎回测 · /backtest/vector' : '因子分析 · 未扣成本的多空指示值（非净回测）',
+    resultTitle: isBacktest ? '运行完成 · 回测结果' : '运行完成 · 因子分析结果',
+    note: isBacktest
+      ? '注:当前展示向量化回测结果；净指标计入已配置的交易成本，毛指标未扣成本。是否可交易仍受数据覆盖及执行约束影响，不代表实盘收益。'
+      : '注:年化 / Sharpe / 回撤为多空分析组合未扣交易成本的指示值；短窗 / 高频会放大失真，不是实际净回测收益，也不证明下游回测节点执行成功。',
+  };
+}
 
-function ResultsDrawer({ result, loading, error, onClose, onSaveFactor, onSaveCard, onExport }) {
+function _screenSeriesUnit(expr) {
+  if (!expr || typeof expr !== 'object') return 'number';
+  if (expr.type === 'bias') return 'ratio';
+  if (expr.field === 'returns') return 'ratio';
+  if (expr.field === 'amount') return 'yuan';
+  if (expr.field === 'volume') return 'shares';
+  return 'number';
+}
+function _screenFormatValue(value, expr) {
+  if (value == null || !Number.isFinite(+value)) return '—';
+  const n = +value, unit = _screenSeriesUnit(expr);
+  if (unit === 'ratio') return (n * 100).toFixed(3) + '%';
+  if (unit === 'yuan') return Math.abs(n) >= 1e8 ? (n / 1e8).toFixed(3) + '亿' : (Math.abs(n) >= 1e4 ? (n / 1e4).toFixed(3) + '万' : n.toFixed(2) + '元');
+  if (unit === 'shares') return Math.abs(n) >= 1e4 ? (n / 1e4).toFixed(3) + '万股' : n.toFixed(0) + '股';
+  return n.toFixed(4);
+}
+function _screenFormatExactShares(value) {
+  if (value == null || !Number.isFinite(+value)) return '—';
+  const n = +value, negative = n < 0, abs = Math.abs(n);
+  let raw = Number.isInteger(abs) ? abs.toFixed(0) : abs.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+  const parts = raw.split('.');
+  parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return (negative ? '-' : '') + parts.join('.') + '股';
+}
+function _screenFormatEvidenceValues(values, exprs) {
+  const formatted = values.map((value, i) => _screenFormatValue(value, exprs[i]));
+  if (!exprs.length || !exprs.every(expr => _screenSeriesUnit(expr) === 'shares')) return formatted;
+  const numbers = values.map(value => value == null || !Number.isFinite(+value) ? null : +value);
+  let collision = false;
+  for (let i = 0; i < numbers.length && !collision; i++) {
+    for (let j = i + 1; j < numbers.length; j++) {
+      if (numbers[i] != null && numbers[j] != null && numbers[i] !== numbers[j] && formatted[i] === formatted[j]) {
+        collision = true;
+        break;
+      }
+    }
+  }
+  return collision ? values.map(_screenFormatExactShares) : formatted;
+}
+function _screenEvidenceValue(rule, ev) {
+  const r = rule || {}, e = ev || {};
+  if (r.type === 'range') {
+    const values = _screenFormatEvidenceValues([e.value, e.min, e.max], [r.value, r.value, r.value]);
+    return values[0] + ' ∈ [' + values[1] + ', ' + values[2] + ']';
+  }
+  if (r.type === 'max_consecutive') return '最大连续 ' + (e.max_streak == null ? '—' : e.max_streak) + ' 日 / 允许 ' + (e.allowed == null ? '—' : e.allowed) + ' 日';
+  if (r.type === 'strict_rise') return '变化 ' + (Array.isArray(e.deltas) ? e.deltas.map(x => _screenFormatValue(x, r.series)).join(' / ') : '—');
+  if (r.type === 'compare') {
+    const values = _screenFormatEvidenceValues([e.left, e.right], [r.left, r.right]);
+    return values[0] + ' ' + (e.op || r.op || '') + ' ' + values[1];
+  }
+  return '规则证据已记录';
+}
+
+function wfDailyScreenView(result) {
+  const r = result || {}, summary = r.summary || {}, diagnostics = r.diagnostics || {};
+  const finite = value => value != null && value !== '' && Number.isFinite(+value) ? +value : null;
+  const nav = (((r.portfolio || {}).nav_series) || []).filter(row => Array.isArray(row) && row.length > 1 && finite(row[1]) != null).map(row => [String(row[0]), +row[1]]);
+  const strings = value => Array.isArray(value) ? value.map(x => typeof x === 'string' ? x : JSON.stringify(x)).filter(Boolean) : [];
+  return {
+    summary, diagnostics, nav,
+    metrics: [
+      ['净累计收益', finite(summary.total_return), 'percent'], ['净年化收益', finite(summary.ann_return), 'percent'],
+      ['最大回撤', finite(summary.max_drawdown), 'percent'], ['日净值 Sharpe', finite(summary.sharpe), 'number'],
+      ['平均现金仓位', finite(summary.average_cash_weight), 'percent'], ['日均换手', finite(summary.turnover), 'percent'],
+      ['总交易成本(元)', finite(summary.costs_paid), 'money'], ['实际成交笔数', finite(summary.trade_count), 'integer'],
+    ],
+    warnings: Array.from(new Set([...strings(r.warnings), ...strings(r._warnings), ...strings(r._node_errors)])),
+    assumptions: strings(r.assumptions),
+    staleDays: finite(diagnostics.stale_position_days),
+    unresolved: Array.isArray(diagnostics.final_unresolved_positions) ? diagnostics.final_unresolved_positions : [],
+    daily: (Array.isArray(r.daily) ? r.daily : []).slice(-20),
+    candidates: (Array.isArray(r.candidates) ? r.candidates : []).slice(-20),
+    trades: (Array.isArray(r.trades) ? r.trades : []).slice(-30),
+  };
+}
+
+function DailyScreenResults({ result, expanded, setExpanded, onClose, onExport }) {
+  // Preserve old receipts as evidence, without presenting unvalidated returns.
+  if (!result.price_quality || result.price_quality.performance_ready !== true) return <div data-daily-screen-blocked="true" role="alert" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, minHeight: 190, padding: 24, background: 'var(--paper)', borderTop: '2px solid var(--zhu)', zIndex: 8 }}>
+    <button type="button" aria-label="关闭结果" onClick={onClose} style={{ float: 'right' }}>✕</button>
+    <h3>历史数据尚未通过价格质量核验</h3>
+    <p>该记录缺少通过验证的复权来源与价格质量凭证，仅保留为诊断证据；收益曲线、绩效指标与报告导出已隐藏，不能用于策略排名。</p>
+    <p style={{ color: 'var(--ink-3)' }}>本轮发现历史 OHLC 矛盾及复权因子缺口。请修复并验证研究行情快照后，以相同规则重新运行；不会删除旧记录，也不会自动下单。</p>
+  </div>;
+  const view = wfDailyScreenView(result), sm = view.summary, dg = view.diagnostics;
+  const fmt = (value, kind = 'number') => value == null || value === '' || !Number.isFinite(+value) ? '—' : kind === 'percent' ? (+value * 100).toFixed(2) + '%' : kind === 'integer' ? String(value) : (+value).toLocaleString('zh-CN', { maximumFractionDigits: kind === 'money' ? 2 : 3 });
+  const cell = { padding: '6px 8px', borderBottom: '1px solid var(--line-soft)', textAlign: 'left', whiteSpace: 'nowrap', fontSize: 10 };
+  const nav = view.nav, min = Math.min(1, ...nav.map(p => p[1])), max = Math.max(1, ...nav.map(p => p[1])), span = max - min || .01;
+  const y = v => 122 - ((v - min) / span) * 102;
+  return <div data-daily-screen-result="true" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: expanded ? 'calc(100vh - 90px)' : 390, background: 'var(--paper)', borderTop: '1px solid var(--ink)', boxShadow: '0 -12px 32px rgba(28,24,20,.12)', zIndex: 8, display: 'flex', flexDirection: 'column' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 18px', borderBottom: '1px solid var(--line-soft)' }}>
+      <b className="serif" style={{ fontSize: 14 }}>日频模拟调仓 · {result._label || result.label || '历史规则验证'}</b>
+      <span style={{ color: 'var(--ink-3)', fontSize: 10 }}>{nav.length ? nav[0][0] + ' → ' + nav[nav.length - 1][0] : '尚无有效净值'}</span>
+      <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}><button type="button" onClick={() => setExpanded(!expanded)}>{expanded ? '收起' : '展开'}</button><button type="button" onClick={onExport}>导出报告</button><button type="button" aria-label="关闭结果" onClick={onClose}>✕</button></span>
+    </div>
+    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px 18px' }}>
+      <div style={{ color: '#2f6072', background: 'rgba(47,96,114,.06)', border: '1px solid rgba(47,96,114,.2)', borderRadius: 6, padding: '7px 9px', fontSize: 11, lineHeight: 1.55, marginBottom: 10 }}>研究模拟，不会下单。收盘筛选 → 次日开盘尝试成交；固定槽位未用部分保留现金。净指标计入已配置费税与滑点，不按未来收益是否有值换票。没有手数、最低佣金、冲击成本或涨跌停排队成交保证。</div>
+      {(view.staleDays > 0 || view.unresolved.length > 0) && <div role="alert" style={{ color: '#9a6b16', border: '1px dashed #9a6b16', padding: '7px 9px', borderRadius: 6, marginBottom: 10, fontSize: 11 }}>存在陈旧估值：{fmt(view.staleDays, 'integer')} 个持仓日；期末 {view.unresolved.length} 个缺价／待退出持仓。缺退出行情时保留持仓，不虚构卖出；净值可能受旧标记价影响，期末不是强制清仓收益。</div>}
+      {view.warnings.length > 0 && <div role="alert" style={{ color: '#9a6b16', fontSize: 11, lineHeight: 1.5, marginBottom: 10 }}>{view.warnings.join(' · ')}</div>}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(115px,1fr))', gap: 8, marginBottom: 12 }}>{view.metrics.map(([label, value, kind]) => <div key={label} style={{ border: '1px solid var(--line-soft)', borderRadius: 6, padding: '7px 9px' }}><div style={{ color: 'var(--ink-3)', fontSize: 10 }}>{label}</div><div className="mono" style={{ marginTop: 4, fontSize: 16 }}>{fmt(value, kind)}</div></div>)}</div>
+      <div style={{ color: 'var(--ink-3)', fontSize: 10, marginBottom: 10 }}>账户盈利日占比 {fmt(sm.daily_win_rate, 'percent')}（不是选股命中率） · 完整平仓回合 {fmt(sm.closed_position_count, 'integer')} / 胜率 {fmt(sm.closed_position_win_rate, 'percent')} · 入场受阻 {fmt(dg.missing_or_blocked_entry_attempts, 'integer')} · 卖出受阻 {fmt(dg.blocked_sale_attempts, 'integer')}</div>
+      {nav.length > 1 && <div style={{ border: '1px solid var(--line-soft)', borderRadius: 8, padding: 9, marginBottom: 12 }}><b style={{ fontSize: 11 }}>含现金与交易成本的账户净值（初始=1）</b><svg role="img" aria-label="日频模拟净值曲线" viewBox="0 0 760 150" style={{ width: '100%', height: 150 }}><line x1="48" x2="742" y1={y(1)} y2={y(1)} stroke="var(--line)" strokeDasharray="4 4" /><text x="0" y="22" fontSize="10" fill="var(--ink-3)">{fmt(max)}</text><text x="0" y="124" fontSize="10" fill="var(--ink-3)">{fmt(min)}</text><polyline fill="none" stroke="var(--dai)" strokeWidth="2" points={nav.map((p, i) => (48 + 694 * i / (nav.length - 1)).toFixed(2) + ',' + y(p[1]).toFixed(2)).join(' ')} /><text x="48" y="145" fontSize="10" fill="var(--ink-3)">{nav[0][0]}</text><text x="742" y="145" textAnchor="end" fontSize="10" fill="var(--ink-3)">{nav[nav.length - 1][0]}</text></svg></div>}
+      <details><summary style={{ cursor: 'pointer', fontSize: 12 }}>逐日账户与现金 · 最近20日（含空仓日）</summary><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse' }}><thead><tr>{['日期', '信号日', '净值', '现金比例', '持股数', '日换手', '受阻订单'].map(t => <th key={t} style={cell}>{t}</th>)}</tr></thead><tbody>{view.daily.map((row, i) => <tr key={i}>{[row.date, row.signal_date || '初始现金', fmt(row.normalized_nav), fmt(row.cash_weight, 'percent'), fmt(row.holdings_count, 'integer'), fmt(row.turnover, 'percent'), (row.blocked_orders || []).length].map((v, j) => <td key={j} style={cell}>{v}</td>)}</tr>)}</tbody></table></div></details>
+      <details style={{ marginTop: 9 }}><summary style={{ cursor: 'pointer', fontSize: 12 }}>逐日筛选候选 · 最近20日</summary><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse' }}><thead><tr>{['信号日', '执行日', '合格数', '实际入选代码'].map(t => <th key={t} style={cell}>{t}</th>)}</tr></thead><tbody>{view.candidates.map((row, i) => <tr key={i}><td style={cell}>{row.date}</td><td style={cell}>{row.execution_date || '区间外未执行'}</td><td style={cell}>{fmt(row.eligible_count, 'integer')}</td><td style={cell}>{(row.selected || []).map(x => x.instrument || x.code).join(' · ') || '空仓信号'}</td></tr>)}</tbody></table></div></details>
+      <details style={{ marginTop: 9 }}><summary style={{ cursor: 'pointer', fontSize: 12 }}>实际模拟成交 · 最近30笔</summary><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse' }}><thead><tr>{['日期', '信号日', '股票', '方向', '参考开盘', '成交价', '成本(元)'].map(t => <th key={t} style={cell}>{t}</th>)}</tr></thead><tbody>{view.trades.map((row, i) => <tr key={i}>{[row.date, row.signal_date, row.instrument, row.side === 'buy' ? '买入' : row.side === 'sell' ? '卖出' : row.side, fmt(row.reference_open), fmt(row.execution_price), fmt(row.costs_paid, 'money')].map((v, j) => <td key={j} style={cell}>{v}</td>)}</tr>)}</tbody></table></div></details>
+      <details style={{ marginTop: 9 }}><summary style={{ cursor: 'pointer', fontSize: 12 }}>完整模拟假设与数据限制</summary><ul style={{ paddingLeft: 18, color: 'var(--ink-3)', fontSize: 10.5, lineHeight: 1.6 }}>{view.assumptions.map((text, i) => <li key={i}>{text}</li>)}</ul></details>
+    </div>
+  </div>;
+}
+
+function ResultsDrawer({ result, loading, error, durableWaiting, onStopWaiting, onClose, onSaveFactor, onSaveCard, onExport }) {
   const [expanded, setExpanded] = useState(false);   // 抽屉可一键展开充满屏幕(图表更舒展)
   const [tip, setTip] = useState(null);              // 数据悬浮提示 {x,y,t}(鼠标在数据上显示详情)
   const [openRow, setOpenRow] = useState(null);      // 时序IC 逐股展开行(点击看完整单票体检)
+  const completedWithErrors = !!(result && (result._completed_with_errors || result._run_status === 'completed_with_errors'));
   // 悬停 helper:贴到 svg 柱/点上,鼠标移入即时显示详情、跟随光标,移出消失。
   const _hv = t => ({ onMouseMove: e => setTip({ x: e.clientX, y: e.clientY, t }), onMouseLeave: () => setTip(null) });
+  if (result && result.method === 'daily_screen_backtest' && !loading && !error) return <DailyScreenResults result={result} expanded={expanded} setExpanded={setExpanded} onClose={onClose} onExport={onExport} />;
+  // —— 数据筛选 Skill：确定性硬规则的候选、逐条证据和数据口径。——
+  if (result && result.__dt === 'data_screen' && !loading && !error) {
+    const rows = Array.isArray(result.candidates) ? result.candidates : [];
+    const universe = result.universe || {}, coverage = result.as_of_coverage || {}, universeCoverage = result.universe_coverage || {};
+    const snapshot = result.data_snapshot || {}, rules = (result.compiled_spec && result.compiled_spec.rules) || [];
+    const warnings = Array.from(new Set([...(result.warnings || []), ...(result._warnings || [])].map(String).filter(Boolean)));
+    const runId = result.screen_run_id || result.run_id || '';
+    const selectorPreset = result.source_selector && result.source_selector.preset;
+    const isMaTrend = selectorPreset === 'ma_trend';
+    const selectorLabel = isMaTrend ? '沿均线上升' : '自定义硬规则';
+    const amountWindow = (result.compiled_spec && result.compiled_spec.filters && result.compiled_spec.filters.amount_window) || 20;
+    const ruleMap = Object.fromEntries(rules.map(rule => [rule.id, rule]));
+    const tableColumns = isMaTrend ? '48px minmax(150px,1.5fr) 86px 86px 86px 100px 82px' : '48px minmax(170px,1.6fr) 90px 90px 110px 82px';
+    const resolvedN = +(universeCoverage.n_resolved == null ? universe.n_resolved : universeCoverage.n_resolved) || null;
+    const effectiveValid = universeCoverage.effective_valid_bars == null ? coverage.valid_bars : universeCoverage.effective_valid_bars;
+    const coverageRatio = universeCoverage.effective_valid_ratio != null
+      ? +universeCoverage.effective_valid_ratio
+      : (universe.id === 'all_a' && resolvedN ? (+effectiveValid || 0) / resolvedN : (coverage.peak_valid_bars ? coverage.valid_bars / coverage.peak_valid_bars : null));
+    const f2 = v => (v == null || v !== v) ? '—' : (+v).toFixed(2);
+    const fp = v => (v == null || v !== v) ? '—' : ((+v) * 100).toFixed(2) + '%';
+    const coverageDisplay = coverageRatio == null ? '—' : fp(coverageRatio) + (resolvedN && effectiveValid != null ? ' · ' + effectiveValid + '/' + resolvedN : '');
+    return (
+      <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: expanded ? 'calc(100vh - 90px)' : 350, background: 'var(--paper)', borderTop: '1px solid var(--ink)', boxShadow: '0 -12px 32px rgba(28,24,20,0.12)', zIndex: 8, display: 'flex', flexDirection: 'column', animation: 'fadeIn .3s ease', transition: 'height .2s ease' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 18px', borderBottom: '1px solid var(--line-soft)' }}>
+          <span style={{ width: 20, height: 20, borderRadius: 5, background: rows.length ? 'var(--dai)' : '#9a6b16', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{rows.length ? '✓' : '0'}</span>
+          <span className="serif" style={{ fontSize: 14, fontWeight: 600 }}>数据筛选 Skill · {selectorLabel}</span>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{result.as_of || '—'} · {universe.label || universe.id || '未标注股票池'}</span>
+          {runId && <span className="mono" title="可追溯的筛选运行编号" style={{ fontSize: 8.5, color: 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 4, padding: '2px 6px' }}>{runId}</span>}
+          <span style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span onClick={() => setExpanded(e => !e)} className="serif" style={{ fontSize: 12, color: 'var(--ink-1)', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 11px', cursor: 'pointer' }}>{expanded ? '⤡ 收起' : '⤢ 展开'}</span>
+            <span onClick={onExport} className="serif" style={{ fontSize: 12, color: 'var(--ink-1)', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 11px', cursor: 'pointer' }}>↧ 导出报告</span>
+            <span onClick={onClose} style={{ fontSize: 16, color: 'var(--ink-3)', cursor: 'pointer', padding: '0 4px' }}>✕</span>
+          </span>
+        </div>
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px 18px 16px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6,minmax(88px,1fr))', gap: 8, marginBottom: 11 }}>
+            {[
+              ['命中总数', result.n_matched == null ? '—' : result.n_matched],
+              ['本次返回', rows.length],
+              ['实际评估', result.n_evaluated == null ? '—' : result.n_evaluated],
+              ['载入标的', result.n_loaded == null ? '—' : result.n_loaded],
+              ['有效覆盖', coverageDisplay],
+              ['快照 PIT', snapshot.strict_pit === true ? '严格' : '当前口径'],
+            ].map(([label, value], i) => <div key={i} style={{ border: '1px solid var(--line-soft)', borderRadius: 7, padding: '7px 9px', background: i === 0 ? 'rgba(52,101,85,.05)' : 'transparent' }}><div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '.06em' }}>{label}</div><div className="mono" style={{ marginTop: 2, fontSize: 15, fontWeight: 600, color: i === 0 ? 'var(--dai)' : 'var(--ink-1)' }}>{value}</div></div>)}
+          </div>
+          {!snapshot.strict_pit && <div className="mono" style={{ marginBottom: 9, padding: '6px 9px', border: '1px dashed #9a6b16', borderRadius: 6, color: '#9a6b16', fontSize: 9.5, lineHeight: 1.5 }}>股票名称、ST 与上市状态来自当前快照，不代表历史时点严格 PIT；价格与成交数据仍绑定到 {result.as_of || '本次有效日'}。</div>}
+          {warnings.length > 0 && <div className="mono" style={{ marginBottom: 9, color: '#9a6b16', fontSize: 9.5, lineHeight: 1.5 }}>{warnings.join(' · ')}</div>}
+          <div style={{ border: '1px solid var(--line-soft)', borderRadius: 8, overflow: 'hidden' }}>
+            <div className="mono" style={{ display: 'grid', gridTemplateColumns: tableColumns, gap: 8, padding: '7px 10px', background: 'var(--paper-2)', color: 'var(--ink-3)', fontSize: 8.5, letterSpacing: '.05em' }}><span>排名</span><span>股票</span><span>{isMaTrend ? '贴线分' : '排序分'}</span><span>收盘价</span>{isMaTrend && <span>乖离率</span>}<span>{amountWindow}日均额</span><span>证据</span></div>
+            {rows.length === 0 && <div style={{ padding: '26px 14px', textAlign: 'center', color: 'var(--ink-3)', fontSize: 11 }}>没有股票同时满足全部硬规则。{isMaTrend ? '可以调整均线窗口、乖离范围或流动性门槛后重跑。' : '请审阅每条受控规则与股票池口径后再调整条件。'}</div>}
+            {rows.map((row, i) => {
+              const key = 'screen:' + (row.code || i), opened = openRow === key;
+              const evRows = Object.keys(row.evidence || {}).map(id => ({ id, rule: ruleMap[id] || {}, ...(row.evidence[id] || {}) }));
+              const bias = row.score_evidence && row.score_evidence.raw_bias;
+              return <React.Fragment key={key}>
+                <div onClick={() => setOpenRow(opened ? null : key)} style={{ display: 'grid', gridTemplateColumns: tableColumns, gap: 8, alignItems: 'center', padding: '8px 10px', borderTop: i ? '1px solid var(--line-soft)' : 'none', cursor: 'pointer', fontSize: 10.5 }}>
+                  <span className="mono" style={{ color: 'var(--ink-3)' }}>#{row.rank || i + 1}</span>
+                  <span><b style={{ color: 'var(--ink-1)' }}>{row.name || '未命名'}</b><span className="mono" style={{ display: 'block', marginTop: 1, fontSize: 8.5, color: 'var(--ink-3)' }}>{row.code || '—'}{row.industry ? ' · ' + row.industry : ''}</span></span>
+                  <span className="mono" style={{ color: 'var(--dai)', fontWeight: 600 }}>{f2(row.score)}</span>
+                  <span className="mono">{f2(row.close)}</span>
+                  {isMaTrend && <span className="mono">{fp(bias)}</span>}
+                  <span className="mono">{row.avg_amount_yi == null ? '—' : f2(row.avg_amount_yi) + ' 亿'}</span>
+                  <span className="mono" style={{ color: 'var(--dai)' }}>{evRows.length ? evRows.filter(x => x.passed).length + '/' + evRows.length : '—'} {opened ? '▴' : '▾'}</span>
+                </div>
+                {opened && <div style={{ padding: '8px 10px 10px 66px', borderTop: '1px dashed var(--line-soft)', background: 'rgba(52,101,85,.035)', display: 'grid', gridTemplateColumns: expanded ? 'repeat(2,minmax(250px,1fr))' : '1fr', gap: 6 }}>
+                  {evRows.map(ev => <div key={ev.id} style={{ display: 'flex', gap: 8, alignItems: 'baseline', minWidth: 0 }}><span className="mono" style={{ flex: '0 0 auto', color: ev.passed ? 'var(--dai)' : 'var(--zhu)', fontSize: 9 }}>{ev.passed ? '✓' : '×'}</span><span style={{ minWidth: 0, fontSize: 9.5, color: 'var(--ink-2)' }}><b>{ev.label || ev.id}</b><span className="mono" style={{ marginLeft: 6, color: 'var(--ink-3)' }}>{_screenEvidenceValue(ev.rule, ev)}</span></span></div>)}
+                </div>}
+              </React.Fragment>;
+            })}
+          </div>
+          {expanded && <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.25fr) minmax(260px,.75fr)', gap: 10, marginTop: 10 }}>
+            <RCard title="本次硬规则">{rules.map((rule, i) => <div key={rule.id || i} style={{ display: 'flex', gap: 8, marginBottom: 4, fontSize: 10, lineHeight: 1.45 }}><span className="mono" style={{ color: 'var(--dai)' }}>{i + 1}.</span><span>{rule.label || rule.id}</span></div>)}</RCard>
+            <RCard title="可追溯数据口径"><div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-2)', lineHeight: 1.55 }}>筛选规则摘要 · {String(result.spec_digest || '').slice(0, 16) || '—'}<br />数据快照摘要 · {String(snapshot.digest || '').slice(0, 16) || '—'}<br />快照行数 · {snapshot.rows == null ? '—' : snapshot.rows}<br />快照股票 · {snapshot.codes == null ? '—' : snapshot.codes}<br />股票池解析 · {universe.n_resolved == null ? '—' : universe.n_resolved}<br />有效日覆盖 · {coverage.valid_bars == null ? '—' : coverage.valid_bars} / 峰值 {coverage.peak_valid_bars == null ? '—' : coverage.peak_valid_bars}</div></RCard>
+          </div>}
+        </div>
+      </div>
+    );
+  }
+  // —— 通用过拟合审计: PASS / FAIL / INCOMPLETE 三态独立视图。——
+  if (result && result.__dt === 'overfit_audit' && !loading && !error) {
+    const status = String(result.status || 'INCOMPLETE').toUpperCase();
+    const metrics = result.metrics || {}, ev = result.evidence || {}, thresholds = result.thresholds || {};
+    const haircut = metrics.haircut || {};
+    const orth = result.orthogonalization || {}, orthSummary = orth.summary || {};
+    const reasons = status === 'FAIL' ? (result.failed_checks || []) : (result.reasons || []);
+    const auditWarnings = Array.from(new Set([...(result.warnings || []), ...(result._warnings || [])].map(String).filter(Boolean)));
+    const statusLabel = { PASS: '通过', FAIL: '未通过', INCOMPLETE: '证据不足' }[status] || status;
+    const statusColor = status === 'PASS' ? 'var(--dai)' : (status === 'FAIL' ? 'var(--zhu)' : '#9a6b16');
+    const canPersistAudit = status === 'PASS' && result.evidence_verified === true;
+    const governedPolicy = result.policy_authority === 'server_governor_policy';
+    const evidenceLabel = ({
+      server_trial_ledger: '服务端 TrialLedger 已验证',
+      server_trial_ledger_unbound: '服务端 TrialLedger 存在，但未绑定本次入选收益',
+      caller_supplied: '调用方诊断输入 · 不可解锁 PASS',
+    })[result.evidence_authority] || (result.evidence_verified ? '已验证的服务端证据' : '未验证证据');
+    const policyLabel = governedPolicy ? '服务端 Governor 固定策略' : '调用方诊断策略 · 不具备权威';
+    const policyDigest = String(result.audit_policy_digest || '');
+    const snapshotDigest = String(result.data_snapshot_digest || ev.data_snapshot_digest || '');
+    const snapshotAuthority = result.data_snapshot_authority || ev.data_snapshot_authority || '';
+    const snapshotAuthorityLabel = snapshotAuthority === 'runtime_panel_content'
+      ? '运行面板内容绑定' : (snapshotAuthority || '未绑定');
+    const snapshotStrictPit = result.data_snapshot_strict_pit != null
+      ? result.data_snapshot_strict_pit : ev.data_snapshot_strict_pit;
+    const selectionObjectiveLabel = ev.selection_objective === 'mean_rank_ic'
+      ? '基础门合格集内平均 RankIC（条件式 PBO）'
+      : (ev.selection_objective === 'mean_period_return'
+          ? '旧版分块平均收益（非现行可信口径）'
+          : (ev.selection_objective || '—'));
+    const selectionScopeLabel = ev.selection_eligibility_scope === 'full_validation_base_gate'
+      ? '全验证基础联合门 shortlist' : (ev.selection_eligibility_scope || '—');
+    const f3 = v => (v == null || v !== v) ? '—' : (+v).toFixed(3);
+    const fp = v => (v == null || v !== v) ? '—' : ((+v) * 100).toFixed(1) + '%';
+    const gateColor = (v, ok) => (v == null || v !== v) ? 'var(--ink-3)' : (ok ? 'var(--dai)' : 'var(--zhu)');
+    const minTrl = metrics.min_track_record_length;
+    return (
+      <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: expanded ? 'calc(100vh - 90px)' : 328, background: 'var(--paper)', borderTop: '1px solid var(--ink)', boxShadow: '0 -12px 32px rgba(28,24,20,0.12)', zIndex: 8, display: 'flex', flexDirection: 'column', animation: 'fadeIn .3s ease', transition: 'height .2s ease' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 18px', borderBottom: '1px solid var(--line-soft)' }}>
+          <span style={{ width: 20, height: 20, borderRadius: 5, background: statusColor, color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{status === 'PASS' ? '✓' : (status === 'FAIL' ? '×' : 'ⓘ')}</span>
+          <span className="serif" style={{ fontSize: 14, fontWeight: 600 }}>过拟合审计 · {statusLabel}</span>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{result.family_id ? ('研究家族 ' + result.family_id + ' · ') : ''}{result.date_start && result.date_end ? (result.date_start + ' → ' + result.date_end) : '未绑定完整试验家族'}</span>
+          <span style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span onClick={() => setExpanded(e => !e)} className="serif" style={{ fontSize: 12, color: 'var(--ink-1)', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 11px', cursor: 'pointer' }}>{expanded ? '⤡ 收起' : '⤢ 展开'}</span>
+            {canPersistAudit && <span onClick={onSaveCard} className="serif" style={{ fontSize: 12, color: 'var(--dai)', border: '1px solid var(--dai)', borderRadius: 7, padding: '5px 11px', cursor: 'pointer' }}>⊕ 经验卡</span>}
+            {canPersistAudit && <span onClick={onSaveFactor} className="serif" style={{ fontSize: 12, color: 'var(--paper)', background: 'var(--yin)', border: '1px solid var(--yin)', borderRadius: 7, padding: '5px 11px', cursor: 'pointer' }}>存入因子库</span>}
+            <span onClick={onExport} className="serif" style={{ fontSize: 12, color: 'var(--ink-1)', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 11px', cursor: 'pointer' }}>↧ 导出报告</span>
+            <span onClick={onClose} style={{ fontSize: 16, color: 'var(--ink-3)', cursor: 'pointer', padding: '0 4px' }}>✕</span>
+          </span>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '13px 18px' }}>
+          <div style={{ display: 'flex', gap: 22, marginBottom: 13, flexWrap: 'wrap' }}>
+            {[[ '年化 Sharpe', f3(metrics.observed_sharpe_annualized), 'var(--ink)' ], [ 'PSR', fp(metrics.psr), gateColor(metrics.psr, metrics.psr >= thresholds.psr_min) ], [ 'DSR', fp(metrics.dsr), gateColor(metrics.dsr, metrics.dsr >= thresholds.dsr_min) ], [ 'PBO', fp(metrics.pbo), gateColor(metrics.pbo, metrics.pbo <= thresholds.pbo_max) ], [ '校正后 PSR', fp(haircut.adjusted_psr), gateColor(haircut.adjusted_psr, haircut.adjusted_psr >= thresholds.adjusted_psr_min) ], [ 'MinTRL', minTrl == null ? '—' : Math.ceil(+minTrl) + '期', 'var(--ink-1)' ], [ '实际样本', ev.selected_observations == null ? '—' : ev.selected_observations + '期', 'var(--ink-1)' ], [ '试验家族', (ev.matrix_candidates == null ? '—' : ev.matrix_candidates) + ' / ' + (ev.n_trials == null ? '—' : ev.n_trials), 'var(--ink-1)' ]].map(([l, v, c], i) => (
+              <div key={i}><div className="mono" style={{ fontSize: 8.5, letterSpacing: '.08em', color: 'var(--ink-3)' }}>{l}</div><div className="mono" style={{ fontSize: 17, fontWeight: 600, color: c, marginTop: 2 }}>{v}</div></div>
+            ))}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: expanded ? '1fr 1fr' : 'minmax(0,1.2fr) minmax(260px,.8fr)', gap: 12 }}>
+            <RCard title={status === 'INCOMPLETE' ? '还缺哪些证据' : (status === 'FAIL' ? '未通过的闸门' : '统计闸门已通过')}>
+              {reasons.length ? reasons.map((x, i) => <div key={i} className="mono" style={{ fontSize: 10.5, color: status === 'FAIL' ? 'var(--zhu)' : 'var(--ink-2)', lineHeight: 1.55 }}>• {String(x)}</div>) : <div style={{ fontSize: 11, color: 'var(--dai)', lineHeight: 1.55 }}>所需证据齐全，PSR、DSR、PBO、多重检验校正和 MinTRL 覆盖全部过门。</div>}
+            </RCard>
+            <RCard title="证据契约">
+              <div className="mono" style={{ fontSize: 10, color: 'var(--ink-2)', lineHeight: 1.55 }}>收益源 · {result.source || '—'}<br />上游正交化 · {orth.requested ? ((orth.applied ? '已应用' : '未形成可用残差') + (orthSummary.output_coverage == null ? '' : ' · 覆盖 ' + ((+orthSummary.output_coverage) * 100).toFixed(1) + '%')) : '未请求'}<br />收益矩阵 · {ev.matrix_observations == null ? '—' : ev.matrix_observations} 期 × {ev.matrix_candidates == null ? '—' : ev.matrix_candidates} 候选（PSR / DSR / Haircut）<br />选优矩阵 · {ev.selection_score_observations == null ? '—' : ev.selection_score_observations} 期 × {ev.selection_score_candidates == null ? '—' : ev.selection_score_candidates} 候选 · 合格 {ev.eligible_candidates == null ? '—' : ev.eligible_candidates}<br />TrialLedger · {ev.n_trials == null ? '未提供' : ev.n_trials + ' 次'}<br />数据快照 · {snapshotAuthorityLabel}{snapshotDigest ? ' · ' + snapshotDigest.slice(0, 12) + '…' : ''}<br />严格 PIT · {snapshotStrictPit === true ? '是' : (snapshotStrictPit === false ? '否' : '—')}<br />策略权威 · {policyLabel}<br />策略摘要 · {policyDigest ? policyDigest.slice(0, 16) + '…' : '—'}<br />固定门槛 · PSR≥{fp(thresholds.psr_min)} · DSR≥{fp(thresholds.dsr_min)} · PBO≤{fp(thresholds.pbo_max)}<br />证据权威 · {evidenceLabel}<br />PBO 选优口径 · {selectionObjectiveLabel}<br />合格集口径 · {selectionScopeLabel}<br />入选路径在矩阵中 · {ev.selected_in_trial_matrix ? '是' : '否'}<br />完整家族 · {ev.complete_trial_family ? '是' : '否'}</div>
+              <div style={{ marginTop: 6, fontSize: 10, color: 'var(--ink-3)', lineHeight: 1.5 }}>INCOMPLETE 不等于失败，它表示还不能用完整的实验证据证明没有过拟合。系统不会用单次回测冒充审计通过。</div>
+            </RCard>
+          </div>
+          {!canPersistAudit && <div className="mono" style={{ marginTop: 9, padding: '7px 9px', border: '1px dashed var(--line)', borderRadius: 7, fontSize: 9.5, color: '#9a6b16' }}>持久化硬门：仅 PASS 且 evidence_verified=true 时可存因子或经验卡；当前结果只可查看与导出。</div>}
+          {auditWarnings.length > 0 && <div className="mono" style={{ marginTop: 9, fontSize: 9.5, color: '#9a6b16' }}>{auditWarnings.join(' · ')}</div>}
+        </div>
+      </div>
+    );
+  }
   // —— CPCV 验证结果:独立视图(DSR / 夏普分布 / IC;诚实缺席 ready=false 显 note,不编数) ——
   if (result && result.__dt === 'validation' && !loading && !error) {
     const ready = result.ready === true;
@@ -3011,12 +4350,13 @@ function ResultsDrawer({ result, loading, error, onClose, onSaveFactor, onSaveCa
   }
   // 真数据填充 (布局/样式不变): KPI / IC序列 / 十分位 / 净值 全部取自引擎报告
   const ic = (result && result.ic) || {}, pf = (result && result.portfolio) || {}, qt = (result && result.quantile) || {};
+  const presentation = wfResultPresentation(result);
   const kpi = [
     ['RankIC', _n2(ic.rank_ic_mean, 4), (ic.rank_ic_mean >= 0 ? 'up' : 'down')],
     ['ICIR', _n2(ic.icir, 2), ''],
     ['IC胜率', _pct(ic.ic_win_rate, 0), (ic.ic_win_rate >= 0.5 ? 'up' : '')],
     ['IC-t值', _n2(ic.ic_tstat, 1), ''],
-    ['年化' + (pf.net_ann != null ? '(净)' : ''), _pct(pf.net_ann != null ? pf.net_ann : pf.ann_return), ((pf.net_ann != null ? pf.net_ann : pf.ann_return) >= 0 ? 'up' : 'down')],
+    [presentation.annualLabel, _pct(pf.net_ann != null ? pf.net_ann : pf.ann_return), ((pf.net_ann != null ? pf.net_ann : pf.ann_return) >= 0 ? 'up' : 'down')],
     ...(pf.gross_ann != null ? [['年化(毛)', _pct(pf.gross_ann), (pf.gross_ann >= 0 ? 'up' : 'down')]] : []),
     ['Sharpe', _n2(pf.sharpe, 2), ''],
     ...(pf.sortino != null ? [['Sortino', _n2(pf.sortino, 2), (pf.sortino >= 0 ? 'up' : 'down')]] : []),
@@ -3081,34 +4421,48 @@ function ResultsDrawer({ result, loading, error, onClose, onSaveFactor, onSaveCa
   const decSpan = (decVmax - decVmin) || 1;
   const spread = qt.long_short_spread;
   const isPf = !!(result && result.method === 'portfolio_build');
+  const orth = (result && result.orthogonalization) || null;
+  const structuredFactor = !!(result && result.factor_spec && result.factor_spec.schema === 'guanlan.factor_spec.v1');
   const insight = result
     ? (((result._warnings && result._warnings.length) ? result._warnings.join(' · ') + ' ' : '')
         + (isPf
             ? ('组合构建 · /portfolio/build · ' + (result.n_holdings || 0) + ' 只目标持仓(' + (result.weighting || '') + (result.industry_neutral ? ' · 行业中性' : '') + ')。')
             : ((spread != null ? '十分位多空价差 ' + _pct(spread) + '。' : '')
-               + '真引擎回测 · /factor/' + (result._compose ? 'compose' : 'report') + ' · ' + nav.length + ' 个净值点。')))
+               + presentation.diagnostic + ' · ' + nav.length + (presentation.isBacktest ? ' 个回测净值点。' : ' 个分析组合曲线点。'))))
     : '';
   return (
     <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: expanded ? 'calc(100vh - 90px)' : 304, background: 'var(--paper)', borderTop: '1px solid var(--ink)', boxShadow: '0 -12px 32px rgba(28,24,20,0.12)', zIndex: 8, display: 'flex', flexDirection: 'column', animation: 'fadeIn .3s ease', transition: 'height .2s ease' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 18px', borderBottom: '1px solid var(--line-soft)' }}>
-        <span style={{ width: 20, height: 20, borderRadius: 5, background: error ? 'var(--zhu)' : 'var(--dai)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{error ? '✕' : loading ? '⋯' : '✓'}</span>
-        <span className="serif" style={{ fontSize: 14, fontWeight: 600 }}>{error ? '运行失败' : loading ? '运行中 · 引擎真回测' : '运行完成 · 因子分析结果'}</span>
+        <span style={{ width: 20, height: 20, borderRadius: 5, background: durableWaiting || completedWithErrors ? '#9a6b16' : (error ? 'var(--zhu)' : 'var(--dai)'), color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{durableWaiting ? '⋯' : error ? '✕' : loading ? '⋯' : completedWithErrors ? '!' : '✓'}</span>
+        <span className="serif" style={{ fontSize: 14, fontWeight: 600 }}>{durableWaiting ? '持久任务运行中 · 自动重连' : error ? '运行失败' : loading ? '运行中 · 引擎计算' : completedWithErrors ? '运行完成 · 含节点错误' : presentation.resultTitle}</span>
         <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{result ? (result._universe + ' · ' + result._label) : ''}</span>
         {result && result.neutralize && result.neutralize.applied
           ? <span className="mono" title={result.neutralize.note || ''} style={{ fontSize: 9, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 4, padding: '2px 7px' }}>{'已中性化' + (result.neutralize.by ? ' · ' + result.neutralize.by : '')}</span>
           : (result && result.neutralize && result.neutralize.requested
               ? <span className="mono" title={result.neutralize.note || ''} style={{ fontSize: 9, color: 'var(--dai)', border: '1px dashed var(--line)', borderRadius: 4, padding: '2px 7px' }}>中性化跳过</span>
-              : null)}
+               : null)}
+        {orth && orth.requested
+          ? <span className="mono" title={orth.note || ''} style={{ fontSize: 9, color: orth.applied ? 'var(--paper)' : '#9a6b16', background: orth.applied ? 'var(--yin)' : 'transparent', border: orth.applied ? 'none' : '1px dashed #9a6b16', borderRadius: 4, padding: '2px 7px' }}>{orth.applied ? '已正交化' : '正交化未物化'}</span>
+          : null}
+        {structuredFactor ? <span className="mono" title="保存后可按因子库名称完整重放同一变换" style={{ fontSize: 9, color: 'var(--dai)', border: '1px solid var(--dai)', borderRadius: 4, padding: '2px 7px' }}>factor_spec · 可重放</span> : null}
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+          {durableWaiting && <span onClick={onStopWaiting} className="serif" title="不取消服务端任务" style={{ fontSize: 12, color: '#9a6b16', border: '1px solid #9a6b16', borderRadius: 7, padding: '5px 11px', cursor: 'pointer' }}>停止等待 / 放弃重连</span>}
           <span onClick={() => setExpanded(e => !e)} className="serif" style={{ fontSize: 12, color: 'var(--ink-1)', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 11px', cursor: 'pointer' }}>{expanded ? '⤡ 收起' : '⤢ 展开'}</span>
           <span onClick={onExport} className="serif" style={{ fontSize: 12, color: 'var(--ink-1)', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 11px', cursor: 'pointer' }}>↧ 导出报告</span>
           <span onClick={onClose} style={{ fontSize: 16, color: 'var(--ink-3)', cursor: 'pointer', padding: '0 4px' }}>✕</span>
         </span>
       </div>
-      {loading ? (
+      {durableWaiting ? (
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+          <div style={{ maxWidth: 650, display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: '1px solid #9a6b16', borderRadius: 9, background: 'rgba(154,107,22,0.05)' }}>
+            <span style={{ width: 22, height: 22, flex: '0 0 auto', border: '2.5px solid var(--line)', borderTopColor: '#9a6b16', borderRadius: '50%', animation: 'spin .8s linear infinite' }} />
+            <span className="mono" style={{ fontSize: 11, color: 'var(--ink-2)', lineHeight: 1.6 }}>{error || '正在按任务编号查询服务端进度。默认会持续重连，避免重复启动重任务。'}<br /><b style={{ color: '#9a6b16' }}>「停止等待」只停本地轮询；服务端任务可能仍在运行，重新运行可能重复计算。</b></span>
+          </div>
+        </div>
+      ) : loading ? (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
           <span style={{ width: 22, height: 22, border: '2.5px solid var(--line)', borderTopColor: 'var(--dai)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} />
-          <span className="mono" style={{ fontSize: 12, color: 'var(--ink-3)' }}>引擎在真 stock_data 上跑真回测…</span>
+          <span className="mono" style={{ fontSize: 12, color: 'var(--ink-3)' }}>引擎正在按工作流节点计算，结果类型以实际终端为准…</span>
         </div>
       ) : error ? (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
@@ -3117,10 +4471,10 @@ function ResultsDrawer({ result, loading, error, onClose, onSaveFactor, onSaveCa
       ) : (<>
       <div style={{ flex: 1, overflowY: 'auto', padding: '13px 18px' }}>
         <div style={{ display: 'grid', gridTemplateColumns: '210px 1fr 1fr', gap: 13 }}>
-        <RCard title="关键指标">
+        <RCard title={presentation.metricTitle}>
           <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', justifyContent: 'center', alignContent: 'center', columnGap: 26, rowGap: 9, textAlign: 'center', height: '100%' }}>
             {kpi.map(([l, v, d], i) => (
-              <div key={i} title={_kpiTip(l)} style={{ cursor: 'help' }}><div className="mono" style={{ fontSize: 8.5, letterSpacing: '.12em', color: 'var(--ink-3)' }}>{l}</div>
+              <div key={i} title={_kpiTip(l, presentation.isBacktest)} style={{ cursor: 'help' }}><div className="mono" style={{ fontSize: 8.5, letterSpacing: '.12em', color: 'var(--ink-3)' }}>{l}</div>
                 <div className={'mono ' + (d || '')} style={{ fontSize: 15, fontWeight: 500, color: d ? undefined : 'var(--ink)', marginTop: 2 }}>{v}</div></div>
             ))}
           </div>
@@ -3158,6 +4512,24 @@ function ResultsDrawer({ result, loading, error, onClose, onSaveFactor, onSaveCa
           </div>
         </RCard>
         </div>
+        {orth && orth.requested && (() => {
+          const sm = orth.summary || {}, exps = orth.exposure_summary || [], failed = orth.reason_counts || {};
+          const ratio = sm.n_dates ? Math.round((sm.n_ok_dates || 0) / sm.n_dates * 100) : 0;
+          return (
+            <div style={{ marginTop: 13 }}>
+              <RCard title={'因子正交化 · ' + (orth.applied ? '已物化 ' + (sm.n_ok_dates || 0) + '/' + (sm.n_dates || 0) + '日 (' + ratio + '%)' : '失败关闭')}>
+                <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                  <div style={{ flex: '1 1 250px', fontSize: 10.5, color: 'var(--ink-2)', lineHeight: 1.55 }}>{orth.note || '无摘要'}<br /><span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>输出覆盖 {sm.output_coverage == null ? '—' : (sm.output_coverage * 100).toFixed(1) + '%'} · 可用/输入 {sm.usable_fraction == null ? '—' : (sm.usable_fraction * 100).toFixed(1) + '%'} · 最大条件数 {sm.max_condition_number == null ? '—' : (+sm.max_condition_number).toFixed(1)}</span></div>
+                  <div style={{ flex: '2 1 420px', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                    {exps.slice(0, 6).map((row, i) => <span key={i} title={row.exposure} style={{ minWidth: 90 }}><span className="mono" style={{ display: 'block', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 8.5, color: 'var(--ink-3)' }}>{row.exposure}</span><span className="mono" style={{ fontSize: 11, color: 'var(--ink-1)' }}>{row.mean_abs_before == null ? '—' : (+row.mean_abs_before).toFixed(3)} → <b style={{ color: 'var(--dai)' }}>{row.mean_abs_after == null ? '—' : (+row.mean_abs_after).toFixed(3)}</b></span></span>)}
+                    {!exps.length && <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>无可用暴露摘要</span>}
+                  </div>
+                </div>
+                {Object.keys(failed).length > 0 && <div className="mono" style={{ marginTop: 7, fontSize: 9, color: '#9a6b16' }}>跳过日期 · {Object.keys(failed).map(k => k + ' × ' + failed[k]).join(' · ')}</div>}
+              </RCard>
+            </div>
+          );
+        })()}
         {icd.length > 0 && (
           <div style={{ marginTop: 13 }}>
             <RCard title={'IC 衰减谱 · 横轴=前向 horizon(日) 纵轴=RankIC' + (icdPeak ? ' · |IC|峰值 ' + icdPeak.h + ' 日(最优持有期参考)' : '')}>
@@ -3397,7 +4769,7 @@ function ResultsDrawer({ result, loading, error, onClose, onSaveFactor, onSaveCa
             </div>
           );
         })()}
-        <div style={{ marginTop: 8, fontSize: 9, color: 'var(--ink-3)', lineHeight: 1.5 }}>注:年化 / Sharpe / 回撤 = 多空组合·<b style={{ color: 'var(--zhu)' }}>未扣交易成本</b>的年化指示值(短窗 / 高频调仓会放大失真,勿当真实可交易收益 —— 可信回测见 W5 加成本+约束)。换手率为区间均值;逐期换手 / 逐期 RankIC / 因子分布(QQ)待引擎补字段。</div>
+        <div style={{ marginTop: 8, fontSize: 9, color: 'var(--ink-3)', lineHeight: 1.5 }}>{presentation.note}</div>
       </div>
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '9px 18px', borderTop: '1px solid var(--line-soft)', background: 'rgba(168,57,45,0.05)' }}>
         <span style={{ width: 22, height: 22, borderRadius: 6, background: 'var(--yin)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>瀾</span>

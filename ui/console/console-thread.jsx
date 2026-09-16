@@ -448,6 +448,18 @@ function WwReportCard({ item, onOpen }) {
   );
 }
 
+function WwWorkflowCard({ item, workspace, sessionId, onOpen }) {
+  const matches = !!workspace && item.workspaceId === workspace.id && (!item.sessionId || item.sessionId === sessionId);
+  return <div style={{ display: 'flex', gap: 12 }}><AiAvatar />
+    <div style={{ flex: 1, minWidth: 0, border: '1px solid var(--line)', borderRadius: 10, padding: '13px 16px', background: 'var(--paper-2)' }}>
+      <div style={{ fontFamily: 'var(--serif)', fontSize: 14 }}>{item.name}</div>
+      <div className="mono" style={{ color: 'var(--ink-3)', fontSize: 10, marginTop: 7, overflowWrap: 'anywhere' }}>{item.runId || item.workflowId || '未保存的图草稿'}{item.graph ? ' · ' + item.graph.nodes.length + ' 节点' : ''}</div>
+      <div style={{ color: 'var(--ink-2)', fontSize: 11, margin: '9px 0' }}>{item.runId ? '读取服务端原图与真实状态，不会重新执行。' : '点击后打开供审阅，不会自动运行。'}</div>
+      <button disabled={!matches || !onOpen} onClick={() => onOpen(item)} style={{ border: '1px solid var(--yin)', borderRadius: 6, padding: '6px 11px', background: 'transparent', color: 'var(--yin)', cursor: matches ? 'pointer' : 'not-allowed' }}>{item.runId ? '查看流程与运行结果 ↗' : '打开流程图 ↗'}</button>
+      {!matches && <span style={{ color: 'var(--zhu)', fontSize: 11, marginLeft: 8 }}>空间或会话不匹配，已拦截</span>}
+    </div></div>;
+}
+
 // ── WwLauncher ── 输入坞左侧 ◫:手动呼出右栏功能页(选股/工作流/经验卡/图谱),与对话「调出选股」等价
 function WwLauncher({ activated, onOpenPage }) {
   const PAGES = window.WW.PAGES;
@@ -647,7 +659,7 @@ function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentr
 }
 
 // ── WwThread ──
-function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfirm, onOpenReport, onOpenPage, activatedPages, onRename, sentry, markSentrySeen, onSentryFocus, thinkingMode, onThinkingMode }) {
+function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfirm, onOpenReport, onOpenPage, onOpenWorkflow, activatedPages, onRename, sentry, markSentrySeen, onSentryFocus, thinkingMode, onThinkingMode }) {
   const [draft, setDraft] = React.useState('');
   const [submitting, setSubmitting] = React.useState(''); // send|steer|cancel；防止重复前台控制请求
   const scrollRef = React.useRef(null);
@@ -708,9 +720,31 @@ function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfi
                 {m.streaming && <span style={{ display: 'inline-block', width: 6, height: 14, background: 'var(--ink)', marginLeft: 4, verticalAlign: -2, animation: 'blink 1s steps(2) infinite' }} />}
               </div>
             </div>);
+          if (m.kind === 'workflow') return <WwWorkflowCard key={m.id} item={m} workspace={workspace} sessionId={state.sid} onOpen={onOpenWorkflow} />;
           if (m.kind === 'report') return <WwReportCard key={m.id} item={m} onOpen={onOpenReport} />;
+          if (m.kind === 'memory') return (
+            <details key={m.id} style={{ marginLeft: 40, alignSelf: 'flex-start', maxWidth: 'calc(100% - 40px)',
+              borderLeft: '2px solid var(--jin)', padding: '5px 10px', color: 'var(--ink-3)',
+              background: 'var(--paper-2)', fontSize: 10.5 }}>
+              <summary style={{ cursor: 'pointer', listStyle: 'none', letterSpacing: .8 }}>
+                忆 · 已主动召回 {m.count} 条相关记忆
+              </summary>
+              <div style={{ marginTop: 7, display: 'grid', gap: 5 }}>
+                {(m.hits || []).map((hit, idx) => (
+                  <div key={hit.id || idx} style={{ lineHeight: 1.55 }}>
+                    <span className="mono" style={{ color: 'var(--jin)', marginRight: 6 }}>
+                      {hit.scope_label || hit.scope || '记忆'} · {hit.date || '—'}
+                    </span>
+                    <span style={{ color: 'var(--ink-2)' }}>{hit.preview || ''}</span>
+                    {hit.reason && <span style={{ marginLeft: 6 }}>〔{hit.reason}〕</span>}
+                  </div>
+                ))}
+              </div>
+            </details>);
           if (m.kind === 'condense') return (
             <div key={m.id} title={m.summary} style={{ textAlign: 'center', fontSize: 10.5, color: 'var(--ink-3)', letterSpacing: 2, fontFamily: 'var(--serif)' }}>—— 前文已压缩入摘要 ——</div>);
+          if (m.kind === 'memory_flush') return (
+            <div key={m.id} style={{ textAlign: 'center', fontSize: 10, color: 'var(--jin)', letterSpacing: 1.2, fontFamily: 'var(--serif)' }}>忆 · {m.note}</div>);
           if (m.kind === 'error') return <div key={m.id} style={{ marginLeft: 40, color: 'var(--yin)', fontSize: 12 }}>✗ {m.note}</div>;
           if (m.kind === 'warning') return <div key={m.id} style={{ marginLeft: 40, color: 'var(--jin)', fontSize: 12 }}>⚠ {m.note}</div>;
           return null;

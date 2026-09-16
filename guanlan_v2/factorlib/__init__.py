@@ -26,9 +26,15 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from guanlan_v2.factorlib.api import build_factorlib_router
+from guanlan_v2.factorlib.specs import (
+    FACTOR_SPEC_SCHEMA, FactorSpecError, factor_spec_digest, normalize_factor_spec,
+)
 from guanlan_v2.factorlib.store import LibraryFactorStore
 
-__all__ = ["build_factorlib_router", "register_library_factors", "LibraryFactorStore"]
+__all__ = [
+    "build_factorlib_router", "register_library_factors", "LibraryFactorStore",
+    "FACTOR_SPEC_SCHEMA", "FactorSpecError", "normalize_factor_spec", "factor_spec_digest",
+]
 
 
 def register_library_factors() -> Dict[str, Any]:

@@ -9,12 +9,13 @@ sha1 ``workflow.executor.graph_signature`` stall key stays in ``research.loop`` 
 this adapter's ``OptimizeCandidate.candidate_hash`` equality is proven
 decision-equivalent by test vectors, never by patching the old loop.
 
-Honesty inventory — what stays on the old path (explicit, reviewed)
--------------------------------------------------------------------
-* ``POST /research/loop/start`` and its ``1..5`` / ``0..0.2`` clamps continue to call
-  ``run_research_loop`` unchanged; the production cutover to this adapter is a later
-  reviewed change with its own plan (Phase 9-adjacent), gated on live parity evidence.
-  This adapter is reachable only by direct import.
+Honesty inventory — compatibility and governed entry (explicit, reviewed)
+-------------------------------------------------------------------------
+* ``POST /research/loop/start`` keeps the legacy ``run_research_loop`` default and its
+  ``1..5`` / ``0..0.2`` clamps.  Callers may opt into this adapter with
+  ``governed=true``; the Weiwō ``ww_research_loop`` tool does so by default.  This is an
+  additive cut-over: existing direct HTTP clients keep their prior behaviour and can
+  explicitly request the compatibility lane.
 * The LLM propose (``loop._call_generate``) remains a pre-loop step this adapter also
   calls before seeding: a propose failure is an honest termination with a lesson and
   **no template fallback** — strictly the loop's red line.
@@ -51,6 +52,7 @@ behaviour and observe two paths.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -291,6 +293,14 @@ def research_evaluate_validation(
     graph = cand.graph if isinstance(cand.graph, dict) else {}
     pr = progress if progress is not None else (lambda **kw: None)
     outcome = rl._run_graph_eval(graph, params, pr, round_k, max_rounds)
+    if isinstance(outcome.get("_trusted_backtests"), dict):
+        # Server-only capture binding.  The TrialLedger connector refuses an
+        # execution artifact that was accidentally swapped between candidates
+        # or data snapshots even when its dates happen to align.
+        outcome["_trusted_candidate_hash"] = cand.candidate_hash
+        outcome["_trusted_data_snapshot_hash"] = getattr(
+            ctx, "data_snapshot_content_digest", None,
+        )
     if sink is not None:
         sink[cand.candidate_hash] = outcome
     # required_chain_node_ids=() keeps the fidelity guard where the loop keeps it
@@ -425,6 +435,46 @@ def _best_k(counted_rounds: List[Any]) -> Optional[int]:
     return best_k
 
 
+def _best_base_passing_round(
+    counted_rounds: List[Any], min_rank_ic: float,
+    executions: Dict[str, Any],
+) -> Optional[Any]:
+    """Return the strongest round that passes the research gate without audit.
+
+    Audit candidates cannot pass the optimizer's normal gate before their complete
+    TrialLedger family has been sealed.  The post-seal rerun therefore needs its own
+    selection rule, but it must never turn a base-gate failure into an audit candidate.
+    The exact mean of the bound backtest ``ic.rank_ic_series`` orders eligible
+    rounds.  This is deliberately the same canonical score matrix later consumed
+    by CSCV/PBO; the scalar headline metric may not create a second objective.
+    An equal score keeps the earlier round.
+    """
+    best: Optional[Any] = None
+    best_ric: Optional[float] = None
+    for round_row in counted_rounds:
+        metrics = round_row.metrics
+        if metrics is None:
+            continue
+        base_gate = research_gate(metrics, min_rank_ic=min_rank_ic)
+        if base_gate.status != "passed":
+            continue
+        execution = executions.get(round_row.candidate_hash)
+        if not isinstance(execution, dict):
+            continue
+        try:
+            from guanlan_v2.workflow.trial_audit_connector import (
+                selection_evidence_from_execution,
+            )
+            ric = float(
+                selection_evidence_from_execution(execution)["selection_score_mean"]
+            )
+        except Exception:  # noqa: BLE001 - missing/drifting evidence fails closed
+            continue
+        if best is None or ric > float(best_ric):
+            best, best_ric = round_row, ric
+    return best
+
+
 def run_research_optimize(
     run_id: str, goal: str, max_rounds: int, min_rank_ic: float, universe: str,
     freq: str, start: Optional[str], end: Optional[str], progress: Callable[..., None],
@@ -479,16 +529,45 @@ def run_research_optimize(
     source_by_hash: Dict[str, Any] = {seed.candidate_hash: None}
     imp_state = {"diag_by_hash": diag_by_hash, "source_by_hash": source_by_hash, "error": None}
     eval_n = [0]
+    audit_state = {
+        "required": bool(rl._graph_declares_audit(seed.graph)),
+        "last_passed": False,
+        "last_status": None,
+    }
 
     def _eval(cand: OptimizeCandidate, _ctx: Any) -> ValidationMetrics:
         k = eval_n[0]
         eval_n[0] += 1
-        return research_evaluate_validation(
+        audit_state["required"] = bool(
+            audit_state["required"] or rl._graph_declares_audit(cand.graph)
+        )
+        audit_state["last_passed"] = False
+        metrics = research_evaluate_validation(
             cand, _ctx, params=cand_params, round_k=k, max_rounds=max_rounds,
             sink=ex_by_hash, progress=progress)
+        raw_metrics = (ex_by_hash.get(cand.candidate_hash) or {}).get("metrics") or {}
+        audit_state["last_status"] = raw_metrics.get("audit_status")
+        audit_state["last_passed"] = bool(
+            not audit_state["required"] or (
+                raw_metrics.get("audit_status") == "PASS"
+                and raw_metrics.get("audit_passes_gate") is True
+            )
+        )
+        return metrics
 
     def _gate(m: ValidationMetrics) -> GateResult:
-        return research_gate(m, min_rank_ic=min_rank_ic)
+        base = research_gate(m, min_rank_ic=min_rank_ic)
+        if audit_state["required"] and not audit_state["last_passed"]:
+            return GateResult(
+                status="failed", min_rank_ic=float(min_rank_ic),
+                observed_rank_ic=base.observed_rank_ic,
+                observed_sharpe=base.observed_sharpe,
+                observed_oos_verdict=base.observed_oos_verdict,
+                reason=("研究谱系声明了过拟合审计；必须在 TrialLedger 封存完整试验家族后"
+                        "重跑并取得 PASS，当前为 "
+                        f"{audit_state.get('last_status') or 'INCOMPLETE'}"),
+            )
+        return base
 
     def _improve(cand: OptimizeCandidate, m: ValidationMetrics, fb: Any) -> OptimizeCandidate:
         new_cand = research_improve(cand, m, fb, goal=goal, params=cand_params, state=imp_state)
@@ -535,6 +614,11 @@ def run_research_optimize(
     # ── terminal translation → the loop's end-row contract ──
     status = result.state.status
     stop = result.stop_reason
+    audit_lineage_required = bool(audit_state["required"])
+    postseal_round = (
+        _best_base_passing_round(counted, min_rank_ic, ex_by_hash)
+        if audit_lineage_required else None
+    )
     promoted: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
@@ -543,7 +627,7 @@ def run_research_optimize(
         pass_round = next(
             (r for r in archived if r.gate is not None and r.gate.status == "passed"), None)
         best_k = pass_round.round_index if pass_round is not None else _best_k(counted)
-        if pass_round is not None:
+        if pass_round is not None and not audit_lineage_required:
             ph = pass_round.candidate_hash
             pcand = cand_by_hash.get(ph)
             pgraph = pcand.graph if pcand is not None else {}
@@ -571,9 +655,19 @@ def run_research_optimize(
             ok = False
             error = f"研究回路异常终止({stop})"
 
+    # The ordinary optimizer gate intentionally cannot pass an audit graph until
+    # the family is sealed.  For that lineage, select the post-seal candidate only
+    # among rounds that independently passed rank_ic/OOS/Sharpe.  Keep the legacy
+    # best_k fallback solely for diagnostics when no such candidate exists.
+    if postseal_round is not None:
+        best_k = postseal_round.round_index
+
     # ── best graph → workflow library + lesson (loop wrap-up parity) ──
     best_graph: Optional[Dict[str, Any]] = None
     best_metrics: Optional[Dict[str, Any]] = None
+    audit_context: Optional[Dict[str, Any]] = None
+    audit_context_error: Optional[str] = None
+    audit_postseal: Optional[Dict[str, Any]] = None
     # loop parity: the wrap-up lesson's 诊断 tail is the loop's running ``diag`` — the LAST
     # critique's diagnosis seen during the run (loop.py:415/423), NOT the best round's diag;
     # propose diag only when no critique ever ran. (Aligning to _display_meta(best_round)
@@ -584,12 +678,139 @@ def run_research_optimize(
         if best_round is not None:
             bh = best_round.candidate_hash
             bcand = cand_by_hash.get(bh)
-            best_graph = bcand.graph if bcand is not None else None
+            best_graph = deepcopy(bcand.graph) if bcand is not None else None
             best_metrics = (ex_by_hash.get(bh) or {}).get("metrics")
+            # Seal the complete raw family only after TrialLedger has revealed
+            # every validation result.  The workflow receives an opaque handle,
+            # never a caller-editable matrix or an evidence_verified switch.
+            postseal_eligible = bool(
+                not audit_lineage_required
+                or (postseal_round is not None
+                    and best_round.round_index == postseal_round.round_index)
+            )
+            if audit_lineage_required and not postseal_eligible:
+                audit_context_error = (
+                    "没有候选通过基础研究联合门"
+                    f"(rank_ic≥{min_rank_ic}, oos={rl.GATE_OOS_OK}, sharpe>0)，"
+                    "拒绝封存后审计与发布"
+                )
+            if audit_lineage_required and postseal_eligible and best_round.trial_id:
+                try:
+                    from guanlan_v2.workflow.trial_audit_connector import (
+                        capture_trial_return,
+                        seal_trial_family_context,
+                    )
+
+                    captures: List[Dict[str, Any]] = []
+                    for archived_round in archived:
+                        if not archived_round.trial_id:
+                            continue
+                        trial = ledger.get_trial(archived_round.trial_id)
+                        if (trial.stage != "validation" or trial.status != "revealed"
+                                or trial.reused_from_trial_id is not None):
+                            continue
+                        execution = ex_by_hash.get(archived_round.candidate_hash)
+                        if not isinstance(execution, dict):
+                            raise ValueError(
+                                f"试验 {trial.trial_id} 缺服务端研究执行产物"
+                            )
+                        captures.append(capture_trial_return(
+                            ledger=ledger, trial_id=trial.trial_id,
+                            frequency=freq, execution=execution,
+                        ))
+                    audit_context = seal_trial_family_context(
+                        ledger=ledger, study=study, captures=captures,
+                        selected_trial_id=best_round.trial_id,
+                        min_rank_ic=min_rank_ic,
+                    )
+                    if best_graph is not None:
+                        for node in best_graph.get("nodes") or []:
+                            if isinstance(node, dict) and node.get("type") == "overfit":
+                                node["params"] = dict(node.get("params") or {})
+                                node["params"]["audit_context_id"] = audit_context["context_id"]
+                except Exception as exc:  # noqa: BLE001 - fail closed, keep research result
+                    audit_context_error = f"{type(exc).__name__}: {exc}"
+
+            # A declared audit never promotes on the pre-ledger candidate run:
+            # the trial id does not exist until that run has completed.  Seal
+            # first, inject only the opaque id, then rerun the selected graph.
+            if audit_lineage_required:
+                audit_postseal = {
+                    "status": "INCOMPLETE", "passes_gate": False,
+                    "reason": audit_context_error or "可信审计上下文未生成",
+                }
+                if audit_context is None:
+                    promoted = None
+                    stop = "postseal_audit_context_unavailable"
+                if audit_context is not None and best_graph is not None:
+                    try:
+                        progress(
+                            phase="audit", label="⑤ TrialLedger 家族已封存 · 重跑最佳图审计…",
+                            round_k=best_k,
+                        )
+                        post = rl._run_graph_eval(
+                            best_graph, params, progress, int(best_k), max_rounds,
+                        )
+                        post_metrics = dict(post.get("metrics") or {})
+                        post_status = str(post_metrics.get("audit_status") or "INCOMPLETE")
+                        joint_gate = rl._gate(
+                            post_metrics, min_rank_ic, audit_required=True,
+                        )
+                        post_passed = bool(post.get("ok") and joint_gate.get("passed"))
+                        post_reason = post.get("reason")
+                        if not post_reason and not post_passed:
+                            if (post_status == "PASS"
+                                    and post_metrics.get("audit_passes_gate") is True):
+                                post_reason = (
+                                    "可信审计虽为 PASS，但完整联合门未通过"
+                                    f"(rank_ic≥{min_rank_ic}, oos={rl.GATE_OOS_OK}, sharpe>0)"
+                                )
+                            else:
+                                post_reason = f"可信审计未通过({post_status})"
+                        audit_postseal = {
+                            "status": post_status,
+                            "passes_gate": post_passed,
+                            "reason": post_reason,
+                            "joint_gate": joint_gate,
+                            "node_errors": (post.get("node_errors") or [])[:5],
+                        }
+                        best_metrics = post_metrics or best_metrics
+                        if post_passed:
+                            pdiag, _ = _display_meta(
+                                best_round.round_index, best_round.candidate_hash,
+                                diag_by_hash, source_by_hash,
+                            )
+                            progress(
+                                phase="promote",
+                                label="⑥ 可信过拟合审计 PASS · 产物入库(draft 待人审)…",
+                                round_k=best_k,
+                            )
+                            promoted = rl._route_product(
+                                run_id, int(best_k), best_graph, goal, pdiag,
+                                post_metrics, post.get("terminal"), universe,
+                                node_errors=post.get("node_errors"),
+                            )
+                            ok, error, stop = True, None, "postseal_audit_pass"
+                        else:
+                            promoted = None
+                            if (post_status == "PASS"
+                                    and post_metrics.get("audit_passes_gate") is True):
+                                stop = "postseal_joint_gate_failed"
+                            elif post_status == "FAIL":
+                                stop = "postseal_audit_failed"
+                            else:
+                                stop = "postseal_audit_incomplete"
+                    except Exception as exc:  # noqa: BLE001 - audit must fail closed
+                        audit_postseal = {
+                            "status": "INCOMPLETE", "passes_gate": False,
+                            "reason": f"{type(exc).__name__}: {exc}",
+                        }
+                        promoted = None
+                        stop = "postseal_audit_error"
     ws = rl._save_graph(goal, run_id, best_graph) if best_graph is not None else None
 
     bm = best_metrics or {}
-    if promoted and promoted.get("status") in ("draft", "draft_compose", "draft_model"):
+    if promoted and promoted.get("status") in ("draft", "draft_structured", "draft_compose", "draft_model"):
         lesson = (f"研究「{goal[:40]}」{n}轮达标:{promoted['name']}(status={promoted['status']}) "
                   f"rank_ic={bm.get('rank_ic')} oos={bm.get('oos_verdict')} 已入draft待人审;"
                   f"诊断:{str(final_diag)[:80]}")
@@ -598,6 +819,12 @@ def run_research_optimize(
                   f"rank_ic={bm.get('rank_ic')} oos={bm.get('oos_verdict')}")
     elif error:
         lesson = f"研究「{goal[:40]}」{n}轮中断:{str(error)[:120]}"
+    elif audit_lineage_required:
+        lesson = (
+            f"研究「{goal[:40]}」{n}轮未晋级:过拟合审计"
+            f"{(audit_postseal or {}).get('status') or 'INCOMPLETE'};"
+            f"原因:{str((audit_postseal or {}).get('reason') or audit_context_error or '')[:120]}"
+        )
     else:
         lesson = (f"研究「{goal[:40]}」{n}轮未达标(门 rank_ic≥{min_rank_ic} 且 oos=robust):"
                   f"最佳 rank_ic={bm.get('rank_ic')} oos={bm.get('oos_verdict')};"
@@ -607,6 +834,17 @@ def run_research_optimize(
     end_row = {"run_id": run_id, "kind": "end", "ok": ok, "error": error,
                "n_rounds": n, "best_k": best_k, "best_metrics": (bm or None),
                "promoted": promoted, "workflow_saved": ws, "memory_written": mem_ok,
-               "rounds_recorded": rounds_ok, "stop_reason": stop, "ts": _now()}
+               "rounds_recorded": rounds_ok, "stop_reason": stop,
+               "audit_context": ({
+                   "context_id": audit_context.get("context_id"),
+                   "evidence_digest": audit_context.get("evidence_digest"),
+                   "family_id": audit_context.get("family_id"),
+                   "selected_trial_id": audit_context.get("selected_trial_id"),
+                   "n_trials": audit_context.get("n_trials"),
+                   "frequency": audit_context.get("frequency"),
+               } if audit_context is not None else None),
+               "audit_context_error": audit_context_error,
+               "audit_postseal": audit_postseal,
+               "ts": _now()}
     rstore.append_run(end_row)
     return end_row

@@ -12,7 +12,7 @@
 
 | 通道 | 方式 | 说明 |
 |---|---|---|
-| 帷幄 console | 9999 `/console` 会话 | 内置 agent,白名单 CONSOLE_ALLOWED = 101 工具(76 个 ww_* + 25 个精选引擎工具);写类工具走会话内确认弹窗 |
+| 帷幄 console | 9999 `/console` 会话 | 内置 agent,白名单 CONSOLE_ALLOWED = 102 工具(77 个 ww_* + 25 个精选引擎工具);写类工具走会话内确认弹窗 |
 | MCP over HTTP | `http://127.0.0.1:9999/gl-mcp/` | streamable-HTTP。**必须带尾斜杠**:裸 `/gl-mcp` 的 POST 会被 307 重定向,多数客户端握手即败 |
 | MCP over stdio | `python -m guanlan_v2.glmcp` | 本地客户端拉起;配置样例 guanlan_v2/glmcp/example.mcp.json |
 | 直连 HTTP | 见 §4 端点全集 | 127.0.0.1 无鉴权;协程内严禁同步 IO 的路由全部 `asyncio.to_thread` 包装 |
@@ -22,12 +22,13 @@
 - **生效条件**:改任何后端/工具表代码,必须重启 9999 才生效(杀进程后看门狗按 30s 巡检周期自动拉起,典型恢复 <1 分钟)。
 - 9999 上还挂着引擎自带 MCP(`/mcp`,20 个引擎研究工具),与 `/gl-mcp/` 并存、各管各的。
 
-## 2. MCP 工具总表(共 81 个,自动生成)
+## 2. MCP 工具总表(共 82 个,自动生成)
 
 | 工具 | 说明 | 成本 | 读写 | 触达端点 |
 |---|---|---|---|---|
 | `ww_factor_analyze` | 因子截面分析(真引擎 RankIC/分组/样本外体检)。输入 zoo 表达式。Cross-sectional factor IC analysis. | 秒级 | 只读 | `/factor/report2` |
 | `ww_backtest` | 因子向量化回测(分腿成本/定权/默认2年窗)。输入 zoo 表达式。Vector backtest with costs.注意参数名是 topn(小写),选股工具才是 topN。 | 秒级 | 只读 | `/backtest/vector` |
+| `ww_data_screen` | 数据筛选 Skill:把自然语言中的量价/技术/时序硬条件编译成受控规则,对真实股票池逐票计算并返回 ds_* run_id、真实 as_of、规则摘要、命中数和逐条件数值证据。『筛出/找出/沿均线/最近N日不破/满足若干数值条件的股票』优先用本工具；不要改用 ww_factor_analyze、ww_screen_run 或问财近似。内置 ma_trend 精确执行:价格在算术移动均线上、均线连续严格上升、窗口内最大连续跌破次数、乖离率区间。也可传 closed typed conditions(compare/strict_rise/max_consecutive/range)。默认全A当前上市公司快照、日线、20日平均成交额≥1亿元、剔ST/无截止日有效成交。 | 秒级 | 只读 | `/screen/data-screen` |
 | `ww_screen_run` | 九视角选股(v4 模型 + 因子混合 α)+ 约束。运行后自动把选股界面弹到右栏,无需再调 ww_show_page。factors 的 id 用 ww_screen_factors 查目录(传错会被静默忽略);不确定就传空 factors 纯 v4 跑。可选 model=变体 id(ww_model_list 查)用自训 v4 变体选股,省略=生产 prod。默认与选股页一致(pool=all·blend=1.0纯v4·topN=20·liqMin=5亿·剔ST/停牌/涨跌停·行业中性)。Stock screening. | 秒级 | 只读 | `/screen/run` |
 | `ww_screen_factors` | 列出选股因子目录(/screen/factors 的合法 id + 名称 + 实测RankIC),供 ww_screen_run 的 factors 取 id。想做因子混合(blend<1)选股前先用它查 id,避免传错被静默忽略。可选 family 过滤。 | 即时 | 只读 | `/screen/factors` |
 | `ww_model_list` | 列出已训练的 v4 模型变体(id+名称+留出OOS IC+特征数),供 ww_screen_run 的 model 取 id。用户问『有哪些(自训)模型/变体』或要用变体选股前先调它查 id。生产 v4 隐含=prod 不在此列。 | 即时 | 只读 | `/screen/models` |
@@ -65,7 +66,7 @@
 | `ww_workflow_critique` | AI 批判环:给出研究目标+当前工作流 graph({nodes,edges})+该图真实回测指标,LLM 诊断问题并产改进图(LLM 不可用时规则兜底,来源诚实标注)。注意:指标由调用方自报,后端不复算(后端自算走 ww_research_loop)。 | 秒级 | 只读 | `/workflow/critique` |
 | `ww_regen` | 三产物再生(breadth/mainline/v4 排名重算,即选股页『拉取最新数据』):后台子进程 ~5 分钟,单飞锁防并发;wait=true(默认)轮询到完成并报新数据日。更完行情(ww_update_data)后要选股吃到新数据,必须跑它。需用户确认。 | 分钟级 | 写(锁) | `/screen/regen` `/screen/regen/status` |
 | `ww_picks_perf` | 查正式选股成绩单:读 picks 档案(snapshot 行),算该篮子前向持有收益 vs 全A等权基准(收盘进/收盘出,与置信校准同口径)。默认最新一次正式选股;date 可选某天;未成熟票诚实标注,基准缺失显形 null。 | 秒级 | 只读 | `/screen/picks` `/seats/basket_perf` |
-| `ww_research_loop` | 自主研究回路(P2):goal 一句话 → 后端 LLM 生成因子工作流 → 真算指标(RankIC/样本外)→ 未达标 LLM 批判改进 → 循环(服务端钳 ≤5 轮)。达标单因子自动存 factorlib 为 draft(不上选股货架,人审 ww_factor_promote/选股页待审区转正);逐轮落档;最佳图存工作流库。花 LLM 钱+可能写 draft,需确认。 | 分钟级 | 写(锁) | `/research/loop/start` `/research/loop/status` `/research/runs` |
+| `ww_research_loop` | 受治理自主研究回路(P2):goal 一句话 → 后端 LLM 生成因子工作流 → 真算指标(RankIC/样本外)→ 未达标 LLM 批判改进 → 循环(服务端钳 ≤5 轮)。达标单因子自动存 factorlib 为 draft(不上选股货架,人审 ww_factor_promote/选股页待审区转正);结构化因子按完整处理链保存。若图声明过拟合审计,必须由 TrialLedger 封存完整试验家族并在服务端固定策略下 PASS;逐轮落档;最佳图存工作流库。花 LLM 钱+可能写 draft,需确认。 | 分钟级 | 写(锁) | `/research/loop/start` `/research/loop/status` `/research/runs` |
 | `ww_research_runs` | 研究回路档案:无 run_id 列近期 run(状态/轮数/最佳指标/draft 名);带 run_id 出逐轮详情(诊断/指标/过门;规则兜底轮有「非 LLM」标注)。复盘研究成绩用它。 | 即时 | 只读 | `/research/runs` `/research/rounds` |
 | `ww_factor_drafts` | 列待审 draft 因子(P3:研究回路达标产物,未上选股货架):名/IC快照/表达式。用户问『有哪些待审因子/研究回路产出了什么』用它;转正走 ww_factor_promote(需确认)。 | 即时 | 只读 | `/factorlib/list` |
 | `ww_factor_promote` | draft 因子人审转正(P3,上选股货架):摘 status → 下次选股目录热刷新可见。我只能提请,用户确认后才执行;幂等,not_found 诚实失败。 | 秒级 | 写(锁) | `/factorlib/promote` |
@@ -130,7 +131,7 @@
 | 数据健康总闸 | `ww_data_health` · `/data/health` | 汇总全部数据面(项数以 /data/health 实答为准) | 即时探测 | overall=数据项最差;运维项(datafeed/health.py `_OPS_ITEMS`,含 probe_worker 通道自检)自身显形但不拖 overall |
 | 盘后晨报 | `ww_review_report` · `/autonomy/report/latest` | 盘后复盘官(autonomy)产物 | var 落盘,日更 | 五段:A/B 成绩单/落子复盘/数据巡检/综合晨报/批判;另三职责:大盘判读日更/蒸馏草稿/macro 快照搭车 |
 
-## 4. 工具触达 HTTP 端点全集(共 57 条,自动生成)
+## 4. 工具触达 HTTP 端点全集(共 58 条,自动生成)
 
 以下为各工具 `reachable` 声明的并集(即 agent 经工具间接触达的后端面):
 
@@ -148,7 +149,7 @@
 - **/openapi.json**:`/openapi.json`
 - **/orchestration**:`/orchestration/pipeline/runs` `/orchestration/pipeline/screening/latest` `/orchestration/pipeline/start` `/orchestration/pipeline/state` `/orchestration/pipeline/ta_ingest`
 - **/research**:`/research/loop/start` `/research/loop/status` `/research/rounds` `/research/runs`
-- **/screen**:`/screen/base_features` `/screen/factors` `/screen/health` `/screen/model/default` `/screen/model/delete` `/screen/model/train` `/screen/model/validate` `/screen/model/validate/status` `/screen/models` `/screen/picks` `/screen/regen` `/screen/regen/status` `/screen/rescore` `/screen/rescore/latest` `/screen/rescore/status` `/screen/run`
+- **/screen**:`/screen/base_features` `/screen/data-screen` `/screen/factors` `/screen/health` `/screen/model/default` `/screen/model/delete` `/screen/model/train` `/screen/model/validate` `/screen/model/validate/status` `/screen/models` `/screen/picks` `/screen/regen` `/screen/regen/status` `/screen/rescore` `/screen/rescore/latest` `/screen/rescore/status` `/screen/run`
 - **/seats**:`/seats/basket_perf` `/seats/calibration` `/seats/decide` `/seats/decisions` `/seats/ledger/state` `/seats/orderbook` `/seats/runs` `/seats/ticks` `/seats/watch/assignments` `/seats/watch/assignments/{code}`
 - **/workflow**:`/workflow/compose` `/workflow/critique`
 

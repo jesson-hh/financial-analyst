@@ -527,6 +527,47 @@ def test_send_runs_turn_and_persists_events(tmp_path):
     assert store.get_meta(sid)["plan"][0]["text"] == "回测"
 
 
+def test_pro_reasoning_only_completion_is_never_a_silent_success(tmp_path, monkeypatch):
+    """A provider ``done`` without public text must become an explicit failure."""
+    import guanlan_v2.console.api as capi
+
+    class EmptyAgent:
+        def __init__(self):
+            self.messages = []
+
+        async def run_turn(self, text, confirm_callback=None, allowed_tools=None):
+            yield _Evt("done", None)
+
+    monkeypatch.setattr(capi, "_client_for_thinking_mode", lambda _mode: None)
+    app = FastAPI()
+    store = ConsoleStore(root=tmp_path)
+    app.include_router(build_console_router(
+        store=store, agent_factory=lambda _sid: EmptyAgent(),
+    ))
+
+    with TestClient(app) as c:
+        sid = c.post("/console/sessions", json={}).json()["meta"]["id"]
+        sent = c.post("/console/send", json={
+            "sid": sid, "text": "深度筛选", "thinking_mode": "pro",
+        }).json()
+        assert sent["ok"] is True
+        events = []
+        for _ in range(50):
+            events = store.read_events(sid)
+            if any(e["type"] == "task_update" and e.get("status") == "done"
+                   for e in events):
+                break
+            time.sleep(0.1)
+
+    deltas = [e.get("text", "") for e in events if e["type"] == "agent_delta"]
+    assert any("Pro 深度思考本轮没有返回可展示内容" in text for text in deltas)
+    assert any(e["type"] == "task_update" and e.get("status") == "error"
+               and e.get("empty_response") is True for e in events)
+    done = [e for e in events
+            if e["type"] == "task_update" and e.get("status") == "done"][-1]
+    assert done["ok"] is False
+
+
 def test_sessions_patch_rename_group(tmp_path):
     c, store = _client(tmp_path)
     sid = c.post("/console/sessions", json={"title": "原名"}).json()["meta"]["id"]
@@ -2069,10 +2110,10 @@ def test_bg_kinds_includes_review():
     assert "review" in capi._BG_KINDS
 
 
-def test_review_mode_default_off(monkeypatch):
+def test_review_mode_default_enforce(monkeypatch):
     import guanlan_v2.console.api as capi
     monkeypatch.delenv("CONSOLE_REVIEW_MODE", raising=False)
-    assert capi._review_mode() == "off"
+    assert capi._review_mode() == "enforce"
     # 非法值降级 off;monitor / enforce 透传
     monkeypatch.setenv("CONSOLE_REVIEW_MODE", "weird")
     assert capi._review_mode() == "off"

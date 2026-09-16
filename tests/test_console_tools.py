@@ -1,4 +1,6 @@
 """console 工具纯逻辑:plan 校验、指标摘要、artifact 信封。不 import 引擎。"""
+import pytest
+
 from guanlan_v2.console.store import ConsoleStore
 from guanlan_v2.console import tools as ct
 
@@ -94,6 +96,120 @@ def test_screen_impl(monkeypatch):
     assert res["ok"] is True and "坤恒顺维" in res["content"]
     assert res["artifact"]["channel"] == "screen"
     assert res["artifact"]["payload"]["cfg"]["topN"] == 20
+
+
+def test_data_screen_impl_uses_direct_skill_and_returns_auditable_summary(monkeypatch):
+    sent = {}
+    fake = {
+        "ok": True,
+        "run_id": "ds_0123456789abcdef",
+        "as_of": "2026-08-21",
+        "requested_as_of": "2026-08-23",
+        "spec_digest": "a" * 64,
+        "universe": {"id": "all_a", "label": "全A", "n_resolved": 5200},
+        "n_loaded": 5100,
+        "n_matched": 1,
+        "compiled_spec": {"rules": [{"id": "price_above_ma", "label": "收盘价高于5日均线"}]},
+        "candidates": [{
+            "rank": 1, "code": "SH600001", "name": "密封样本", "score": 98.2,
+            "close": 10.1, "avg_amount_yi": 2.3,
+            "evidence": {"ma_bias_range": {"value": 0.005}},
+        }],
+        "warnings": ["截止日已回落"],
+    }
+
+    def fake_post(path, payload, timeout=120):
+        sent.update({"path": path, "payload": payload, "timeout": timeout})
+        return fake
+
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    result = ct.data_screen_impl(
+        universe="all_a", as_of="2026-08-23", topN=5,
+        ma_window=5, rising_transitions=3, below_lookback=5,
+        max_consecutive_below=1, min_bias=0.0, max_bias=0.03,
+    )
+
+    assert sent["path"] == "/screen/data-screen" and sent["timeout"] == 300
+    assert sent["payload"]["selector"]["preset"] == "ma_trend"
+    assert sent["payload"]["selector"]["params"]["rising_transitions"] == 3
+    assert sent["payload"]["filters"]["min_avg_amount_yuan"] == 100_000_000.0
+    assert result["ok"] is True
+    assert "ds_0123456789abcdef" in result["content"]
+    assert "as_of=2026-08-21" in result["content"] and "密封样本" in result["content"]
+    assert result["artifact"]["kind"] == "data_screen_result"
+    assert result["artifact"]["ref"] == "ds_0123456789abcdef"
+
+
+def test_data_screen_custom_close_range_summary_is_not_formatted_as_percent():
+    summary = ct.summarize_data_screen({
+        "ok": True,
+        "run_id": "ds_custom_close",
+        "as_of": "2026-08-21",
+        "requested_as_of": "2026-08-21",
+        "source_selector": {"conditions": [{"id": "close_band"}]},
+        "spec_digest": "b" * 64,
+        "universe": {"id": "explicit", "label": "自定义池", "n_resolved": 1},
+        "n_loaded": 1,
+        "n_matched": 1,
+        "compiled_spec": {
+            "filters": {"amount_window": 5},
+            "rules": [{
+                "id": "close_band", "label": "收盘价区间", "type": "range",
+                "value": {"type": "field", "field": "close"},
+                "min": 9.0, "max": 11.0,
+            }],
+        },
+        "candidates": [{
+            "rank": 1, "code": "SH600001", "name": "密封样本",
+            "score": 1.0, "close": 10.0, "avg_amount_yi": 2.0,
+            "evidence": {"close_band": {
+                "passed": True, "value": 10.0, "min": 9.0, "max": 11.0,
+            }},
+        }],
+    })
+
+    assert "10.0000 ∈ [9.0000, 11.0000]" in summary
+    assert "1000.000%" not in summary and "900.000%" not in summary
+    assert "5日均额=2.0亿" in summary
+
+
+def test_data_screen_share_evidence_keeps_narrow_values_distinct():
+    field = {"type": "field", "field": "volume"}
+    range_rule = {"type": "range", "value": field}
+    compare_rule = {"type": "compare", "left": field, "right": field, "op": "<"}
+
+    narrow_range = ct._format_data_screen_evidence(
+        range_rule, {"value": 12_000, "min": 11_999, "max": 12_001},
+    )
+    narrow_compare = ct._format_data_screen_evidence(
+        compare_rule, {"left": 11_999, "right": 12_001, "op": "<"},
+    )
+    wide_range = ct._format_data_screen_evidence(
+        range_rule, {"value": 1_500_000, "min": 1_000_000, "max": 2_000_000},
+    )
+
+    assert narrow_range == "12,000股 ∈ [11,999股, 12,001股]"
+    assert narrow_compare == "11,999股 < 12,001股"
+    assert wide_range == "150.000万股 ∈ [100.000万股, 200.000万股]"
+
+
+@pytest.mark.parametrize("kwargs, expected", [
+    ({"excludeST": "false"}, "excludeST 必须是布尔值"),
+    ({"requireAsOfTrade": "false"}, "requireAsOfTrade 必须是布尔值"),
+    ({"requireStrictMetadataPIT": 0}, "requireStrictMetadataPIT 必须是布尔值"),
+    ({"min_avg_amount_yi": "1"}, "min_avg_amount_yi 必须是有限数值"),
+    ({"topN": 5.9}, "topN 必须是整数"),
+    ({"codes": "SH600001"}, "codes 必须是数组"),
+])
+def test_data_screen_console_adapter_rejects_coercions_before_http(
+        monkeypatch, kwargs, expected):
+    monkeypatch.setattr(ct, "_self_post", lambda *args, **kwargs: pytest.fail(
+        "invalid adapter input must not reach HTTP"
+    ))
+    result = ct.data_screen_impl(**kwargs)
+
+    assert result["ok"] is False and result["artifact"] is None
+    assert expected in result["content"]
 
 
 def test_reports_query_impl_reads_store(tmp_path, monkeypatch):
@@ -1436,8 +1552,9 @@ def test_ww_reachable_endpoints_matches_expected():
     import guanlan_v2.console.tools as ct
     expected = {
         "/factor/report2",    # ww_factor_analyze
-        "/backtest/vector",   # ww_backtest
-        "/screen/run",        # ww_screen_run
+            "/backtest/vector",   # ww_backtest
+            "/screen/data-screen", # ww_data_screen
+            "/screen/run",        # ww_screen_run
         "/screen/factors",    # ww_screen_factors
         "/seats/decide",      # ww_seats_decide
         "/seats/calibration", # ww_seats_decide(置信校准附注)
@@ -1461,6 +1578,14 @@ def test_ww_reachable_endpoints_matches_expected():
         "/screen/health",         # ww_model_health
         "/factor/tsic",           # ww_factor_tsic
         "/workflow/critique",     # ww_workflow_critique
+        "/workflow/generate",     # workspace-bound whole-graph authoring
+        "/workflow/validate",
+        "/workflow/list",
+        "/workflow/get/{wid}",
+        "/workflow/save",
+        "/workflow/run/start",
+        "/workflow/run/list",
+        "/workflow/run/status/{run_id}",
         "/screen/regen",          # ww_regen(触发)
         "/screen/regen/status",   # ww_regen(wait 轮询)
         "/seats/basket_perf",     # ww_picks_perf(P1 成绩单)+ww_rerank_perf(P6′ A/B 成绩单,kind=rerank_ab)
@@ -1610,6 +1735,15 @@ def test_memory_write_review_path_sanitizes(tmp_path, monkeypatch):
     # 落盘文本(去掉 "- [date] " 前缀后)被截断到 280 字
     written = lines[0].split("] ", 1)[1] if "] " in lines[0] else lines[0]
     assert len(written) <= 280
+
+
+def test_memory_write_normal_path_also_sanitizes_multiline(tmp_path, monkeypatch):
+    """逐行记忆协议对主 agent 与 reviewer 使用同一安全归一化。"""
+    import guanlan_v2.console.tools as ct
+    monkeypatch.setattr(ct, "_MEMORY_PATH", tmp_path / "memory.md")
+    assert ct.memory_write_impl(text="第一行\n第二行\r第三行", scope="global")["ok"]
+    rows = (tmp_path / "memory.md").read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 1 and "第一行 第二行 第三行" in rows[0]
 
 
 # ── 阶段2:记忆有界化 — 通用上限 cap + 同 key replace 收敛 ──
@@ -1994,6 +2128,7 @@ def test_research_loop_impl_start_and_wait(monkeypatch):
 
     def fake_post(path, payload, timeout=120):
         assert path == "/research/loop/start" and payload["goal"] == "找一个短周期反转因子"
+        assert payload["governed"] is True
         return {"ok": True, "started": True, "run_id": "rr_ab12cd34ef", "state": {"running": True}}
 
     def fake_get(path, timeout=30):

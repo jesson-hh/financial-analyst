@@ -395,7 +395,12 @@ def create_app():
         async with _prev_lifespan(_app):
             async with _gl_mcp_app.router.lifespan_context(_gl_mcp_app):
                 import asyncio as _aio
-                _revive = _aio.create_task(_checker_revive_loop())   # 互拉守望(见函数 docstring)
+                # Production keeps the mutual watchdog on by default.  Isolated
+                # dev/E2E servers must be able to opt out, otherwise merely
+                # starting port 9998 can spawn the production 9999 checker.
+                _revive = (_aio.create_task(_checker_revive_loop())
+                           if os.environ.get("GUANLAN_CHECKER_REVIVE", "1") != "0"
+                           else None)
                 # 后端定时盯盘(2026-07-11 落子改造 Task 1;opt-in:GUANLAN_SEATS_WATCH=1 才起)。
                 # enabled 开关持久化在 var/seats_watch.json → 重启自恢复;tick 内 LLM/取数全走
                 # to_thread(run_loop 只 await asyncio.to_thread(tick)),绝不堵事件循环。
@@ -502,7 +507,8 @@ def create_app():
                         _seats_watch.cancel()
                     if _events_ingest is not None:
                         _events_ingest.cancel()
-                    _revive.cancel()
+                    if _revive is not None:
+                        _revive.cancel()
 
     app.router.lifespan_context = _composed_lifespan
     app.mount("/gl-mcp", _gl_mcp_app)

@@ -1,7 +1,7 @@
 // console-workspace-dock.jsx — 研究空间右侧 Dock。
 // 总览/研究/盯盘读取真实 workspace API；文件/Agent 只读取后端能力，失败显示诚实空态。
 const WW_DOCK_TABS = [
-  ['overview', '总览'], ['research', '研究'], ['files', '文件'], ['agent', 'Agent'], ['watch', '盯盘'],
+  ['overview', '总览'], ['research', '研究'], ['files', '文件'], ['agent', 'Agent'], ['watch', '盯盘'], ['memory', '记忆'],
 ];
 
 function WwDockEmpty({ title, note, action, onAction }) {
@@ -371,7 +371,7 @@ function WwWorkspaceAgent({ workspace, data, loading, onAgentMode, modeNote }) {
   );
 }
 
-function WwWorkspaceDock({ workspace, sessions, open, narrow, onToggle, onClose, onOpenStage, onWorkspaceChanged }) {
+function WwWorkspaceDock({ workspace, sessions, sessionId, open, narrow, onToggle, onClose, onOpenStage, onWorkspaceChanged }) {
   const [tab, setTab] = React.useState('overview');
   const [assets, setAssets] = React.useState(null);
   const [files, setFiles] = React.useState(null);
@@ -427,7 +427,7 @@ function WwWorkspaceDock({ workspace, sessions, open, narrow, onToggle, onClose,
       }
       first = false;
     };
-    if (tab !== 'overview') {
+    if (['research', 'files', 'agent', 'watch'].indexOf(tab) >= 0) {
       load();
       timer = setInterval(load, tab === 'agent' || tab === 'watch' ? 5000 : 12000);
     }
@@ -494,19 +494,20 @@ function WwWorkspaceDock({ workspace, sessions, open, narrow, onToggle, onClose,
       setAgentModeNote({ ok: true, text: 'Agent 模式已更新' });
     } else setAgentModeNote({ ok: false, text: (d && d.reason) || 'Agent 模式更新失败' });
   };
-  if (!open) return <button onClick={onToggle} title="展开研究空间 Dock" style={{ position: 'fixed', right: 9, top: 50, zIndex: 20, border: '1px solid var(--ink)', background: 'var(--paper)', color: 'var(--ink)', padding: '7px 8px', cursor: 'pointer', writingMode: 'vertical-rl', letterSpacing: 2, fontFamily: 'var(--serif)' }}>研究空间</button>;
+  if (!open) return <button onClick={onToggle} title="展开研究空间与记忆中心" style={{ position: 'fixed', right: 9, top: 50, zIndex: 20, border: '1px solid var(--ink)', background: 'var(--paper)', color: 'var(--ink)', padding: '7px 8px', cursor: 'pointer', writingMode: 'vertical-rl', letterSpacing: 2, fontFamily: 'var(--serif)' }}>研究 · 记忆</button>;
   const switchTab = (nextTab) => { if (nextTab !== 'files') invalidateFilePreview(); setTab(nextTab); };
   const body = tab === 'overview' ? <WwWorkspaceOverview workspace={workspace} sessions={sessions} onOpenStage={onOpenStage} onBindFolder={bindFolder} folderNote={folderNote} />
     : tab === 'research' ? <WwWorkspaceResearch data={assets} loading={loading.research} onOpenStage={onOpenStage} />
     : tab === 'files' ? <WwWorkspaceFiles workspace={workspace} data={files} loading={loading.files} path={filePath} onOpenPath={openFilePath} onOpenFile={openFile} preview={filePreview} previewLoading={fileLoading} onCloseFile={invalidateFilePreview} />
     : tab === 'agent' ? <WwWorkspaceAgent workspace={workspace} data={runs} loading={loading.agent} onAgentMode={setAgentMode} modeNote={agentModeNote} />
-    : <WwWorkspaceWatch workspace={workspace} data={watch} loading={loading.watch} onOpenStage={onOpenStage} />;
+    : tab === 'watch' ? <WwWorkspaceWatch workspace={workspace} data={watch} loading={loading.watch} onOpenStage={onOpenStage} />
+    : <WwMemoryCenter workspaceId={wid} sessionId={sessionId} />;
   return (
     <React.Fragment>
       {narrow && <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 51, background: 'rgba(28,24,20,.20)' }} />}
       <aside className={narrow ? 'ww-workspace-dock ww-workspace-dock-drawer' : 'ww-workspace-dock'} style={{ zIndex: narrow ? 52 : 2, borderLeft: '1px solid var(--line)', background: 'var(--paper)', display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 }}>
         <div style={{ height: 38, flexShrink: 0, display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--line)', padding: '0 8px' }}>
-          {WW_DOCK_TABS.map(t => <span key={t[0]} onClick={() => switchTab(t[0])} style={{ padding: '11px 8px 8px', cursor: 'pointer', fontSize: 11.5, color: tab === t[0] ? 'var(--ink)' : 'var(--ink-3)', borderBottom: '2px solid ' + (tab === t[0] ? 'var(--yin)' : 'transparent'), marginBottom: -1 }}>{t[1]}</span>)}
+          {WW_DOCK_TABS.map(t => <span key={t[0]} onClick={() => switchTab(t[0])} style={{ padding: '11px 6px 8px', cursor: 'pointer', fontSize: 11.5, color: tab === t[0] ? 'var(--ink)' : 'var(--ink-3)', borderBottom: '2px solid ' + (tab === t[0] ? 'var(--yin)' : 'transparent'), marginBottom: -1 }}>{t[1]}</span>)}
           <span onClick={onClose} title={narrow ? '关闭' : '收起'} style={{ marginLeft: 'auto', color: 'var(--ink-3)', cursor: 'pointer', padding: 6 }}>✕</span>
         </div>
         <div style={{ flex: 1, minHeight: 0 }}>{body}</div>
@@ -515,12 +516,31 @@ function WwWorkspaceDock({ workspace, sessions, open, narrow, onToggle, onClose,
   );
 }
 
-function WwWorkspaceStage({ page, workspaceId, load, asset, code, name, focus, readOnly, onBack }) {
+function WwWorkspaceStage({ page, workspaceId, sessionId, load, run, workflowImport, importToken, asset, code, name, focus, readOnly, onBack }) {
+  const frameRef = React.useRef(null);
+  const sendWorkflow = () => {
+    if (workflowImport && importToken && frameRef.current && frameRef.current.contentWindow) {
+      frameRef.current.contentWindow.postMessage({ type: 'guanlan.workflow.import', token: importToken, payload: workflowImport }, location.origin);
+    }
+  };
+  React.useEffect(() => {
+    const backToChat = (event) => {
+      if (event.origin !== location.origin || !event.data) return;
+      if (!frameRef.current || frameRef.current.contentWindow !== event.source) return;
+      if (event.data.type === 'guanlan.workflow.ready' && event.data.token === importToken) { sendWorkflow(); return; }
+      if (event.data.type !== 'guanlan:ww:back-to-conversation') return;
+      if (onBack) onBack();
+    };
+    window.addEventListener('message', backToChat);
+    return () => window.removeEventListener('message', backToChat);
+  }, [onBack, workflowImport, importToken]);
   const p = window.WW.PAGES[page];
   const stageWid = workspaceId || 'rw_general';
   const stageCode = page === 'seats' ? wwWatchCode(code) : '';
   const stageFocus = page === 'seats' && focus === 'watch' ? 'watch' : '';
-  const tail = (asset ? '&asset=' + encodeURIComponent(asset) : (load ? '&load=' + encodeURIComponent(load) : ''))
+  const tail = (run ? '&run=' + encodeURIComponent(run) : asset ? '&asset=' + encodeURIComponent(asset) : (load ? '&load=' + encodeURIComponent(load) : ''))
+    + (workflowImport ? '&import=' + encodeURIComponent(importToken) : '')
+    + (sessionId ? '&session_id=' + encodeURIComponent(sessionId) : '')
     + (stageCode ? '&code=' + encodeURIComponent(stageCode) : '')
     + (stageFocus ? '&focus=' + encodeURIComponent(stageFocus) : '')
     + (readOnly ? '&readonly=1' : '');
@@ -548,9 +568,9 @@ function WwWorkspaceStage({ page, workspaceId, load, asset, code, name, focus, r
         <span style={{ color: 'var(--line)' }}>|</span><span style={{ fontFamily: 'var(--serif)', fontWeight: 600 }}>{p.label} · 全宽研究台</span>
         {stageCode && <span className="mono" style={{ color: 'var(--ink-3)', fontSize: 9.5 }}>{stageCode}</span>}
         <span style={{ marginLeft: 'auto', color: 'var(--ink-3)', fontSize: 10 }}>左侧空间树已保留</span>
-        <button onClick={openExternal} style={{ border: '1px solid var(--line)', background: 'var(--paper)', color: 'var(--ink-2)', cursor: 'pointer', padding: '4px 8px' }}>独立窗口 ↗</button>
+        <button disabled={!!workflowImport} title={workflowImport ? '未保存的图请先存入工作流库，再从历史列表打开独立窗口' : ''} onClick={openExternal} style={{ border: '1px solid var(--line)', background: 'var(--paper)', color: 'var(--ink-2)', cursor: workflowImport ? 'not-allowed' : 'pointer', padding: '4px 8px' }}>独立窗口 ↗</button>
       </div>
-      <iframe src={src} title={p.label} style={{ flex: 1, minHeight: 0, width: '100%', border: 0, background: 'var(--paper)' }} />
+      <iframe ref={frameRef} src={src} onLoad={sendWorkflow} title={p.label} style={{ flex: 1, minHeight: 0, width: '100%', border: 0, background: 'var(--paper)' }} />
     </div>
   );
 }

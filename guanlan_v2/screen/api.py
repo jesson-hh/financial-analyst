@@ -24,7 +24,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt, StrictStr
+try:  # Pydantic v2; v1 falls back to the inner Config class below.
+    from pydantic import ConfigDict
+except ImportError:  # pragma: no cover - exercised only by legacy deployments
+    ConfigDict = None  # type: ignore[assignment,misc]
 
 
 # 因子目录(服务端):id → {expr(预定向 zoo-DSL), dir, short, family, desc}。
@@ -61,6 +65,32 @@ class ScreenIn(BaseModel):
     freq: str = "day"
     snapshot: bool = False       # P0:标记「正式选股」落 picks 档案(P1 收益跟踪只认 snapshot 行)
     note: Optional[str] = None   # P0:选股备注,随 picks 档案落盘
+
+
+class DataScreenIn(BaseModel):
+    """``POST /screen/data-screen`` — deterministic data-screening Skill.
+
+    ``selector`` accepts either a preset or closed typed conditions.  It is
+    deliberately separate from :class:`ScreenIn`: this path evaluates the
+    resolved universe directly and never consumes the v4 ranking candidate pool.
+    """
+
+    if ConfigDict is not None and hasattr(BaseModel, "model_validate"):
+        model_config = ConfigDict(extra="forbid")
+    else:  # pragma: no cover - Pydantic v1 compatibility
+        class Config:
+            extra = "forbid"
+
+    universe: StrictStr = "all_a"
+    codes: List[StrictStr] = Field(default_factory=list)
+    freq: StrictStr = "day"
+    as_of: Optional[StrictStr] = None
+    top_n: StrictInt = 5
+    selector: Dict[str, Any] = Field(
+        default_factory=lambda: {"preset": "ma_trend", "params": {}}
+    )
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    score: Optional[Dict[str, Any]] = None
 
 
 class LLMIn(BaseModel):
@@ -1308,6 +1338,35 @@ def build_screen_router() -> APIRouter:
     """选股自有路由组(prefix ``/screen``)。随 cards/seats/factorlib/workflow 工厂式。"""
     router = APIRouter(prefix="/screen", tags=["screen"])
 
+    @router.post("/data-screen")
+    def data_screen_run(body: DataScreenIn):
+        """Run the direct data-screening Skill and persist a ``ds_*`` record."""
+        try:
+            from guanlan_v2.screen.data_screen import run_data_screen
+            payload = (body.model_dump(exclude_none=True)
+                       if hasattr(body, "model_dump") else body.dict(exclude_none=True))
+            return JSONResponse(run_data_screen(payload))
+        except Exception as exc:  # noqa: BLE001 — store/bootstrap failures must be visible
+            return JSONResponse({"ok": False, "status": "error", "run_id": None,
+                                 "reason": f"{type(exc).__name__}: {exc}"[:1000],
+                                 "candidates": []})
+
+    @router.get("/data-screen/status/{run_id}")
+    def data_screen_status(run_id: str):
+        """Read one durable direct-run record without recomputing its result."""
+        try:
+            from guanlan_v2.screen.data_screen import read_data_screen_run
+            record = read_data_screen_run(run_id)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "reason": str(exc)}, status_code=400)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}"},
+                                status_code=503)
+        if record is None:
+            return JSONResponse({"ok": False, "reason": "data-screen run 不存在"},
+                                status_code=404)
+        return JSONResponse({"ok": True, **record})
+
     @router.get("/regime")
     def screen_regime():
         """因子族 regime 只读:各族 p_fav/confirmed_since + 激活闸状态(前端因子卡/帷幄消费)。
@@ -1784,6 +1843,8 @@ def build_screen_router() -> APIRouter:
             return JSONResponse({"ok": False, "reason": "已有训练在跑", "state": _model_public_state()})
         spec = {"variant_id": vid, "name": name, "factor_ids": fids, "base_features": base,
                 "universe": str(body.get("universe") or "all"), "created": _time_iso()}
+        if body.get("candidate_only") is True:
+            spec["status"] = "draft"
         _threading.Thread(target=lambda: _safe(lambda: _run_model_train_subprocess(spec)), daemon=True).start()
         return JSONResponse({"ok": True, "started": True, "variant_id": vid, "state": _model_public_state()})
 

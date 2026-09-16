@@ -1,6 +1,6 @@
 """v4 变体注册表:models/<id>/{v4_ranking.parquet, meta.json}。生产 v4=prod(只读老路径,不在此)。"""
 from __future__ import annotations
-import json, os, shutil
+import hashlib, json, os, pickle, shutil
 from typing import Any, Dict, List
 from guanlan_v2.strategy.paths import MODELS_DIR
 
@@ -33,7 +33,20 @@ def validate_ranking(df) -> None:
 
 
 def _dir(vid): return MODELS_DIR / vid
-def variant_ranking_path(vid): return _dir(vid) / RANKING_FILE
+def variant_ranking_path(vid):
+    directory = _dir(vid)
+    meta_path = directory / "meta.json"
+    if meta_path.exists():
+        try:
+            artifact = json.loads(meta_path.read_text(encoding="utf-8")).get("ranking_artifact") or {}
+        except (ValueError, OSError, AttributeError):
+            artifact = {}
+        name = str(artifact.get("file") or "")
+        if name:
+            if os.path.basename(name) != name or "/" in name or "\\" in name:
+                raise ValueError("ranking artifact 路径非法")
+            return directory / name
+    return directory / RANKING_FILE
 
 
 def variant_meta(vid) -> Dict[str, Any]:
@@ -43,15 +56,102 @@ def variant_meta(vid) -> Dict[str, Any]:
     return _normalize_meta(json.loads(p.read_text(encoding="utf-8")))
 
 
-def save_variant(vid, ranking_df, meta) -> None:
+def _file_sha256(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _content_version(meta, ranking_hash, estimator_hash=None):
+    core = {key: meta.get(key) for key in (
+        "kind", "recipe", "asof", "base_features", "factor_ids", "hyper",
+        "training_provenance", "estimator_artifact")}
+    core["ranking_sha256"] = ranking_hash
+    if estimator_hash is not None:
+        core["estimator_actual_sha256"] = estimator_hash
+    return "mv_" + hashlib.sha256(json.dumps(core, sort_keys=True, ensure_ascii=False,
+                                             default=str).encode()).hexdigest()
+
+
+def current_model_version(vid) -> str | None:
+    """Bind validation to model content, not a mutable human-readable id.
+
+    Hash the current ranking bytes AND estimator/recipe/evidence identity.
+    Legacy models remain versionable but are not thereby PIT-certified.
+    """
+    if vid in (None, "", "prod"):
+        from guanlan_v2.strategy import paths
+        ranking, meta = paths.V4_RANKING_PARQUET, {"kind": "v4-lgb"}
+    else:
+        ranking, meta = variant_ranking_path(vid), variant_meta(vid)
+    if not ranking.exists():
+        return None
+    estimator_hash = None
+    est = meta.get("estimator_artifact") or {}
+    if est.get("available") and vid not in (None, "", "prod"):
+        ep = _dir(vid) / str(est.get("file", ""))
+        if ep.parent.resolve() != _dir(vid).resolve() or not ep.is_file():
+            return None
+        estimator_hash = _file_sha256(ep)
+    return _content_version(meta, _file_sha256(ranking), estimator_hash)
+
+
+def save_variant(vid, ranking_df, meta, *, estimator=None, preprocessing=None) -> None:
     validate_ranking(ranking_df)
+    dr, mr = _dir(vid).resolve(), MODELS_DIR.resolve()
+    if dr == mr or mr not in dr.parents or vid == "prod":
+        raise ValueError("变体保存路径非法，不能覆盖生产 prod")
     d = _dir(vid); d.mkdir(parents=True, exist_ok=True)
-    pq = variant_ranking_path(vid); tmp = str(pq) + ".tmp"
-    ranking_df.to_parquet(tmp, index=False); os.replace(tmp, str(pq))
+    out = _normalize_meta(meta)
+    if estimator is not None:
+        try:
+            # Only locally trained estimators are serialised. No pickle-loading
+            # endpoint is introduced; never unpickle untrusted uploads.
+            payload = pickle.dumps({"estimator": estimator,
+                                    "preprocessing": preprocessing or {}}, protocol=5)
+            digest = hashlib.sha256(payload).hexdigest()
+            ep = d / f"estimator_{digest[:20]}.pkl"
+            etmp = str(ep) + ".tmp"
+            with open(etmp, "wb") as stream:
+                stream.write(payload)
+            os.replace(etmp, ep)
+            out["estimator_artifact"] = {"available": True, "file": ep.name,
+                                         "sha256": digest, "format": "trusted-local-pickle-v1"}
+        except Exception as exc:
+            # Ranking still usable; absence must remain explicit, never claim
+            # a persisted estimator merely because a ranking was saved.
+            out["estimator_artifact"] = {"available": False,
+                                         "reason": f"{type(exc).__name__}: {exc}"}
+            out["status"] = "draft"
+    else:
+        out.setdefault("estimator_artifact", {"available": False, "reason": "ranking-only"})
+    # Stage content-addressed artifacts first. A single metadata replacement is
+    # the commit point: readers of an older meta retain older immutable files.
+    import uuid
+    tmp = str(d / f".ranking-{uuid.uuid4().hex}.tmp")
+    ranking_df.to_parquet(tmp, index=False)
+    ranking_hash = _file_sha256(tmp)
+    pq = d / f"ranking_{ranking_hash[:20]}.parquet"
+    os.replace(tmp, str(pq))
+    out["ranking_artifact"] = {"file": pq.name, "sha256": ranking_hash}
+    est = out.get("estimator_artifact") or {}
+    out["model_version"] = _content_version(out, ranking_hash,
+                                            est.get("sha256") if est.get("available") else None)
     mp = d / "meta.json"; mtmp = str(mp) + ".tmp"
     with open(mtmp, "w", encoding="utf-8") as f:
-        f.write(json.dumps(_normalize_meta(meta), ensure_ascii=False, indent=1))
+        f.write(json.dumps(out, ensure_ascii=False, indent=1))
     os.replace(mtmp, str(mp))
+    # Non-authoritative compatibility mirror for older direct-file consumers.
+    # The registry resolves ranking_artifact; mirror failure cannot undo commit.
+    try:
+        legacy_tmp = str(d / (RANKING_FILE + ".tmp"))
+        shutil.copyfile(pq, legacy_tmp)
+        os.replace(legacy_tmp, d / RANKING_FILE)
+    except OSError:
+        pass
+    meta.update(out)
 
 
 def list_variants() -> List[Dict[str, Any]]:

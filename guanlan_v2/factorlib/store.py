@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from guanlan_v2.factorlib.qlib_to_zoo import UnsupportedFactor, qlib_to_zoo
+from guanlan_v2.factorlib.specs import compile_factor_entry, factor_spec_digest
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,8 @@ def _read_json_dir(d: Path) -> List[dict]:
             logger.warning("factorlib: %s 顶层既非 list 也非 dict,跳过", fp.name)
             continue
         for entry in data:
-            if isinstance(entry, dict) and entry.get("name") and entry.get("expr"):
+            if (isinstance(entry, dict) and entry.get("name")
+                    and (entry.get("expr") or entry.get("factor_spec"))):
                 e = dict(entry)
                 e.setdefault("_file", fp.name)
                 out.append(e)
@@ -102,6 +104,24 @@ class LibraryFactorStore:
             expr = qlib_to_zoo(expr)        # 可能抛 UnsupportedFactor → 调用方记台账
         return expr
 
+    def compile_entry(self, entry: dict):
+        """Compile one legacy or structured library record.
+
+        Structured records keep ``factor_spec`` authoritative.  Legacy Qlib
+        records still pass through the historical translator before the
+        shared compiler, preserving existing behaviour.
+        """
+        candidate = dict(entry)
+        if not candidate.get("factor_spec"):
+            candidate["expr"] = self._zoo_expr(candidate)
+        compiled = compile_factor_entry(candidate)
+        factor_spec = compiled[2]
+        recorded_digest = str(candidate.get("factor_spec_digest") or "").strip()
+        if factor_spec is not None and recorded_digest \
+                and factor_spec_digest(factor_spec) != recorded_digest:
+            raise ValueError("持久 factor_spec_digest 与 canonical factor_spec 内容不一致")
+        return compiled
+
     # ---- 注册(进引擎运行期 zoo registry)----------------------------------
     def register_all(self) -> Dict[str, Any]:
         """把库因子逐条 校验→编译→注册进引擎 zoo registry。
@@ -119,7 +139,6 @@ class LibraryFactorStore:
             logger.warning("factorlib: import zoo 触发内置注册失败(继续注册库因子): %s", e)
 
         try:
-            from financial_analyst.factors.zoo.expr import compile_factor, validate_expr
             from financial_analyst.factors.zoo.registry import AlphaSpec, register, unregister
         except Exception as e:  # noqa: BLE001
             logger.error("factorlib: 引擎 registry/expr 不可导入,放弃注册: %s", e)
@@ -128,24 +147,36 @@ class LibraryFactorStore:
 
         ledger: List[dict] = []
         registered = skipped = 0
-        for entry in self.load_all():
+        # Plain library factors are valid dependencies of a structured v1
+        # factor. Register them first regardless of filename ordering so a
+        # cold restart can verify the same dependency available at save time.
+        entries = self.load_all()
+        entries.sort(key=lambda entry: bool(entry.get("factor_spec")))
+        for entry in entries:
             name = entry["name"]
             origin = entry.get("origin", "")
             family = entry.get("family") or LIBRARY_FAMILY
             try:
-                zexpr = self._zoo_expr(entry)
-                validate_expr(zexpr)
-                compute = compile_factor(zexpr)
+                zexpr, compute, factor_spec = self.compile_entry(entry)
                 unregister(name)            # replace: 重编译的 compute 是新 fn,避免 frozen-collision
+                tags = ["guanlan_factorlib"]
+                if origin:
+                    tags.append(origin)
+                if factor_spec is not None:
+                    tags.extend(("factor_spec:v1", f"spec:{factor_spec_digest(factor_spec)}"))
                 register(AlphaSpec(
                     name=name, family=family,
                     description=entry.get("description", ""),
                     formula_text=zexpr,
                     compute=compute,
-                    tags=("guanlan_factorlib", origin) if origin else ("guanlan_factorlib",),
+                    tags=tuple(tags),
                 ))
                 registered += 1
-                ledger.append({"name": name, "origin": origin, "status": "registered"})
+                ledger_row = {"name": name, "origin": origin, "status": "registered"}
+                if factor_spec is not None:
+                    ledger_row.update({"structured": True,
+                                       "factor_spec_digest": factor_spec_digest(factor_spec)})
+                ledger.append(ledger_row)
             except UnsupportedFactor as u:
                 skipped += 1
                 ledger.append({"name": name, "origin": origin, "status": "skipped",
@@ -176,14 +207,34 @@ class LibraryFactorStore:
 
         out: List[dict] = []
         for entry in self.load_all():
+            factor_spec = entry.get("factor_spec") if isinstance(entry.get("factor_spec"), dict) else None
+            expr = str(entry.get("expr", ""))
+            if not expr and factor_spec:
+                base = factor_spec.get("base_features")
+                if isinstance(base, list) and base:
+                    expr = str(base[0])
             row = {
                 "name": entry["name"],
-                "expr": str(entry.get("expr", "")),
+                "expr": expr,
                 "family": entry.get("family") or LIBRARY_FAMILY,
                 "source": entry.get("source", ""),
                 "origin": entry.get("origin", ""),
                 "description": entry.get("description", ""),
             }
+            if factor_spec is not None:
+                row["factor_spec"] = factor_spec
+                try:
+                    content_digest = factor_spec_digest(factor_spec)
+                    row["factor_spec_digest"] = str(
+                        entry.get("factor_spec_digest") or content_digest
+                    )
+                    if row["factor_spec_digest"] != content_digest:
+                        row["factor_spec_content_digest"] = content_digest
+                    row["structured"] = True
+                except Exception:  # malformed specs are marked invalid below when validate=True
+                    pass
+            if isinstance(entry.get("meta"), dict):
+                row["meta"] = entry["meta"]
             if entry.get("status"):
                 row["status"] = str(entry.get("status"))    # P2:draft 显形(空/缺省不带键)
             # P2-E:验证快照里的 RankIC 下发(workflow「存入因子库」落的 meta.ic;base 库无 meta → 缺席)
@@ -200,9 +251,7 @@ class LibraryFactorStore:
                 row["qlib_src"] = entry["qlib_src"]
             if validate and v_expr is not None:
                 try:
-                    zexpr = self._zoo_expr(entry)
-                    v_expr(zexpr)
-                    v_compile(zexpr)
+                    self.compile_entry(entry)
                     row["valid"] = True
                 except Exception as e:  # noqa: BLE001
                     row["valid"] = False

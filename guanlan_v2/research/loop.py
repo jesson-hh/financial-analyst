@@ -20,6 +20,7 @@ asyncio.run 会炸 "Event loop is closed"——HTTP 自调让 LLM 落在 server 
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import urllib.request
 import uuid
@@ -44,6 +45,19 @@ _CRITIQUE_CONSTRAINTS = (
     "必须用 formula 连 feature.label 口。ML 图的过门指标取模型真实 OOS 成绩(analysis 模型"
     "报告),不是特征集等权回测,且必须给 mf 下游接 analysis 终端(缺失时执行器直取 mf 模型"
     "报告并记警告,backtest 口径绝不用于过门)。与上一轮完全相同的图不会产生不同指标。")
+
+
+def _graph_declares_audit(graph: Dict[str, Any]) -> bool:
+    """Return whether this graph opts its research lineage into audit gating."""
+    nodes = graph.get("nodes") if isinstance(graph, dict) else None
+    return any(isinstance(node, dict) and node.get("type") == "overfit"
+               for node in (nodes if isinstance(nodes, list) else []))
+
+
+def _graph_declares_orthogonalization(graph: Dict[str, Any]) -> bool:
+    nodes = graph.get("nodes") if isinstance(graph, dict) else None
+    return any(isinstance(node, dict) and node.get("type") == "orthogonalize"
+               for node in (nodes if isinstance(nodes, list) else []))
 
 
 def new_run_id() -> str:
@@ -81,14 +95,42 @@ def _call_critique(goal: str, metrics: Dict[str, Any], graph: Dict[str, Any],
 def _run_graph_eval(graph: Dict[str, Any], p: Dict[str, Any],
                     progress: Callable[..., None], k: int, max_rounds: int) -> Dict[str, Any]:
     """整图执行薄桥(独立便于 monkeypatch)。on_node 把当前节点类型打进进度 label。"""
+    trusted_backtests: Dict[str, Any] = {}
+
     def _on(nid, typ, state):
         if state == "running":
             progress(phase="evaluate",
                      label=f"② 第 {k + 1}/{max_rounds} 轮 · 图执行:{typ}…", round_k=k)
-    return wex.run_graph(graph, overrides={
+
+    def _capture(nid, typ, out):
+        # Never persist this through research.store: it remains an in-process
+        # server artifact until TrialLedger has revealed the matching trial.
+        if typ == "backtest" and isinstance(out, dict) and isinstance(out.get("result"), dict):
+            trusted_backtests[str(nid)] = out["result"]
+
+    call_kw = dict(overrides={
         "universe": p["universe"], "freq": p["freq"], "oos_frac": _EVAL_OOS_FRAC,
-        "start": p.get("start"), "end": p.get("end")}, on_node=_on,
-        prefer_model_terminal=True)   # 过门语义=模型真实成绩(ML 图不吃特征等权回测口径)
+        "start": p.get("start"), "end": p.get("end"),
+        # The TrialLedger family is frequency-bound.  A candidate may not
+        # silently change its backtest node to another rebalance frequency.
+        "force_rebalance": True}, on_node=_on,
+        prefer_model_terminal=True)
+    # Test doubles and third-party adapters built against the older additive
+    # signature keep working; the production executor advertises this seam.
+    try:
+        supports_sink = "artifact_sink" in inspect.signature(wex.run_graph).parameters
+    except (TypeError, ValueError):
+        supports_sink = False
+    if supports_sink:
+        call_kw["artifact_sink"] = _capture
+    outcome = wex.run_graph(graph, **call_kw)
+    # Underscored keys are consumed only by optimize_adapter's trusted
+    # connector.  The ordinary loop selects explicit display fields and never
+    # writes these return paths into its caller-editable JSONL archive.
+    if supports_sink:
+        outcome["_trusted_backtests"] = trusted_backtests
+        outcome["_trusted_graph"] = graph
+    return outcome   # 过门语义=模型真实成绩(ML 图不吃特征等权回测口径)
 
 
 def _save_draft(run_id: str, k: int, expr: str, goal: str, diag: str,
@@ -112,6 +154,229 @@ def _save_compose_expr(name: str, expr: str, goal: str, diag: str,
     body = SaveIn(name=name, expr=expr, family="library_mined",
                   description=f"研究回路组合产出:{goal[:60]} · {str(diag)[:80]}",
                   source="research_loop", status="draft", meta=meta)
+    return _save_factor(body, LibraryFactorStore())
+
+
+def _structured_factor_spec_from_graph(graph: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract one exact formula/factorlib -> orthogonalize product definition.
+
+    ``guanlan.factor_spec.v1`` deliberately represents one transformed factor,
+    not an arbitrary downstream model/composite.  Ambiguous/multi-transform
+    graphs fail closed instead of publishing a product whose validation metrics
+    belonged to a different path.
+    """
+    from guanlan_v2.factorlib.specs import pin_factor_spec_dependencies
+
+    nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict) and n.get("id")]
+    by_id = {str(n["id"]): n for n in nodes}
+    orths = [n for n in nodes if n.get("type") == "orthogonalize"]
+    if len(orths) != 1:
+        raise ValueError("结构化因子发布要求且只允许一个正交化节点")
+    orth = orths[0]
+    incoming = [e for e in (graph.get("edges") or []) if isinstance(e, dict)
+                and isinstance(e.get("from"), list) and isinstance(e.get("to"), list)
+                and len(e["from"]) >= 2 and len(e["to"]) >= 2
+                and str(e["to"][0]) == str(orth["id"]) and e["to"][1] == "signal"]
+    if len(incoming) != 1:
+        raise ValueError("正交化 signal 必须精确连接一个公式或因子库来源")
+    source = by_id.get(str(incoming[0]["from"][0])) or {}
+    params = source.get("params") if isinstance(source.get("params"), dict) else {}
+    if source.get("type") == "formula":
+        base = str(params.get("expr") or "").strip()
+    elif source.get("type") == "factorlib":
+        if isinstance(params.get("factor_spec"), dict) \
+                or str(params.get("factor_spec_digest") or "").strip():
+            raise ValueError(
+                "factor_spec v1 不支持把结构化因子作为另一正交化规范的基础依赖"
+            )
+        # Match executor semantics for a legacy factorlib node: its cached DSL
+        # expression is the executable output.  If an older graph only stored
+        # the name, resolve it exactly and refuse a structured/nested record.
+        base = str(params.get("expr") or "").strip()
+        library_name = str(params.get("name") or "").strip()
+        if library_name:
+            from guanlan_v2.factorlib.store import LibraryFactorStore
+            rows = LibraryFactorStore().list_factors(validate=False)
+            hit = next((row for row in rows
+                        if str(row.get("name") or "").lower() == library_name.lower()), None)
+            if hit is not None and isinstance(hit.get("factor_spec"), dict):
+                raise ValueError("factor_spec v1 不支持嵌套结构化基础因子")
+            if not base and hit is None:
+                raise ValueError(f"正交化来源因子库记录已缺失: {library_name}")
+            if not base and hit is not None:
+                base = str(hit.get("expr") or "").strip()
+    else:
+        raise ValueError("正交化来源必须是公式输入或因子库")
+    if not base:
+        raise ValueError("正交化来源缺少可重放表达式/因子名")
+    spec = pin_factor_spec_dependencies({
+        "schema": "guanlan.factor_spec.v1",
+        "kind": "orthogonalized",
+        "base_features": [base],
+        "transform": dict(orth.get("params") or {}),
+    })
+    return spec
+
+
+def _direct_structured_factor_from_graph(
+    graph: Dict[str, Any],
+) -> Optional[Tuple[Dict[str, Any], str, str]]:
+    """Resolve one direct factorlib v1 product without flattening it to expr.
+
+    Returns ``(canonical_spec, digest, source_node_id)``.  The store is the
+    current authority; graph params are a pinned snapshot and must match it.
+    Plain legacy factorlib nodes return ``None`` and keep their old route.
+    """
+    from guanlan_v2.factorlib.specs import (
+        factor_spec_digest, verify_factor_spec_dependencies,
+    )
+    from guanlan_v2.factorlib.store import LibraryFactorStore
+
+    nodes = [node for node in (graph.get("nodes") or [])
+             if isinstance(node, dict) and node.get("id")]
+    factor_nodes = [node for node in nodes if node.get("type") == "factorlib"]
+    if not factor_nodes:
+        return None
+    rows = LibraryFactorStore().list_factors(validate=False)
+    by_name = {str(row.get("name") or "").lower(): row for row in rows}
+    candidates: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+    for node in factor_nodes:
+        params = node.get("params") if isinstance(node.get("params"), dict) else {}
+        expected_spec = params.get("factor_spec")
+        expected_digest = str(params.get("factor_spec_digest") or "").strip()
+        name = str(params.get("name") or "").strip()
+        hit = by_name.get(name.lower()) if name else None
+        if hit is not None and isinstance(hit.get("factor_spec"), dict):
+            candidates.append((node, hit))
+        elif isinstance(expected_spec, dict) or expected_digest:
+            raise ValueError(
+                f"结构化因子库引用 '{name}' 已缺失或已降级为普通表达式"
+            )
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise ValueError("同一研究图含多个结构化因子，v1 不能冒充复合产物发布")
+    # A direct structured product must be the only factor-producing source.
+    # Formula labels belong to ML graphs, but keeping this check local also
+    # protects malformed/old graphs whose feature-composite path lacks a model.
+    formula_nodes = [node for node in nodes if node.get("type") == "formula"]
+    if len(factor_nodes) != 1 or formula_nodes:
+        raise ValueError("结构化因子与其他公式/因子库来源混合，不能作为单因子发布")
+
+    node, hit = candidates[0]
+    params = node.get("params") if isinstance(node.get("params"), dict) else {}
+    canonical = verify_factor_spec_dependencies(
+        hit["factor_spec"], fallback_expr=str(hit.get("expr") or "").strip(),
+        factor_name=str(hit.get("name") or "").strip(),
+    )
+    digest = factor_spec_digest(canonical)
+    stored_digest = str(hit.get("factor_spec_digest") or "").strip()
+    if stored_digest and stored_digest != digest:
+        raise ValueError("结构化因子库记录的持久摘要与 canonical spec 不一致")
+    expected_spec = params.get("factor_spec")
+    if isinstance(expected_spec, dict):
+        expected = verify_factor_spec_dependencies(expected_spec)
+        if expected != canonical:
+            raise ValueError("研究图中的结构化 factor_spec 快照与因子库不一致")
+    expected_digest = str(params.get("factor_spec_digest") or "").strip()
+    if expected_digest and expected_digest != digest:
+        raise ValueError("研究图中的结构化 factor_spec_digest 与因子库不一致")
+    # A pinned snapshot is intentionally not required: old saved graphs may
+    # only carry the exact factorlib name.  Once the authoritative record is
+    # structured, it must still take this non-lossy path.
+    return canonical, digest, str(node["id"])
+
+
+def _validate_structured_terminal_binding(
+    graph: Dict[str, Any], terminal: Optional[Dict[str, Any]],
+    factor_spec: Dict[str, Any], *, product_node_id: Optional[str] = None,
+) -> str:
+    """Bind a structured product to the exact terminal that supplied its metrics.
+
+    Merely finding an orthogonalize node somewhere in the graph is insufficient:
+    an unrelated branch could otherwise supply passing metrics while the orthogonal
+    branch is published.  Require a directed path to this run's terminal and require
+    the terminal's propagated spec to canonically match the graph-derived spec.
+    """
+    from guanlan_v2.factorlib.specs import (
+        factor_spec_digest, verify_factor_spec_dependencies,
+    )
+
+    if not isinstance(terminal, dict):
+        raise ValueError("结构化因子发布缺少本轮实际终点")
+    terminal_id = str(terminal.get("node_id") or "").strip()
+    if not terminal_id:
+        raise ValueError("结构化因子发布要求 terminal.node_id")
+
+    nodes = [n for n in (graph.get("nodes") or [])
+             if isinstance(n, dict) and n.get("id")]
+    by_id = {str(n["id"]): n for n in nodes}
+    terminal_node = by_id.get(terminal_id)
+    if terminal_node is None:
+        raise ValueError(f"本轮终点 {terminal_id} 不属于当前工作流")
+    terminal_kind = str(terminal.get("kind") or "").strip()
+    if terminal_kind and terminal_kind != str(terminal_node.get("type") or ""):
+        raise ValueError("本轮 terminal.kind/node_id 与当前工作流节点不一致")
+
+    if product_node_id is None:
+        orths = [n for n in nodes if n.get("type") == "orthogonalize"]
+        if len(orths) != 1:  # normally rejected by extraction; keep this guard local too
+            raise ValueError("结构化因子发布要求且只允许一个正交化节点")
+        product_node_id = str(orths[0]["id"])
+    product_node_id = str(product_node_id or "").strip()
+    if product_node_id not in by_id:
+        raise ValueError("结构化产物来源节点不属于当前工作流")
+    adjacency: Dict[str, List[str]] = {}
+    for edge in (graph.get("edges") or []):
+        if not isinstance(edge, dict):
+            continue
+        source, target = edge.get("from"), edge.get("to")
+        if not (isinstance(source, list) and source
+                and isinstance(target, list) and target):
+            continue
+        source_id, target_id = str(source[0]), str(target[0])
+        if source_id in by_id and target_id in by_id:
+            adjacency.setdefault(source_id, []).append(target_id)
+    pending = [product_node_id]
+    reachable = set()
+    while pending:
+        node_id = pending.pop()
+        if node_id in reachable:
+            continue
+        reachable.add(node_id)
+        pending.extend(adjacency.get(node_id, ()))
+    if terminal_id not in reachable:
+        raise ValueError("结构化产物节点不可达本轮实际终点，拒绝用其他分支指标发布")
+
+    payload = terminal.get("payload")
+    if not isinstance(payload, dict) or not isinstance(payload.get("factor_spec"), dict):
+        raise ValueError("本轮终点未携带可验证的 factor_spec")
+    terminal_spec = verify_factor_spec_dependencies(payload["factor_spec"])
+    if terminal_spec is None or terminal_spec != factor_spec:
+        raise ValueError("本轮终点 factor_spec 与工作流正交化定义不一致")
+    expected_digest = factor_spec_digest(factor_spec)
+    if factor_spec_digest(terminal_spec) != expected_digest:
+        raise ValueError("本轮终点 factor_spec digest 与工作流定义不一致")
+    declared_digest = str(payload.get("factor_spec_digest") or "").strip()
+    if declared_digest and declared_digest != expected_digest:
+        raise ValueError("本轮终点声明的 factor_spec_digest 与工作流定义不一致")
+    return expected_digest
+
+
+def _save_structured_draft(run_id: str, k: int, factor_spec: Dict[str, Any],
+                           goal: str, diag: str, metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist a validated orthogonalized factor as an executable draft."""
+    from guanlan_v2.factorlib.api import SaveIn, _save_factor
+    from guanlan_v2.factorlib.store import LibraryFactorStore
+
+    name = f"lib_rl_{run_id[-6:]}_r{k}"
+    body = SaveIn(
+        name=name, expr=str(factor_spec["base_features"][0]), factor_spec=factor_spec,
+        family="library_mined", status="draft", source="research_loop",
+        description=f"研究回路结构化产出:{goal[:60]} · {str(diag)[:80]}",
+        meta={"metrics": metrics, "run_id": run_id, "round": k,
+              "product_kind": "structured_factor"},
+    )
     return _save_factor(body, LibraryFactorStore())
 
 
@@ -175,6 +440,81 @@ def _route_product(run_id: str, k: int, graph: Dict[str, Any], goal: str, diag: 
 
     保真度1(rr_3af347074b 实证):recipe 所属 ML 节点本轮求值失败(node_errors 有记录)时,
     过闸指标来自 mf 回退口径而非模型 → 模型通道不可信,改走组合/单因子通道并带 note 显形。"""
+    if _graph_declares_orthogonalization(graph):
+        from guanlan_v2.workflow.executor import _ML_KINDS as _MODEL_TYPES
+        node_types = {str(n.get("type") or "") for n in (graph.get("nodes") or [])
+                      if isinstance(n, dict)}
+        if node_types.intersection(set(_MODEL_TYPES) | {"mf", "pca", "spearman"}):
+            return {
+                "name": None, "status": "workflow_only",
+                "reason": (
+                    "该图的达标指标属于模型/复合产物，不能拿其中一个正交因子冒充整图产物；"
+                    "工作流已保留，待模型 recipe/复合 factor_spec 支持后再发布"
+                ),
+            }
+        try:
+            factor_spec = _structured_factor_spec_from_graph(graph)
+            expected_digest = _validate_structured_terminal_binding(
+                graph, terminal, factor_spec,
+            )
+            pr = _save_structured_draft(run_id, k, factor_spec, goal, diag, metrics)
+        except Exception as exc:  # noqa: BLE001 - malformed/ambiguous spec is visible
+            pr = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        if pr.get("ok") and pr.get("registered"):
+            if str(pr.get("factor_spec_digest") or "") != expected_digest:
+                return {
+                    "name": None, "status": "save_failed",
+                    "reason": "结构化因子保存返回的 factor_spec_digest 与已验证定义不一致",
+                }
+            return {"name": pr.get("name"), "status": "draft_structured",
+                    "factor_spec_digest": pr.get("factor_spec_digest")}
+        return {"name": None, "status": "save_failed",
+                "reason": pr.get("reason") or "结构化因子保存/注册失败"}
+
+    # A graph may reference an already structured factorlib factor directly.
+    # It remains structured across report/backtest publication; routing it
+    # through _pick_dish/_save_draft would persist only its display name/base
+    # expression and silently discard the transform.
+    try:
+        direct_structured = _direct_structured_factor_from_graph(graph)
+    except Exception as exc:  # malformed/missing pinned reference is fail-closed
+        return {"name": None, "status": "save_failed",
+                "reason": f"{type(exc).__name__}: {exc}"}
+    if direct_structured is not None:
+        from guanlan_v2.workflow.executor import _ML_KINDS as _MODEL_TYPES
+        node_types = {str(node.get("type") or "") for node in (graph.get("nodes") or [])
+                      if isinstance(node, dict)}
+        if node_types.intersection(set(_MODEL_TYPES) | {"mf", "pca", "spearman"}):
+            return {
+                "name": None, "status": "workflow_only",
+                "reason": (
+                    "该图的指标属于模型/复合产物，不能把其中直接引用的结构化因子"
+                    "冒充整图产物；工作流已保留"
+                ),
+            }
+        factor_spec, pinned_digest, source_node_id = direct_structured
+        try:
+            terminal_digest = _validate_structured_terminal_binding(
+                graph, terminal, factor_spec, product_node_id=source_node_id,
+            )
+            if terminal_digest != pinned_digest:
+                raise ValueError("终点摘要与因子库固定摘要不一致")
+            pr = _save_structured_draft(
+                run_id, k, factor_spec, goal, diag, metrics,
+            )
+        except Exception as exc:  # noqa: BLE001
+            pr = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        if pr.get("ok") and pr.get("registered"):
+            if str(pr.get("factor_spec_digest") or "") != pinned_digest:
+                return {
+                    "name": None, "status": "save_failed",
+                    "reason": "结构化因子复用保存返回了不同的 factor_spec_digest",
+                }
+            return {"name": pr.get("name"), "status": "draft_structured",
+                    "factor_spec_digest": pinned_digest}
+        return {"name": None, "status": "save_failed",
+                "reason": pr.get("reason") or "结构化因子复用保存/注册失败"}
+
     note: Optional[str] = None
     recipe = _derive_ml_recipe(graph, universe)
     if recipe is not None:
@@ -281,15 +621,29 @@ def _pick_dish(graph: Dict[str, Any]) -> Tuple[Optional[str], List[str]]:
     return "report2", exprs
 
 
-def _gate(metrics: Dict[str, Any], min_rank_ic: float) -> Dict[str, Any]:
-    """过门(P4 联合门):rank_ic ≥ 门槛 且 样本外 robust 且 组合 Sharpe > 0。"""
+def _gate(metrics: Dict[str, Any], min_rank_ic: float,
+          audit_required: bool = False) -> Dict[str, Any]:
+    """过门(P4 联合门)。
+
+    基础门是 rank_ic + OOS + Sharpe。若工作流显式放了“过拟合审计”
+    终端，审计就是额外硬门：只有 PASS 且 ``passes_gate=true`` 才可
+    晋级，FAIL/INCOMPLETE 不会被源回测的漂亮指标绕过。
+    """
     ric, shp = metrics.get("rank_ic"), metrics.get("sharpe")
     ok_ric = isinstance(ric, (int, float)) and ric == ric
     ok_shp = isinstance(shp, (int, float)) and shp == shp and shp > 0
+    audit_present = audit_required or bool(metrics.get("audit_declared")) \
+        or "audit_status" in metrics or "audit_passes_gate" in metrics
+    audit_ok = (not audit_present) or (
+        metrics.get("audit_status") == "PASS"
+        and metrics.get("audit_passes_gate") is True
+    )
     passed = bool(ok_ric and float(ric) >= float(min_rank_ic)
-                  and metrics.get("oos_verdict") == GATE_OOS_OK and ok_shp)
+                  and metrics.get("oos_verdict") == GATE_OOS_OK and ok_shp
+                  and audit_ok)
     return {"passed": passed, "min_rank_ic": float(min_rank_ic),
-            "oos_required": GATE_OOS_OK, "sharpe_required": True}
+            "oos_required": GATE_OOS_OK, "sharpe_required": True,
+            "audit_required": audit_present, "audit_passed": audit_ok}
 
 
 # ── 主体 ─────────────────────────────────────────────────────────────────
@@ -323,6 +677,10 @@ def run_research_loop(run_id: str, goal: str, max_rounds: int, min_rank_ic: floa
         return end_row
 
     graph: Dict[str, Any] = gen["graph"]
+    # Monotonic lineage policy: once any accepted round opts into audit,
+    # later critique graphs cannot remove it and promote on unaudited metrics.
+    # A later round may add audit, making it sticky from that point onward.
+    audit_required_for_run = _graph_declares_audit(graph)
     diag = "初始生成(LLM propose)"
     crit_source: Optional[str] = None
     for k in range(max_rounds):
@@ -335,10 +693,20 @@ def run_research_loop(run_id: str, goal: str, max_rounds: int, min_rank_ic: floa
                   "exprs": [], "has_ml": False, "node_errors": [], "terminal": None}
         failed = not ex.get("ok")
         err = ex.get("reason") if failed else None
-        metrics = ex.get("metrics") or {}
+        metrics = dict(ex.get("metrics") or {})
+        current_has_audit = _graph_declares_audit(graph)
+        audit_required_for_run = audit_required_for_run or current_has_audit
+        if audit_required_for_run and (
+                "audit_status" not in metrics or "audit_passes_gate" not in metrics):
+            metrics.update({
+                "audit_declared": True,
+                "audit_status": "INCOMPLETE",
+                "audit_passes_gate": False,
+                "audit_missing_from_graph": not current_has_audit,
+            })
         exprs = list(ex.get("exprs") or [])
         dish, _ = _pick_dish(graph)                    # 展示口径保留(产物路由 T5 也用)
-        gate = (_gate(metrics, min_rank_ic) if not failed
+        gate = (_gate(metrics, min_rank_ic, audit_required=audit_required_for_run) if not failed
                 else {"passed": False, "min_rank_ic": float(min_rank_ic),
                       "oos_required": GATE_OOS_OK, "sharpe_required": True})
         row = {"run_id": run_id, "k": k, "ts": _now(),
@@ -362,19 +730,45 @@ def run_research_loop(run_id: str, goal: str, max_rounds: int, min_rank_ic: floa
             break
         # ── 批判改进(LLM;失败规则兜底显形;批判环整体失败 → 诚实中断)──
         progress(phase="critique", label=f"④ 第 {k + 1} 轮未达标 · LLM 批判改进…", round_k=k)
+        critique_constraints = _CRITIQUE_CONSTRAINTS
+        if audit_required_for_run:
+            critique_constraints += (
+                " 本研究谱系已启用过拟合审计:后续每一轮必须保留且正确连接 overfit 节点;"
+                "不得删除审计、断开其回测输入,或改用普通回测/模型报告绕过审计硬门。")
         try:
-            cr = _call_critique(goal, metrics, graph, constraints=_CRITIQUE_CONSTRAINTS)
+            cr = _call_critique(goal, metrics, graph, constraints=critique_constraints)
         except Exception as exc:  # noqa: BLE001
             cr = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
         if not cr.get("ok") or not isinstance(cr.get("graph"), dict):
             error = f"批判环失败: {cr.get('reason')}"
             break
+        audit_retried = False
+        if audit_required_for_run and not _graph_declares_audit(cr["graph"]):
+            progress(phase="critique", label="④b 改进图删除了审计 · 强制重批…", round_k=k)
+            audit_fb = (
+                critique_constraints
+                + "\n【审计不变量违规】你刚才删除了 overfit 审计节点。请在保留审计节点及"
+                  " backtest.result→overfit.result 连线的前提下重新改进，否则本研究不能晋级。"
+            )
+            try:
+                cr2 = _call_critique(goal, metrics, graph, constraints=audit_fb)
+            except Exception as exc:  # noqa: BLE001
+                cr2 = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+            if (cr2.get("ok") and isinstance(cr2.get("graph"), dict)
+                    and _graph_declares_audit(cr2["graph"])):
+                cr, audit_retried = cr2, True
+            else:
+                error = (
+                    "批判环违反审计不变量: 两次改进均删除了过拟合审计；"
+                    "为防止用未审计指标绕门，研究诚实中断"
+                )
+                break
         # ── 停滞守卫(P4:图签名比较):改进图与本轮图签名相同 → 指标必不变(求值确定性),
         #    复算是烧轮次装研究。带停滞警告重批一次;仍相同 → 诚实中断。──
         retried = False
         if wex.graph_signature(cr["graph"]) == wex.graph_signature(graph):
             progress(phase="critique", label="④b 改进图与上一轮相同 · 停滞重批…", round_k=k)
-            fb = (_CRITIQUE_CONSTRAINTS
+            fb = (critique_constraints
                   + f"\n【停滞警告】你上一份改进(诊断:{str(cr.get('diagnosis'))[:100]})图与上一轮"
                     "完全相同(签名一致),指标必然与本轮完全相同。这次必须对图做出实质修改"
                     "(换表达式/换模型类型或超参/改合成方式或回测参数皆可)。")
@@ -390,7 +784,8 @@ def run_research_loop(run_id: str, goal: str, max_rounds: int, min_rank_ic: floa
                          "指标不会变,诚实中断")
                 break
         crit_source = str(cr.get("source") or "?")
-        diag = (("(停滞重批) " if retried else "")
+        diag = (("(审计保留重批) " if audit_retried else "")
+                + ("(停滞重批) " if retried else "")
                 + ("(规则兜底·非 LLM) " if crit_source == "rule" else "")
                 + str(cr.get("diagnosis") or ""))
         graph = cr["graph"]
@@ -409,10 +804,14 @@ def run_research_loop(run_id: str, goal: str, max_rounds: int, min_rank_ic: floa
     ws = _save_graph(goal, run_id, best["graph"]) if best else None
     n = len(rounds)
     bm = (best or {}).get("metrics") or {}
-    if promoted and promoted.get("status") in ("draft", "draft_compose", "draft_model"):
+    if promoted and promoted.get("status") in ("draft", "draft_structured", "draft_compose", "draft_model"):
         lesson = (f"研究「{goal[:40]}」{n}轮达标:{promoted['name']}(status={promoted['status']}) "
                   f"rank_ic={bm.get('rank_ic')} oos={bm.get('oos_verdict')} 已入draft待人审;"
                   f"诊断:{str(diag)[:80]}")
+    elif promoted and promoted.get("status") == "workflow_only":
+        lesson = (f"研究「{goal[:40]}」{n}轮达标但仅保存工作流:"
+                  f"{str(promoted.get('reason'))[:110]};rank_ic={bm.get('rank_ic')} "
+                  f"oos={bm.get('oos_verdict')}")
     elif promoted and promoted.get("status") == "save_failed":
         lesson = (f"研究「{goal[:40]}」{n}轮达标但入库失败:{str(promoted.get('reason'))[:80]};"
                   f"rank_ic={bm.get('rank_ic')} oos={bm.get('oos_verdict')}")

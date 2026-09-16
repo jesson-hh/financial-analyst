@@ -231,6 +231,7 @@ def build_v4(provider_uri: str, start: str = START_DEFAULT, end: str = "2026-06-
              feature_cols: Optional[List[str]] = None,
              extra_factor_panel: Optional["pd.DataFrame"] = None,
              holdout: Optional[dict] = None,
+             model_out: Optional[dict] = None,
              dims: Optional[dict] = None) -> pd.DataFrame:
     """引擎原生 v4 排名 → 7 列(== v4_ranking_latest.parquet)。
 
@@ -266,16 +267,39 @@ def build_v4(provider_uri: str, start: str = START_DEFAULT, end: str = "2026-06-
     _train_hi = ld - timedelta(days=5)
     if holdout is not None:
         from guanlan_v2.strategy.compute.model_train import holdout_split as _hs
-        _tc, _ = _hs(dates, ld, horizon=int(holdout.get("horizon", 5)), k=int(holdout.get("k", 20)))
+        _tc, _ = _hs(dates, ld, horizon=5, k=int(holdout.get("k", 20)), label_span=6)
         _train_hi = min(_train_hi, _tc)
     train = data[(dates >= pd.Timestamp("2022-01-01")) &
                  (dates <= _train_hi)].dropna(subset=["label"]).copy()
     pred = data[dates == ld].copy()
+    if model_out is not None:
+        missing_latest = [name for name in mf if not pred[name].notna().any()]
+        if missing_latest:
+            raise ValueError(f"v4 最新截面特征全部缺失，拒绝以零值冒充更新: {missing_latest}")
     train[mf] = train[mf].fillna(0)
     pred[mf] = pred[mf].fillna(0)
 
+    if train.empty:
+        raise ValueError("v4 净化留出后训练样本为空，请增加历史窗口")
+
     dt_train = lgb.Dataset(train[mf].values, label=train["label"].values)
     model = lgb.train(LGB_PARAMS, dt_train, num_boost_round=500)
+    evaluation_model = model
+    final_train = train
+    if holdout is not None:
+        from guanlan_v2.strategy.compute.training_runtime import date_bounds
+        holdout["evaluation_train"] = date_bounds(train.index)
+        holdout["label_span"] = 6
+        # The honest holdout score belongs to evaluation_model. Latest ranking
+        # belongs to a second estimator fitted on ALL actually matured labels.
+        final_train = data[(dates >= pd.Timestamp("2022-01-01")) &
+                           (dates <= ld)].dropna(subset=["label"]).copy()
+        final_train[mf] = final_train[mf].fillna(0)
+        model = lgb.train(LGB_PARAMS, lgb.Dataset(final_train[mf].values,
+                          label=final_train["label"].values), num_boost_round=500)
+        holdout["final_train_rows"] = int(len(final_train))
+        holdout["final_fit"] = date_bounds(final_train.index)
+        holdout["refit_latest_matured_labels"] = True
     pred["score"] = model.predict(pred[mf].values)
 
     # ─── #7 DL 集成:优先 dl_sources(多源新层)→ 否则回退 fincast_path(单源旧路)→ 都无则跳过纯 LGB。
@@ -325,12 +349,12 @@ def build_v4(provider_uri: str, start: str = START_DEFAULT, end: str = "2026-06-
     if holdout is not None:
         try:
             from guanlan_v2.strategy.compute.model_train import holdout_split
-            _tc, _hd = holdout_split(dates, ld, horizon=int(holdout.get("horizon", 5)),
-                                     k=int(holdout.get("k", 20)))
+            _tc, _hd = holdout_split(dates, ld, horizon=5,
+                                     k=int(holdout.get("k", 20)), label_span=6)
             hd = data[dates.isin(_hd)].dropna(subset=["label"]).copy()
             ics = []
             if len(hd):
-                hd = hd.assign(_score=model.predict(hd[mf].fillna(0).values))
+                hd = hd.assign(_score=evaluation_model.predict(hd[mf].fillna(0).values))
                 for _d, g in hd.groupby(level="datetime"):
                     if len(g) >= 50:
                         ic = g["_score"].rank().corr(g["label"].rank())
@@ -340,6 +364,9 @@ def build_v4(provider_uri: str, start: str = START_DEFAULT, end: str = "2026-06-
             holdout["oos_ic"] = float(s.mean()) if len(ics) else None
             holdout["oos_icir"] = float(s.mean() / s.std()) if len(ics) and s.std() > 0 else None
             holdout["n_holdout"] = int(len(ics))
+            holdout["test_start"] = str(_hd[0].date()) if _hd else None
+            holdout["test_end"] = str(_hd[-1].date()) if _hd else None
+            holdout["metric_scope"] = "purged_holdout_evaluation_estimator_not_final_refit"
         except Exception as e:  # noqa: BLE001
             holdout["error"] = f"{type(e).__name__}: {e}"
 
@@ -405,6 +432,17 @@ def build_v4(provider_uri: str, start: str = START_DEFAULT, end: str = "2026-06-
     v4 = df_top[["code", "total", "layer"]].rename(columns={"total": "v4_total", "layer": "v4_layer"})
     out = rank.merge(v4, on="code", how="left")
     out["date"] = (date_str or (ld.strftime("%Y-%m-%d") if hasattr(ld, "strftime") else str(ld)[:10]))
+    if model_out is not None:
+        from guanlan_v2.strategy.compute.training_runtime import training_provenance
+        prep = {"feature_names": list(mf), "missing_features": "fillna_zero",
+                "time_series_features": "v4._factors_one", "schema": "v4-preprocessing-v1"}
+        model_out.update({"estimator": model, "preprocessing": prep,
+                          "provenance": training_provenance(
+                              data[mf], data["label"], final_train.index,
+                              prediction_date=str(ld.date()),
+                              label_spec={"expression": "close(t+6)/close(t+1)-1",
+                                          "entry_offset": 1, "horizon": 5, "label_span": 6},
+                              evaluation=holdout, feature_expressions=mf, preprocessing=prep)})
     return out
 
 

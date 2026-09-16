@@ -24,10 +24,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from guanlan_v2.workflow.migrations import (
+    WORKFLOW_SCHEMA_VERSION,
+    migrate_graph,
+)
 
 # 仅用于 id 校验(防路径穿越);文件名直接用后端生成的 uuid hex,天然安全。
 _SAFE = re.compile(r"[^0-9A-Za-z_\-]")
@@ -74,6 +80,25 @@ class WorkflowStore:
         self.root = Path(root) if root is not None else _default_root()
         self.root.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+        """Atomically replace one record so an interrupted save cannot corrupt it."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, raw_tmp = tempfile.mkstemp(
+            prefix=f".{path.stem}.", suffix=".tmp", dir=str(path.parent),
+        )
+        tmp = Path(raw_tmp)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+
     def save(self, name: str, graph: dict,
              workspace_id: Optional[str] = None) -> dict:
         """生成 id/ts、原子写 ``<id>.json``,返回完整记录(含 graph)。
@@ -85,7 +110,7 @@ class WorkflowStore:
           localStorage 按 name 去重语义):已有同名记录 → 复用其中最新一条的 id
           覆盖原文件,其余同名旧副本一并删除,不再堆副本。
         """
-        graph = graph or {}
+        graph, migration = migrate_graph(graph or {})
         workspace_id = _workspace_id(workspace_id)
         nm = (name or "").strip()
         wid = ""
@@ -109,14 +134,14 @@ class WorkflowStore:
             "ts": ts,
             "scope": "workspace" if workspace_id else "global",
             "workspace_id": workspace_id,
+            "schema_version": WORKFLOW_SCHEMA_VERSION,
+            "migration": migration,
             "graph": {
                 "nodes": graph.get("nodes", []) or [],
                 "edges": graph.get("edges", []) or [],
             },
         }
-        (self.root / f"{wid}.json").write_text(
-            json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        self._write_json(self.root / f"{wid}.json", rec)
         return rec
 
     def list(self, workspace_id: Optional[str] = None,
@@ -154,6 +179,9 @@ class WorkflowStore:
                 "workspace_id": owner,
                 "read_only": bool(workspace_id is not None and scope == "global"),
                 "is_template": bool(workspace_id is not None and scope == "global"),
+                "schema_version": data.get("schema_version") or 1,
+                "migration": data.get("migration") or {},
+                "validation": data.get("validation") or {},
                 "graph": {
                     "nodes": g.get("nodes", []) or [],
                     "edges": g.get("edges", []) or [],
@@ -193,6 +221,9 @@ class WorkflowStore:
         data["workspace_id"] = owner
         data["read_only"] = bool(workspace_id is not None and scope == "global")
         data["is_template"] = bool(workspace_id is not None and scope == "global")
+        data["schema_version"] = data.get("schema_version") or 1
+        data["migration"] = data.get("migration") or {}
+        data["validation"] = data.get("validation") or {}
         return data
 
     def delete(self, wid: str, workspace_id: Optional[str] = None) -> bool:

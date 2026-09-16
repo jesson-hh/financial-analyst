@@ -57,6 +57,51 @@ def test_start_clamps_and_runs(monkeypatch):
     assert any("第 1/1 轮" in ln for ln in st["lines"])              # progress 进 lines
 
 
+def test_start_governed_routes_optimize_adapter(monkeypatch):
+    _reset_state(monkeypatch)
+    seen = {}
+
+    def fake_optimize(**kw):
+        seen.update(kw)
+        return {"ok": True}
+
+    import guanlan_v2.research.optimize_adapter as adapter
+    monkeypatch.setattr(adapter, "run_research_optimize", fake_optimize)
+    j = _client().post("/research/loop/start", json={
+        "goal": "找一个受治理反转因子", "governed": True, "universe": "csi_fast",
+    }).json()
+    assert j["ok"] is True
+    for _ in range(50):
+        time.sleep(0.02)
+        if not rapi._research_public_state()["running"]:
+            break
+    st = rapi._research_public_state()
+    assert st["phase"] == "done" and st["ok"] is True
+    assert st["engine"] == "governed"
+    assert seen["goal"] == "找一个受治理反转因子"
+
+
+def test_start_default_keeps_legacy_compatibility(monkeypatch):
+    _reset_state(monkeypatch)
+    seen = {}
+
+    def fake_loop(**kw):
+        seen.update(kw)
+        return {"ok": True}
+
+    monkeypatch.setattr(rapi.rloop, "run_research_loop", fake_loop)
+    j = _client().post("/research/loop/start", json={
+        "goal": "兼容调用", "universe": "csi_fast",
+    }).json()
+    assert j["ok"] is True
+    for _ in range(50):
+        time.sleep(0.02)
+        if not rapi._research_public_state()["running"]:
+            break
+    assert rapi._research_public_state()["engine"] == "legacy"
+    assert seen["goal"] == "兼容调用"
+
+
 def test_start_single_flight(monkeypatch):
     _reset_state(monkeypatch)
     with rapi._RESEARCH_LOCK:

@@ -167,6 +167,7 @@ function WeiwoApp() {
   const activeWorkspaceSessions = sessions.filter(m => !m.archived && (m.workspace_id || generalId) === activeWorkspaceId);
   const openStage = (target) => {
     const next = typeof target === 'string' ? { page: target } : { ...(target || {}) };
+    next.sessionId = next.sessionId || state.sid;
     if (next.page === 'seats') {
       const code = WW.canonicalSecurityCode(next.code || (activeWorkspace && activeWorkspace.code));
       const stageWid = next.workspaceId || activeWorkspaceId || generalId;
@@ -182,11 +183,19 @@ function WeiwoApp() {
     }
     setStage(next);
   };
+  const openWorkflow = (item) => {
+    if (!item || item.workspaceId !== activeWorkspaceId || (item.sessionId && item.sessionId !== state.sid)) return;
+    const importToken = 'wi_' + Date.now().toString(36) + Math.random().toString(36).slice(2);
+    openStage({ page: 'factor', workspaceId: item.workspaceId, sessionId: state.sid,
+      run: item.runId || '', load: item.runId ? '' : item.workflowId,
+      workflowImport: !item.runId && !item.workflowId ? { graph: item.graph, name: item.name,
+        workspace_id: item.workspaceId, session_id: state.sid } : null, importToken });
+  };
   const stageWorkspaceRef = React.useRef(activeWorkspaceId);
   React.useEffect(() => {
-    if (stage && stageWorkspaceRef.current !== activeWorkspaceId) setStage(null);
+    if (stage && (stageWorkspaceRef.current !== activeWorkspaceId || (stage.sessionId && stage.sessionId !== state.sid))) setStage(null);
     stageWorkspaceRef.current = activeWorkspaceId;
-  }, [activeWorkspaceId, stage]);
+  }, [activeWorkspaceId, state.sid, stage]);
 
   const openReport = async (item) => {
     const reportSid = streamSidRef.current;
@@ -262,7 +271,8 @@ function WeiwoApp() {
   React.useEffect(() => {
     if (!WW.API) return;
     refreshSessions(); refreshWorkspaces();
-    const last = (() => { try { return sessionStorage.getItem('guanlan:ww:sid') || localStorage.getItem('guanlan:ww:sid'); } catch (e) { return null; } })();
+    const explicitSid = new URLSearchParams(location.search).get('session_id');
+    const last = (explicitSid && /^[0-9A-Za-z_-]{1,100}$/.test(explicitSid) ? explicitSid : '') || (() => { try { return sessionStorage.getItem('guanlan:ww:sid') || localStorage.getItem('guanlan:ww:sid'); } catch (e) { return null; } })();
     if (last) { attach(last); }
     else { WW.newSession(null, generalId).then(m => { if (m && m.id) attach(m.id); }); }
     return () => { if (esRef.current) esRef.current.close(); };
@@ -432,10 +442,10 @@ function WeiwoApp() {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: cols, height: '100vh', minWidth: 0, position: 'relative' }}>
       <WwRail state={state} sessions={sessions} workspaces={workspaces} workspacesStatus={workspacesStatus} activeWorkspaceId={activeWorkspaceId} onNew={onNew} onNewWorkspace={onNewWorkspace} onChooseFolder={WW.chooseResearchFolder} onSwitch={attach} onUpdate={onUpdateSession} onArchive={onArchiveSession} onRestore={onRestoreSession} />
-      {stage ? <WwWorkspaceStage page={stage.page} load={stage.load} asset={stage.asset} code={stage.code} name={stage.name} focus={stage.focus} readOnly={stageReadOnly} workspaceId={stage.workspaceId || activeWorkspaceId} onBack={() => setStage(null)} /> : <React.Fragment>
-      <WwThread key={state.sid || 'no-session'} state={state} workspace={activeWorkspace} sessionArchived={activeSessionArchived} onSend={onSend} onCancel={onCancel} onConfirm={(c) => WW.confirm(state.confirm.turn_id, c)} onOpenReport={openReport} onOpenPage={openPage} activatedPages={activated} onRename={activeSessionArchived ? null : (t) => onUpdateSession(state.sid, { title: t })} sentry={sentry} markSentrySeen={markSentrySeen} onSentryFocus={onSentryFocus} thinkingMode={thinkingMode} onThinkingMode={onThinkingMode} />
+      {stage ? <WwWorkspaceStage page={stage.page} load={stage.load} asset={stage.asset} run={stage.run} sessionId={stage.sessionId} workflowImport={stage.workflowImport} importToken={stage.importToken} code={stage.code} name={stage.name} focus={stage.focus} readOnly={stageReadOnly} workspaceId={stage.workspaceId || activeWorkspaceId} onBack={() => setStage(null)} /> : <React.Fragment>
+      <WwThread key={state.sid || 'no-session'} state={state} workspace={activeWorkspace} sessionArchived={activeSessionArchived} onSend={onSend} onCancel={onCancel} onConfirm={(c) => WW.confirm(state.confirm.turn_id, c)} onOpenReport={openReport} onOpenPage={openPage} onOpenWorkflow={openWorkflow} activatedPages={activated} onRename={activeSessionArchived ? null : (t) => onUpdateSession(state.sid, { title: t })} sentry={sentry} markSentrySeen={markSentrySeen} onSentryFocus={onSentryFocus} thinkingMode={thinkingMode} onThinkingMode={onThinkingMode} />
       {benchOpen && <WwBench key={activeWorkspaceId} state={{ ...state, activated }} workspaceId={activeWorkspaceId} focus={benchFocus} chatWide={chatWide} onToggleWide={() => setChatWide(w => !w)} onClose={() => dispatch({ type: 'benchClosed', v: true })} onOpenStage={openStage} onResize={(w) => { setBenchW(w); try { localStorage.setItem('guanlan:ww:benchw', String(w)); } catch (e) {} }} />}
-      <WwWorkspaceDock workspace={activeWorkspace} sessions={activeWorkspaceSessions} open={dockOpen} narrow={narrow} onToggle={() => setDockOpen(true)} onClose={() => setDockOpen(false)} onOpenStage={openStage} onWorkspaceChanged={onWorkspaceChanged} />
+      <WwWorkspaceDock workspace={activeWorkspace} sessions={activeWorkspaceSessions} sessionId={state.sid} open={dockOpen} narrow={narrow} onToggle={() => setDockOpen(true)} onClose={() => setDockOpen(false)} onOpenStage={openStage} onWorkspaceChanged={onWorkspaceChanged} />
       </React.Fragment>}
       {drawer && <WwDrawer drawer={drawer} onClose={() => setDrawer(null)} />}
     </div>

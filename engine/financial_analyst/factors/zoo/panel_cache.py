@@ -13,21 +13,52 @@ from collections import OrderedDict
 from typing import List
 
 from financial_analyst.factors.zoo.panel import PanelData
+from financial_analyst.data.loaders.technical import technical_definition_fingerprint
 
+PANEL_CACHE_VERSION = "panel_causal_tech_v2"
 _MAXSIZE = 3                       # 每面板 ~50-100MB → 上限 ~300MB
 _cache: "OrderedDict[tuple, PanelData]" = OrderedDict()
 _lock = threading.Lock()
 
 
-def _key(codes: List[str], start: str, end: str, freq: str, with_industry: bool) -> tuple:
+class _IdentityKey:
+    """Keep a strong identity reference, including for unhashable stub loaders."""
+    def __init__(self, value):
+        self.value = value
+
+    def __hash__(self):
+        return id(self.value)
+
+    def __eq__(self, other):
+        return isinstance(other, _IdentityKey) and self.value is other.value
+
+
+def _source_key(loader, codes, freq):
+    # Only stat the three technical-input files and calendar; no binary hashing
+    # or unrelated universe scan. This stops an old panel hiding loader refresh.
+    roots = getattr(loader, "_roots", None)
+    if isinstance(roots, dict) and freq in roots:
+        identity = (type(loader).__module__, type(loader).__qualname__, str(roots[freq].resolve()))
+    else:
+        identity = _IdentityKey(loader)
+    signatures = ()
+    if freq == "day" and callable(getattr(loader, "_tech_source_signatures", None)):
+        signatures = tuple((code, loader._tech_source_signatures(code)) for code in sorted(codes))
+    return identity, signatures
+
+
+def _key(codes: List[str], start: str, end: str, freq: str, with_industry: bool,
+         source_key=None) -> tuple:
     h = hashlib.md5(",".join(sorted(codes)).encode("utf-8")).hexdigest()
-    return (h, start, end, freq, with_industry)
+    tech_hash = technical_definition_fingerprint() if freq == "day" else None
+    return (PANEL_CACHE_VERSION, tech_hash, source_key, h, start, end, freq, with_industry)
 
 
 def load_panel_cached(loader, codes: List[str], start: str, end: str,
                       freq: str = "day", industry_loader=None) -> PanelData:
     """命中则复用缓存面板, 否则 PanelData.from_loader 加载并存入 (LRU)。"""
-    k = _key(codes, start, end, freq, industry_loader is not None)
+    source_key = _source_key(loader, codes, freq)
+    k = _key(codes, start, end, freq, industry_loader is not None, source_key)
     with _lock:
         hit = _cache.get(k)
         if hit is not None:
@@ -35,6 +66,8 @@ def load_panel_cached(loader, codes: List[str], start: str, end: str,
             return hit
     panel = PanelData.from_loader(loader, codes, start, end, freq=freq,
                                   industry_loader=industry_loader)
+    if _source_key(loader, codes, freq) != source_key:
+        raise RuntimeError("Panel technical inputs changed while loading; retry on a stable snapshot")
     with _lock:
         _cache[k] = panel
         _cache.move_to_end(k)

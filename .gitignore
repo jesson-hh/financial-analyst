@@ -63,6 +63,8 @@ guanlan_v2/reports/store/
 guanlan_v2/industry/store/
 # 工作流存储(运行态,与 reports/store 同类;注:不忽略整个 .data/,wisdom 卡片是跟踪源)
 .data/workflows/
+# 数据筛选 Skill 的 ds_* 可追溯运行记录(运行态,不入源码库)
+.data/data_screen_runs/
 # 运行态日志目录
 logs/
 

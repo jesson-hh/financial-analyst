@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import math
 import os
 import re as _re
 import threading
@@ -47,6 +48,26 @@ _MEMORY_MAX_LINE = 280
 # 超此行数即在 _MEMORY_LOCK 内调 curator.consolidate_memory(常驻 keyed 永不归档)。
 _ARCHIVE_PATH = _MEMORY_PATH.parent / "memory.archive.md"
 _CURATOR_TRIGGER_LINES = 120
+
+
+def _pinned_global_memory_lines() -> set[str]:
+    """Read only pin metadata; Markdown remains the content source of truth."""
+    path = _MEMORY_PATH.parent / "memory.admin.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        items = payload.get("items") if isinstance(payload, dict) else {}
+        if not isinstance(items, dict):
+            return set()
+        return {
+            str(entry.get("line") or "").strip()
+            for entry in items.values()
+            if isinstance(entry, dict)
+            and entry.get("scope") == "global"
+            and bool(entry.get("pinned"))
+            and str(entry.get("line") or "").strip()
+        }
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return set()
 
 
 def _session_notes_path(sid: str) -> Path:
@@ -151,6 +172,152 @@ def summarize_screen(r: Dict[str, Any]) -> str:
         s = row.get("s") or {}
         head.append(f"{s.get('name')}({s.get('code')}) {s.get('rating', '')}")
     return f"选股完成: 入选 {len(rows)} 只,前5 = " + ";".join(head)
+
+
+def _data_screen_series_unit(expr: Any) -> str:
+    if not isinstance(expr, dict):
+        return "number"
+    if expr.get("type") == "bias":
+        return "ratio"
+    field = str(expr.get("field") or "")
+    if field == "returns":
+        return "ratio"
+    if field == "amount":
+        return "yuan"
+    if field == "volume":
+        return "shares"
+    return "number"
+
+
+def _format_data_screen_value(value: Any, expr: Any = None) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if number != number or number in (float("inf"), float("-inf")):
+        return "—"
+    unit = _data_screen_series_unit(expr)
+    if unit == "ratio":
+        return f"{number * 100:.3f}%"
+    if unit == "yuan":
+        if abs(number) >= 100_000_000:
+            return f"{number / 100_000_000:.3f}亿"
+        if abs(number) >= 10_000:
+            return f"{number / 10_000:.3f}万"
+        return f"{number:.2f}元"
+    if unit == "shares":
+        return f"{number / 10_000:.3f}万股" if abs(number) >= 10_000 else f"{number:.0f}股"
+    return f"{number:.4f}"
+
+
+def _format_data_screen_exact_shares(value: Any) -> str:
+    """Keep distinct share values distinct when a friendly abbreviation collides."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if not math.isfinite(number):
+        return "—"
+    if number.is_integer():
+        return f"{number:,.0f}股"
+    return f"{number:,.6f}".rstrip("0").rstrip(".") + "股"
+
+
+def _format_data_screen_evidence_values(values: List[Any], exprs: List[Any]) -> List[str]:
+    """Format an evidence tuple without rounding two different share values alike.
+
+    Large, clearly separated volumes retain the compact ``万股`` display.  Only
+    when that representation would collapse distinct raw values do all values in
+    the tuple switch to exact, grouped share counts.
+    """
+    formatted = [_format_data_screen_value(value, expr)
+                 for value, expr in zip(values, exprs)]
+    if not exprs or not all(_data_screen_series_unit(expr) == "shares" for expr in exprs):
+        return formatted
+    numbers = []
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = None
+        numbers.append(number if number is not None and math.isfinite(number) else None)
+    collision = any(
+        numbers[i] is not None and numbers[j] is not None
+        and numbers[i] != numbers[j] and formatted[i] == formatted[j]
+        for i in range(len(numbers)) for j in range(i + 1, len(numbers))
+    )
+    return ([_format_data_screen_exact_shares(value) for value in values]
+            if collision else formatted)
+
+
+def _format_data_screen_evidence(rule: Dict[str, Any], ev: Dict[str, Any]) -> str:
+    typ = str(rule.get("type") or "")
+    if typ == "range":
+        expr = rule.get("value")
+        value, lower, upper = _format_data_screen_evidence_values(
+            [ev.get("value"), ev.get("min"), ev.get("max")], [expr, expr, expr],
+        )
+        return f"{value} ∈ [{lower}, {upper}]"
+    if typ == "compare":
+        left, right = _format_data_screen_evidence_values(
+            [ev.get("left"), ev.get("right")], [rule.get("left"), rule.get("right")],
+        )
+        return f"{left} {ev.get('op') or rule.get('op') or '?'} {right}"
+    if typ == "strict_rise":
+        values = ev.get("deltas") or []
+        return "增量=" + "/".join(
+            _format_data_screen_value(value, rule.get("series")) for value in values
+        )
+    if typ == "max_consecutive":
+        return f"最大连续={ev.get('max_streak')}，允许≤{ev.get('allowed')}"
+    return "已记录受控规则证据"
+
+
+def summarize_data_screen(r: Dict[str, Any]) -> str:
+    """Compact but auditable summary for the model's final answer."""
+    run_id = r.get("run_id") or "—"
+    if not r.get("ok"):
+        return f"数据筛选 Skill 失败: run_id={run_id} · {r.get('reason', '未知原因')}"
+    universe = r.get("universe") or {}
+    compiled = r.get("compiled_spec") or {}
+    rules = compiled.get("rules") or []
+    source_selector = r.get("source_selector") or {}
+    is_ma_trend = source_selector.get("preset") == "ma_trend"
+    amount_window = ((compiled.get("filters") or {}).get("amount_window") or 20)
+    lines = [
+        (f"数据筛选 Skill 完成: run_id={run_id} · as_of={r.get('as_of')}"
+         f"(requested={r.get('requested_as_of')}) · 股票池={universe.get('label') or universe.get('id')}"
+         f"({universe.get('n_resolved')}只) · 已加载={r.get('n_loaded')}"
+         f" · 精确命中={r.get('n_matched')} · 返回={len(r.get('candidates') or [])}"),
+        "规则(spec_digest=" + str(r.get("spec_digest") or "")[:16] + "): "
+        + "；".join(str(rule.get("label") or rule.get("id")) for rule in rules),
+    ]
+    for row in r.get("candidates") or []:
+        evidence = row.get("evidence") or {}
+        score = row.get("score")
+        score_text = "—" if score is None else f"{float(score):.2f}"
+        base = (f"#{row.get('rank')} {row.get('name')}({row.get('code')}) score={score_text}"
+                f" close={_format_data_screen_value(row.get('close'), {'type': 'field', 'field': 'close'})}"
+                f" {amount_window}日均额={row.get('avg_amount_yi')}亿")
+        if is_ma_trend:
+            bias = ((evidence.get("ma_bias_range") or {}).get("value"))
+            rise = ((evidence.get("ma_strict_rise") or {}).get("deltas"))
+            below = ((evidence.get("no_consecutive_break") or {}).get("values"))
+            streak = ((evidence.get("no_consecutive_break") or {}).get("max_streak"))
+            lines.append(base + f" bias={_format_data_screen_value(bias, {'type': 'bias'})}"
+                         f" MA增量={rise} 近窗跌破={below}/最大连续{streak}")
+        else:
+            details = []
+            for rule in rules:
+                ev = evidence.get(rule.get("id")) or {}
+                details.append(f"{rule.get('label') or rule.get('id')}:"
+                               + _format_data_screen_evidence(rule, ev))
+            lines.append(base + " 证据={" + "；".join(details) + "}")
+    for warning in r.get("warnings") or []:
+        lines.append("⚠ " + str(warning))
+    if not r.get("candidates"):
+        lines.append("没有满足全部硬条件的股票；未补票、未用问财或 v4 近似替代。")
+    return "\n".join(lines)
 
 
 # ── 同进程自 HTTP(handler 是工厂闭包不可导入的模块用;跑在 to_thread,不堵事件循环)──
@@ -333,6 +500,97 @@ def screen_impl(factors: Optional[List[Any]] = None, pool: str = "all",
             "artifact": artifact("screen_result", page="screen", channel="screen",
                                  payload={"cfg": cfg}),
             "raw": r}
+
+
+def data_screen_impl(preset: Optional[str] = "ma_trend",
+                     conditions: Optional[List[Dict[str, Any]]] = None,
+                     universe: str = "all_a", codes: Optional[List[str]] = None,
+                     as_of: Optional[str] = None, topN: int = 5,
+                     ma_window: int = 5, rising_transitions: int = 3,
+                     below_lookback: int = 5, max_consecutive_below: int = 1,
+                     min_bias: float = 0.0, max_bias: float = 0.03,
+                     min_avg_amount_yi: float = 1.0, amount_window: int = 20,
+                     excludeST: bool = True, requireAsOfTrade: bool = True,
+                     requireStrictMetadataPIT: bool = False,
+                     score: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Direct Weiwo adapter for the deterministic data-screening Skill."""
+    def invalid(message: str) -> Dict[str, Any]:
+        return {"ok": False, "content": "数据筛选参数错误: " + message, "artifact": None}
+
+    if conditions is not None and not isinstance(conditions, list):
+        return invalid("conditions 必须是数组")
+    if codes is not None and not isinstance(codes, list):
+        return invalid("codes 必须是数组，不能传逗号字符串")
+    if score is not None and not isinstance(score, dict):
+        return invalid("score 必须是对象")
+    for name, value in (
+        ("excludeST", excludeST), ("requireAsOfTrade", requireAsOfTrade),
+        ("requireStrictMetadataPIT", requireStrictMetadataPIT),
+    ):
+        if not isinstance(value, bool):
+            return invalid(f"{name} 必须是布尔值 true/false")
+    for name, value in (
+        ("topN", topN), ("ma_window", ma_window),
+        ("rising_transitions", rising_transitions), ("below_lookback", below_lookback),
+        ("max_consecutive_below", max_consecutive_below), ("amount_window", amount_window),
+    ):
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(float(value)) or int(value) != value):
+            return invalid(f"{name} 必须是整数，不能传字符串或小数")
+    for name, value in (
+        ("min_bias", min_bias), ("max_bias", max_bias),
+        ("min_avg_amount_yi", min_avg_amount_yi),
+    ):
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))):
+            return invalid(f"{name} 必须是有限数值，不能传字符串或布尔值")
+    if not isinstance(universe, str) or not universe.strip():
+        return invalid("universe 必须是非空字符串")
+    if as_of is not None and not isinstance(as_of, str):
+        return invalid("as_of 必须是 YYYY-MM-DD 字符串")
+    if conditions is None and (not isinstance(preset, str) or not preset.strip()):
+        return invalid("preset 必须是非空字符串")
+    selector: Dict[str, Any]
+    if conditions is not None:
+        selector = {"conditions": conditions, "combine": "all"}
+    else:
+        selector = {"preset": (preset or "ma_trend"), "params": {
+            "ma_window": ma_window,
+            "rising_transitions": rising_transitions,
+            "below_lookback": below_lookback,
+            "max_consecutive_below": max_consecutive_below,
+            "min_bias": min_bias,
+            "max_bias": max_bias,
+        }}
+    min_amount_yuan = float(min_avg_amount_yi) * 100_000_000.0
+    payload: Dict[str, Any] = {
+        "universe": universe, "codes": list(codes or []), "freq": "day",
+        "top_n": topN, "selector": selector,
+        "filters": {
+            "exclude_st": bool(excludeST),
+            "require_asof_trade": bool(requireAsOfTrade),
+            "min_avg_amount_yuan": min_amount_yuan,
+            "amount_window": amount_window,
+            "amount_min_observations": amount_window,
+            "require_strict_metadata_pit": bool(requireStrictMetadataPIT),
+        },
+    }
+    if as_of:
+        payload["as_of"] = as_of
+    if score is not None:
+        payload["score"] = score
+    try:
+        r = _self_post("/screen/data-screen", payload, timeout=300)
+    except Exception as e:
+        return {"ok": False, "content": f"数据筛选 Skill 调用失败: {e}", "artifact": None}
+    run_id = r.get("run_id") if isinstance(r, dict) else None
+    return {
+        "ok": bool(r.get("ok")), "content": summarize_data_screen(r),
+        "artifact": artifact("data_screen_result", channel="screen",
+                             payload={"run_id": run_id, "as_of": r.get("as_of")},
+                             ref=run_id),
+        "raw": r,
+    }
 
 
 def screen_factors_impl(family: str = "", supported_only: bool = True) -> Dict[str, Any]:
@@ -892,9 +1150,9 @@ def _research_run_line(run: Dict[str, Any]) -> str:
     ric = bm.get("rank_ic")
     ric_s = f"{float(ric):+.4f}" if isinstance(ric, (int, float)) else "—"
     st = pr.get("status")
-    if st in ("draft", "draft_compose", "draft_model"):
-        kind = {"draft": "draft", "draft_compose": "组合 draft",
-                "draft_model": "模型 draft(工坊)"}[st]
+    if st in ("draft", "draft_structured", "draft_compose", "draft_model"):
+        kind = {"draft": "draft", "draft_structured": "结构化因子 draft(可重放)",
+                "draft_compose": "组合 draft", "draft_model": "模型 draft(工坊)"}[st]
         verdict = (f"达标 ✅ 已入 {kind}:{pr.get('name')}"
                    "(待人审:因子用 ww_factor_promote/选股页待审区;模型在工坊转正)")
     elif st == "save_failed":
@@ -913,13 +1171,15 @@ def _research_run_line(run: Dict[str, Any]) -> str:
 
 def research_loop_impl(goal: str = "", max_rounds: int = 3, min_rank_ic: float = 0.02,
                        universe: str = "csi300_active", wait: bool = True,
-                       poll_seconds: float = 15.0, timeout_seconds: float = 1800.0) -> Dict[str, Any]:
+                       poll_seconds: float = 15.0, timeout_seconds: float = 1800.0,
+                       governed: bool = True) -> Dict[str, Any]:
     """发起自主研究回路(后台单飞);wait 时轮询到收工并拼成绩单(三段式仓例 model_promote_impl)。"""
     g = (goal or "").strip()
     if not g:
         return {"ok": False, "content": "请给研究目标 goal(如:找一个短周期反转因子)", "artifact": None}
     body = {"goal": g, "max_rounds": int(max_rounds or 3),
-            "min_rank_ic": float(min_rank_ic or 0.02), "universe": universe or "csi300_active"}
+            "min_rank_ic": float(min_rank_ic or 0.02), "universe": universe or "csi300_active",
+            "governed": bool(governed)}
     try:
         r = _self_post("/research/loop/start", body)
     except Exception as e:
@@ -1621,13 +1881,10 @@ def memory_write_impl(text: str = "", scope: str = "global", key: str = "") -> D
     if CTX_REVIEW_MODE.get(None) == "monitor":
         return {"ok": True, "content": f"【monitor·未落盘】将写入帷幄记忆({scope}): {text[:120]}",
                 "artifact": None}
-    # ── 归一化(阶段2,对所有写一律生效;一处 _MEMORY_MAX_LINE 同源,不与复盘消毒互相冲突)──
-    # (a) 通用上限:每条记忆 cap 到 _MEMORY_MAX_LINE 字,防 memory.md 无界膨胀。
-    text = text[:_MEMORY_MAX_LINE]
-    # (b) 复盘路径(CTX_REVIEW_MODE 非 None,阶段1)额外去换行:memory.md 会注入未来每轮主对话 =
-    #     持久注入 channel,把单条多行外部料压成一行(防御纵深;cap 已在上面做过,这里只去换行不重复截断)。
-    if CTX_REVIEW_MODE.get(None) is not None:
-        text = text.replace("\n", " ").replace("\r", " ")
+    # ── 归一化(阶段2,对所有写一律生效)──
+    # memory.md 是逐行协议且会注入未来对话；正常工具写和后台复盘写都必须先压成
+    # 单行再截断，不能让普通 ww_memory_write 绕过协议或制造持久多行注入。
+    text = _re.sub(r"[\r\n]+", " ", text).strip()[:_MEMORY_MAX_LINE]
     key = (key or "").strip()
     # key 消毒:只剔除会破坏 `(key)` 标签格式/行匹配的字符(圆括号/方括号/换行),其余
     # (. / : 空格 ; 等)一律保留 → 仅标点不同的 key 不再被折叠成同一个而跨主题误删(#2)。
@@ -1650,10 +1907,12 @@ def memory_write_impl(text: str = "", scope: str = "global", key: str = "") -> D
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with _MEMORY_LOCK:
-            # replace 收敛(阶段2,仅 global + 显式 key):同 key 旧行先删再 append → 同主题写入覆盖不累加。
+            # replace 收敛(阶段2,三层 + 显式 key):同 key 旧行先删再 append → 同主题写入覆盖不累加。
+            # session 的 conversation-rollup 也必须替换；否则每次压缩都会留下一个过时摘要，
+            # 主动召回时反而把已更新的任务状态拉回上下文。
             # 锚定行首日期前缀 + 精确 key(re.escape),与写入行格式 `- [YYYY-MM-DD] (key) text` 一致,
             # 杜绝子串过匹配误删恰好含字面 `(key) ` 的非 key 正文行(数据丢失防护)。
-            if key and scope in {"global", "workspace"} and path.exists():
+            if key and scope in {"global", "workspace", "session"} and path.exists():
                 _pat = _re.compile(r"^- \[\d{4}-\d{2}-\d{2}\] \(" + _re.escape(key) + r"\) ")
                 old = path.read_text(encoding="utf-8").splitlines()
                 kept = [ln for ln in old if not _pat.match(ln)]
@@ -1667,7 +1926,11 @@ def memory_write_impl(text: str = "", scope: str = "global", key: str = "") -> D
                     n = sum(1 for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip())
                     if n > _CURATOR_TRIGGER_LINES:
                         from guanlan_v2.console.curator import consolidate_memory
-                        consolidate_memory(path, _ARCHIVE_PATH, max_lines=_CURATOR_TRIGGER_LINES)
+                        consolidate_memory(
+                            path, _ARCHIVE_PATH,
+                            max_lines=_CURATOR_TRIGGER_LINES,
+                            protected_lines=_pinned_global_memory_lines(),
+                        )
                 except Exception:  # noqa: BLE001 — 收敛是增强项,失败不挡写入
                     pass
     except Exception as e:
@@ -2841,6 +3104,57 @@ WW_TOOL_TABLE = [
                                    "end": {"type": "string"}}),
      "impl": backtest_impl, "cost": "seconds", "confirm": False,
      "reachable": ["/backtest/vector"]},
+    {"name": "ww_data_screen",
+     "description":
+         "数据筛选 Skill:把自然语言中的量价/技术/时序硬条件编译成受控规则,对真实股票池逐票计算并返回 "
+         "ds_* run_id、真实 as_of、规则摘要、命中数和逐条件数值证据。『筛出/找出/沿均线/最近N日不破/"
+         "满足若干数值条件的股票』优先用本工具；不要改用 ww_factor_analyze、ww_screen_run 或问财近似。"
+         "内置 ma_trend 精确执行:价格在算术移动均线上、均线连续严格上升、窗口内最大连续跌破次数、"
+         "乖离率区间。也可传 closed typed conditions(compare/strict_rise/max_consecutive/range)。"
+         "默认全A当前上市公司快照、日线、20日平均成交额≥1亿元、剔ST/无截止日有效成交。",
+     "input_schema": {"type": "object", "properties": {
+         "preset": {"type": "string", "enum": ["ma_trend"], "default": "ma_trend",
+                    "description": "内置确定性筛选模板；传 conditions 时省略"},
+         "conditions": {"type": "array", "maxItems": 16,
+             "description": (
+                 "可选闭合规则数组；提供后不使用 preset。rule.type 仅 compare/strict_rise/"
+                 "max_consecutive/range；series 仅 field、rolling_mean、rolling_max、bias，禁止 Python/任意代码。"
+             ),
+             "items": {"type": "object", "properties": {
+                 "id": {"type": "string"}, "label": {"type": "string"},
+                 "type": {"type": "string", "enum": ["compare", "strict_rise", "max_consecutive", "range"]},
+                 "left": {"type": "object"}, "right": {"type": "object"},
+                 "op": {"type": "string", "enum": [">", ">=", "<", "<=", "==", "!="]},
+                 "series": {"type": "object"}, "transitions": {"type": "integer"},
+                 "predicate": {"type": "object"}, "lookback": {"type": "integer"},
+                 "max_count": {"type": "integer"}, "value": {"type": "object"},
+                 "min": {"type": "number"}, "max": {"type": "number"},
+             }, "required": ["id", "label", "type"]}},
+         "universe": {"type": "string", "enum": ["all_a", "csi300", "csi500", "csi800", "csi1000", "csi_fast"],
+                      "default": "all_a", "description": "all_a 才表示当前公司主表全A；旧 all 非全A,本工具不建议用"},
+         "codes": {"type": "array", "items": {"type": "string"},
+                   "description": "可选指定代码；提供时覆盖 universe"},
+         "as_of": {"type": "string", "description": "请求截止日 YYYY-MM-DD；周末/未来会回落并披露真实交易日"},
+         "topN": {"type": "integer", "default": 5},
+         "ma_window": {"type": "integer", "default": 5},
+         "rising_transitions": {"type": "integer", "default": 3,
+                                "description": "均线最近多少次相邻变化必须全部严格>0；3次需检查4个均线值"},
+         "below_lookback": {"type": "integer", "default": 5},
+         "max_consecutive_below": {"type": "integer", "default": 1},
+         "min_bias": {"type": "number", "default": 0.0},
+         "max_bias": {"type": "number", "default": 0.03,
+                      "description": "乖离率小数,0.03=3%"},
+         "min_avg_amount_yi": {"type": "number", "default": 1.0,
+                               "description": "截至 as_of 的 amount_window 日平均成交额下限(亿元)"},
+         "amount_window": {"type": "integer", "default": 20},
+         "excludeST": {"type": "boolean", "default": True},
+         "requireAsOfTrade": {"type": "boolean", "default": True},
+         "requireStrictMetadataPIT": {"type": "boolean", "default": False,
+                                      "description": "历史回放若必须有严格逐日ST/名称元数据则设 true；当前快照会诚实失败"},
+         "score": {"type": "object", "description": "自定义 typed conditions 的可选受控排序；preset 通常省略"},
+     }},
+     "impl": data_screen_impl, "cost": "seconds", "confirm": False,
+     "reachable": ["/screen/data-screen"]},
     {"name": "ww_screen_run",
      "description":
          "九视角选股(v4 模型 + 因子混合 α)+ 约束。运行后自动把选股界面弹到右栏,无需再调 ww_show_page。"
@@ -3289,9 +3603,11 @@ WW_TOOL_TABLE = [
      "reachable": ["/screen/picks", "/seats/basket_perf"]},
     {"name": "ww_research_loop",
      "description":
-         "自主研究回路(P2):goal 一句话 → 后端 LLM 生成因子工作流 → 真算指标(RankIC/样本外)→ "
+         "受治理自主研究回路(P2):goal 一句话 → 后端 LLM 生成因子工作流 → 真算指标(RankIC/样本外)→ "
          "未达标 LLM 批判改进 → 循环(服务端钳 ≤5 轮)。达标单因子自动存 factorlib 为 draft"
-         "(不上选股货架,人审 ww_factor_promote/选股页待审区转正);逐轮落档;最佳图存工作流库。"
+         "(不上选股货架,人审 ww_factor_promote/选股页待审区转正);结构化因子按完整处理链保存。"
+         "若图声明过拟合审计,必须由 TrialLedger 封存完整试验家族并在服务端固定策略下 PASS;"
+         "逐轮落档;最佳图存工作流库。"
          "花 LLM 钱+可能写 draft,需确认。",
      "input_schema": {"type": "object", "properties": {
          "goal": {"type": "string", "description": "研究目标,如:找一个短周期反转因子"},
@@ -3299,6 +3615,8 @@ WW_TOOL_TABLE = [
          "min_rank_ic": {"type": "number", "default": 0.02, "description": "达标门:RankIC 下限(另要求 oos=robust)"},
          "universe": {"type": "string", "default": "csi300_active",
                       "description": "求值股票池(csi300_active/csi_fast/csi500/csi800/all/sample30)"},
+         "governed": {"type": "boolean", "default": True,
+                      "description": "默认启用 TrialLedger/Governor 受治理研究;false 仅作旧回路兼容"},
          "wait": {"type": "boolean", "default": True},
          "poll_seconds": {"type": "number", "default": 15},
          "timeout_seconds": {"type": "number", "default": 1800}},
@@ -3654,6 +3972,9 @@ WW_TOOL_TABLE = [
      "reachable": []},
 ]
 
+
+from guanlan_v2.console.workflow_tools import TOOL_TABLE as _WORKFLOW_TOOL_TABLE
+WW_TOOL_TABLE.extend(_WORKFLOW_TOOL_TABLE)
 
 # 放行的引擎工具(已注册在 TOOL_REGISTRY,只进白名单不包装):7 原 buddy 研究 + 11 Phase-A 引擎。
 # 全在 research 域、无因子域。

@@ -13,6 +13,17 @@ function WwBench({ state, workspaceId, focus, chatWide, onToggleWide, onClose, o
   const wrapRef = React.useRef(null);
   const [scale, setScale] = React.useState(1);
 
+  React.useEffect(() => {
+    const backToChat = (event) => {
+      if (event.origin !== location.origin || !event.data || event.data.type !== 'guanlan:ww:back-to-conversation') return;
+      const frames = wrapRef.current ? Array.from(wrapRef.current.querySelectorAll('iframe')) : [];
+      if (!frames.some(frame => frame.contentWindow === event.source)) return;
+      if (onClose) onClose();
+    };
+    window.addEventListener('message', backToChat);
+    return () => window.removeEventListener('message', backToChat);
+  }, [onClose]);
+
   // 每研究空间一个工作台:同一股票/ETF 下的多个会话共享画布、报告缓存与 handoff。
   // workspaceId 缺失时回退 sid，兼容旧后端/旧数据。
   const wsId = workspaceId || state.sid || 'rw_general';
@@ -27,6 +38,7 @@ function WwBench({ state, workspaceId, focus, chatWide, onToggleWide, onClose, o
     const first = !lastRef.current.startsWith(sidPrefix);
     lastRef.current = identity;
     const drive = (art) => {
+      if (art.kind === 'workflow') return; // 整图仅通过对话卡显式打开；历史重放不能发交棒。
       const pg = PAGES[art.page];
       if (!pg) return;
       const assetId = art.page === 'factor' && art.payload && /^wa_[0-9a-f]{16}$/.test(String(art.payload.asset_id || ''))

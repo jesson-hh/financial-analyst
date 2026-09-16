@@ -39,7 +39,10 @@ def portfolio_stats(ls: pd.Series, ppy: int) -> Dict[str, float]:
     ann = navend ** (ppy / n) - 1 if navend > 0 else nan
     vol = float(ls.std() * np.sqrt(ppy)) if n > 1 else 0.0
     sharpe = float(ls.mean() * ppy / vol) if vol and vol > 0 else nan
-    mdd = float((nav / nav.cummax() - 1).min())
+    # NAV starts after the first realised return. Include initial capital 1.0
+    # in the high-water mark, otherwise an opening loss/cost disappears from
+    # drawdown entirely (e.g. -50%, then +100% incorrectly used to report 0).
+    mdd = float((nav / nav.cummax().clip(lower=1.0) - 1).min())
     calmar = float(ann / abs(mdd)) if (mdd < 0 and ann == ann) else nan
     win = float((ls > 0).mean())
     return {"ann_return": float(ann) if ann == ann else nan, "volatility": vol, "sharpe": sharpe,

@@ -53,7 +53,13 @@ MUTATING_TOOLS = frozenset({
     "ww_workspace_factor_save",
     "ww_workspace_factor_publish",
 })
-ALL_WORKSPACE_TOOLS = READ_TOOLS | MUTATING_TOOLS
+# These platform research tools persist scoped research records, not arbitrary
+# project code. They retain their own save/run confirmation gates in all modes.
+WORKFLOW_CONTEXT_TOOLS = frozenset({
+    "ww_workflow_catalog", "ww_workflow_generate", "ww_workflow_validate",
+    "ww_workflow_save", "ww_workflow_get", "ww_workflow_run", "ww_workflow_runs",
+})
+ALL_WORKSPACE_TOOLS = READ_TOOLS | MUTATING_TOOLS | WORKFLOW_CONTEXT_TOOLS
 
 # Autonomous mode may perform reversible in-root edits and private draft saves
 # without stopping.  Publishing into the global library and executing arbitrary

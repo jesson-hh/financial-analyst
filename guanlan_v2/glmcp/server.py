@@ -217,7 +217,7 @@ def build_server(console_store: Any = None):
     server = Server(
         "guanlan",
         instructions=(
-            "观澜本机研究控制面。调用 ww_workspace_* 前先用 guanlan_workspace_list "
+            "观澜本机研究控制面。调用 ww_workspace_* 和整图 ww_workflow_* 工具前先用 guanlan_workspace_list "
             "取得 workspace_id，并在每次调用中显式传入。全局行情/落子工具不需要空间。"
             "写入和执行类工具受服务端写门及空间模式双重限制；错误必须原样报告，绝不假成功。"
         ),

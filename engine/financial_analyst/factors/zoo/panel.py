@@ -12,6 +12,8 @@ Operators (``rank``, ``ts_rank``, ``delta``, …) live in ``operators.py``
 and consume / return same-shape pd.Series.
 """
 from __future__ import annotations
+import hashlib
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -19,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 _DAILY_BASIC_FIELDS = ("pe_ttm", "pb", "ps_ttm", "dv_ttm", "total_mv", "circ_mv", "turnover_rate")
-# Precomputed technical indicators (day freq; loaded via loader.fetch_tech if available).
+# Daily technical indicators (Qlib loader causally recomputes with provenance).
 _TECH_FIELDS = ("rsi_14", "macd_signal", "amihud_20", "mom_20", "mom_60", "mom_120")
 
 # W1b: financial-statement fields (quality/growth/leverage), merged PIT (as-of
@@ -38,6 +40,59 @@ _FUND_FLOW_FIELDS = (
     "medium_net_amount", "medium_net_pct",
     "small_net_amount", "small_net_pct",
 )
+
+
+def _provenance_digest(value) -> Optional[str]:
+    """Hash JSON audit facts once; unsupported custom-loader values are explicit."""
+    try:
+        encoded = json.dumps(value, sort_keys=True, ensure_ascii=True,
+                             separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _technical_provenance_summary(manifest: dict, requested_codes: Optional[int] = None) -> dict:
+    """Bounded pandas attrs, never a per-code tree that __finalize__ deep-copies.
+
+    Full manifest identity includes request/cache execution facts, so it is NOT
+    a pure market-data content digest. Numeric feature hashes remain separate.
+    Counts describe metadata availability, not finite six-field data coverage.
+    """
+    by_code = manifest.get("by_code") or {}
+    errors = manifest.get("errors") or {}
+    rows = [v for v in by_code.values() if isinstance(v, dict)]
+    def _valid_hash(value):
+        return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    hashes = {v["definition_hash"] for v in rows if _valid_hash(v.get("definition_hash"))}
+    versions = {str(v["schema"]) for v in rows if v.get("schema")}
+    dates = [str(v["last_source_date"]) for v in rows if v.get("last_source_date")]
+    n_requested = requested_codes if requested_codes is not None else len(set(by_code) | set(errors))
+    digest = _provenance_digest(manifest)
+    return {
+        "schema": "technical_provenance_summary_v1",
+        "manifest_sha256": digest,
+        "manifest_sha256_status": "canonical_json" if digest else "unavailable_non_json_values",
+        "manifest_digest_scope": "full manifest incl request/cache metadata; not a data-content hash",
+        "manifest_storage": "origin PanelData.technical_provenance_manifest; attrs is summary only",
+        "definition_hash": next(iter(hashes)) if len(hashes) == 1 else None,
+        "definition_hashes_sha256": _provenance_digest(sorted(hashes)),
+        "definition_hash_count": len(hashes),
+        "definition_hash_code_count": sum(_valid_hash(v.get("definition_hash")) for v in rows),
+        "technical_version": next(iter(versions))[:120] if len(versions) == 1 else None,
+        "technical_versions_sha256": _provenance_digest(sorted(versions)),
+        "technical_version_count": len(versions),
+        "requested_code_count": int(n_requested),
+        "provenance_code_count": len(by_code),
+        "missing_provenance_code_count": max(0, int(n_requested) - len(by_code)),
+        "error_code_count": len(errors),
+        "coverage_scope": "code provenance only; not finite feature coverage",
+        "last_source_date_min": min(dates)[:32] if dates else None,
+        "last_source_date_max": max(dates)[:32] if dates else None,
+        "pit_certified": False,
+        "price_adjustment": "provider inherited; not independently PIT-certified",
+        "status": str(manifest.get("status", "partial_metadata" if len(by_code) < n_requested or errors else "complete_metadata"))[:80],
+    }
 
 
 def _merge_daily_basic(panel: pd.DataFrame, loader, codes: list, start: str, end: str) -> None:
@@ -84,22 +139,36 @@ def _merge_daily_basic(panel: pd.DataFrame, loader, codes: list, start: str, end
             panel[col] = db_all[col].reindex(panel.index)
 
 
-def _merge_tech(panel: pd.DataFrame, loader, codes: list, start: str, end: str) -> None:
-    """Merge precomputed technical indicators (rsi_14/macd_signal/amihud_20/mom_*) onto the
-    (datetime, code) panel in place. Mirrors _merge_daily_basic; loaders without ``fetch_tech``
-    (or missing .bin) simply yield NaN columns (honest contract). New panel columns are then
-    auto-exposed as DSL fields via compile_factor's column setdefault — no whitelist edit needed."""
+def _merge_tech(panel: pd.DataFrame, loader, codes: list, start: str, end: str) -> dict:
+    """Merge daily technical values on exact dates, preserving causal provenance.
+
+    Missing/failed loaders leave named NaN columns, not undefined DSL identifiers.
+    No forward fill and no panel-derived synthetic amount is used for Amihud.
+    Return full audit manifest separately; pandas attrs holds only its summary.
+    """
+    for col in _TECH_FIELDS:
+        if col not in panel:
+            panel[col] = np.nan
+    provenance = {}
+    errors = {}
     if not hasattr(loader, "fetch_tech"):
-        return
+        manifest = {"by_code": {}, "errors": {}, "status": "loader_unavailable"}
+        panel.attrs["technical_provenance"] = _technical_provenance_summary(manifest, len(codes))
+        return manifest
 
     def _one(code):
         try:
             tb = loader.fetch_tech(code, start, end)
-        except Exception:
+        except Exception as exc:
+            errors[str(code)] = str(exc)[:200]
             return None
         if tb is None or len(tb) == 0:
             return None
         tb = tb.copy()
+        provenance[str(code)] = tb.attrs.get("technical_provenance", {"policy": "loader_supplied_unversioned"})
+        # Individual attrs vary by stock; collect explicitly instead of relying
+        # on pandas.concat attrs equality, which discards distinct provenance.
+        tb.attrs = {}
         if "trade_date" in tb.columns:
             tb = tb.set_index("trade_date")
         try:
@@ -115,13 +184,16 @@ def _merge_tech(panel: pd.DataFrame, loader, codes: list, start: str, end: str) 
     _workers = min(16, (os.cpu_count() or 4) * 2)
     with ThreadPoolExecutor(max_workers=_workers) as _ex:
         frames = [f for f in _ex.map(_one, codes) if f is not None]
+    manifest = {"by_code": provenance, "errors": errors}
+    panel.attrs["technical_provenance"] = _technical_provenance_summary(manifest, len(codes))
     if not frames:
-        return
+        return manifest
     tb_all = pd.concat(frames)
     tb_all = tb_all[~tb_all.index.duplicated(keep="last")]
     for col in _TECH_FIELDS:
         if col in tb_all.columns:
             panel[col] = tb_all[col].reindex(panel.index)
+    return manifest
 
 
 def _merge_financials(panel: pd.DataFrame, loader, codes: list, start: str, end: str) -> None:
@@ -254,12 +326,33 @@ def _merge_fund_flow(panel: pd.DataFrame, loader, codes: list, start: str, end: 
 
 
 class PanelData:
-    def __init__(self, df: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, *, technical_provenance_manifest: Optional[dict] = None):
         if not isinstance(df.index, pd.MultiIndex) or df.index.nlevels != 2:
             raise ValueError(
                 "PanelData requires a 2-level MultiIndex; got "
                 f"{type(df.index).__name__} with {getattr(df.index, 'nlevels', '?')} levels"
             )
+        # Migrate older in-memory callers before pandas.copy/finalize can copy
+        # an 800-stock manifest repeatedly. Do not mutate their original attrs.
+        legacy = df.attrs.get("technical_provenance")
+        if isinstance(legacy, dict) and "by_code" in legacy:
+            if technical_provenance_manifest is None:
+                technical_provenance_manifest = legacy
+            attrs = dict(df.attrs)
+            attrs["technical_provenance"] = _technical_provenance_summary(
+                technical_provenance_manifest, len(df.index.get_level_values(1).unique()))
+            # Public constructor starts with empty attrs, while copy below owns
+            # the numeric buffers before any normalisation or added columns.
+            df = pd.DataFrame(df, copy=False)
+            df.attrs = attrs
+        elif technical_provenance_manifest is not None and not legacy:
+            attrs = dict(df.attrs)
+            attrs["technical_provenance"] = _technical_provenance_summary(technical_provenance_manifest)
+            df = pd.DataFrame(df, copy=False)
+            df.attrs = attrs
+        # This is deliberately ordinary object metadata, never pandas attrs.
+        # A wrapper made only from df may have summary but no attached manifest.
+        self.technical_provenance_manifest = technical_provenance_manifest
         # Normalise level names so operators can rely on them.
         df = df.copy()
         df.index = df.index.set_names(["datetime", "code"])
@@ -555,14 +648,15 @@ class PanelData:
                     "BenchmarkLoader failed (skipping benchmark column): %s", e,
                 )
 
+        technical_manifest = None
         # SP-B.1b: merge daily_basic fundamentals (day freq only — daily_basic is day-only)
         if freq == "day":
             _merge_daily_basic(panel, loader, codes, start, end)
             # 精算技术指标(RSI/MACD/Amihud/动量)— loader 有 fetch_tech 才生效,缺则 NaN。
-            _merge_tech(panel, loader, codes, start, end)
+            technical_manifest = _merge_tech(panel, loader, codes, start, end)
             # W1b: merge financial-statement fields (quarterly, PIT as-of ann_date).
             _merge_financials(panel, loader, codes, start, end)
             # 资金面:东财五档日频净流入(EOD PIT;缺即 NaN;对旧因子是 no-op 加列)。
             _merge_fund_flow(panel, loader, codes, start, end)
 
-        return cls(panel)
+        return cls(panel, technical_provenance_manifest=technical_manifest)

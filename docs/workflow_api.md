@@ -61,7 +61,8 @@
 格式:**`type`** 标题 — 入:`端口id:dt` · 出:`端口id:dt` · 参数 · 后端。
 
 ### 01 · 基础工具(输入层,无前序)
-- **`source`** 数据源 — 入:无 · 出:`data:series` · 参 `scope`(个股/自选/小池/全市场)、`code`、`universe`(§6)· 后端:无。**特殊**:它只**全局设定 universe**(取其 `params`,见 §6),**不需要连边**;图里放一个即可,省略则全局默认 `csi_fast`。
+- **`source`** 数据源 — 入:无 · 出:`data:series` · 参 `scope`(个股/自选/小池/全市场)、`code`、`universe`(§6)· 后端:无。**特殊**:`data` 是研究上下文载体，只能连接下游节点的 `src` 口，用来下传股票池、代码、日期与样本外设置；它不是因子表达式。省略或未接时下游诚实使用默认上下文。
+- **`data_screen`** 数据筛选 Skill — 入:`src:series`(必须接 `source.data`)· 出:`candidates:data_screen`(终端)· 参 `preset=ma_trend,ma_window,rising_transitions,below_lookback,max_consecutive_below,min_bias,max_bias,top_n,min_avg_amount_yi,amount_window`。逐票执行受控硬规则并持久化 `ds_*` 证据。它只表示**当前截面**：`candidates` 不得连接任何下游或历史回测；要回测同一规则需未来的逐期滚动重算能力，v1 尚未提供。`all_a` 仅供该节点，且 source 必须显式选池或填写 `source.codes`，不能用空的“自动”。
 - **`formula`** 公式输入 — 入:无 · 出:`out:series` · 参 `expr`(一条 §4 DSL 表达式)· 后端:无(透传表达式)。**这是「造因子」的主入口。**
 - **`python`** Python 代码 — 入:无 · 出:`out:series` · 参 `code` · 后端:无(**当前透传,不执行自定义代码**;不建议 LLM 用)。
 - **`factorlib`** 因子库 — 入:无 · 出:`out:series` · 参 `query`(模糊匹配)、`name`(精确名)· 后端:GET `/factorlib/list`(退 `/factor/list`)。从已迁移/注册因子里选一个。
@@ -91,19 +92,21 @@
 
 ## 3. 端口类型 dt 与连线规则
 
-**铁律:一条边 `from`端口.dt 必须 === `to`端口.dt。**(画布手连会拦不匹配;LLM 出图须自校验。)
+**铁律:默认一条边 `from`端口.dt 必须 === `to`端口.dt。** 仅有两个执行器支持的便利连接:formula/factorlib 的 `series` 可直接进 `factor` 口；feature.fe 可直接进 backtest/portfolio 的 `factor` 口。source.data 只是数据上下文，只能进下游 `src` 口，不能当普通 series 或因子。
 
 | dt | 谁产出 | 谁接收 |
 |---|---|---|
-| `series` | source.data · formula.out · python.out · factorlib.out | feature.feat · feature.label |
+| `series`（上下文） | source.data | data_screen/feature/orthogonalize/tsic/event/relstat.src（仅这些 `src` 口） |
+| `series`（因子/信号） | formula.out · factorlib.out | orthogonalize.signal · feature.feat/label · tsic.factor · event.trigger · relstat.factor · risk/garch/attrib/tvbeta.factor |
 | `fe` | feature.fe | xgb/lgbm/svm/rf/nn/lstm.fe · pca/spearman.fe · mf.f1 · mf.f2 |
 | `model` | xgb/lgbm/svm/rf/nn/lstm.model | mf.m1 · mf.m2 |
-| `factor` | pca/spearman/mf.factor | iccalc/analysis/backtest.factor |
+| `factor` | pca/spearman/mf.factor；或 formula/factorlib.series 便利连接；或 feature.fe 直连 backtest/portfolio | iccalc/analysis/backtest/portfolio.factor |
 | `ic`(终端) | iccalc.ic | → 结果抽屉 |
 | `report`(终端) | analysis.report | → 结果抽屉 |
 | `result`(终端) | backtest.result | → 结果抽屉 |
+| `data_screen`(终端) | data_screen.candidates | → 结果抽屉；不得接下游 |
 
-- **终端 dt = `{report, ic, result}`** → 运行后进结果抽屉。**一张图至少要有一个终端节点**(analysis/iccalc/backtest)才出结果。
+- **终端 dt 包含 `{data_screen, report, ic, result, ...}`** → 运行后进结果抽屉。**一张图至少要有一个终端节点**才出结果。
 - **`model` 不能直连 `factor` 口** → 模型要分析/回测,必须先经 `mf`(model→mf→factor)。
 
 ---
@@ -208,9 +211,30 @@ base = 页面同源(`http://127.0.0.1:9999` 或 `:9998`)。**失败一律 `{ok:f
 ## 8. LLM 出图自校验清单
 
 1. 每个 `node.type` ∈ §2 目录(共 17 种)。
-2. 每条 edge `from.dt === to.dt`(§3 表),端口 id 准确。
-3. 至少一个**终端节点**(`analysis`/`iccalc`/`backtest`)。
+2. 每条 edge 满足§3 的同类 dt 或两个明确便利连接，端口 id 准确；source.data 只能接下游 `src` 口。
+3. 至少一个**终端节点**(`data_screen`/`analysis`/`iccalc`/`backtest` 等)。
 4. ML / PCA / Spearman 节点的入口是 **`fe`** → 上游必须有 `feature` 节点(不能让 `formula` 直连模型)。
 5. **`model` 要分析/回测,必须经 `mf`**(model 不能直连 factor 口)。
 6. `formula.expr` 只用 §4 字段 + 算子,不含 `__`/`import`/`lambda`;`universe` ∈ §6。
-7. 放一个 `source` 节点设 universe(或省略 → `csi_fast`);universe 在全图统一。
+7. 新建图必须显式绑定 `source` 上下文，不能省略后悄悄使用默认池；多源图终端以 `context_source_id` 明确引用。
+8. `data_screen` 必须接一个显式选池(或有 `source.codes`)的 `source.data`；`all_a` 只能连接 `data_screen.src`。`data_screen.candidates` 是当前截面终端，不得接下游/历史回测；同图其他终端只能是口径独立的并行研究。
+
+## 9. 对话自主建图与持久任务（2026-09-05）
+
+新建图以 `GET /workflow/catalog` 返回的目录、DSL 和 `graph_schema` 为准，旧静态示例不代表完整最新契约。`POST /workflow/validate` 接收 `{graph}`，检查结构、上下文与纯 DSL 安全边界，不执行、不保证行情覆盖或策略有效。所有参与计算的因子都必须显式连线；生成失败返回失败，不能自动套模板冒充 AI 提案。
+
+帷幄使用 `ww_workflow_catalog → 自行构图或 ww_workflow_generate → ww_workflow_validate → ww_workflow_save → ww_workflow_run → ww_workflow_runs`。图与任务由会话绑定研究空间；MCP 调用需显式 workspace_id，再由服务验证。保存与执行保留确认门，不因自主模式而获得发布模型、切默认或下单权限。保存使用内容摘要版本名，重复提交同内容复用，不覆盖原有同名图。
+
+`POST /workflow/run/start` 返回后台 run_id；同 ID 同图/参数重复请求只重连，同 ID 不同内容拒绝。`GET /workflow/run/list?workspace_id=...` 发现本空间历史，`GET /workflow/run/status/{run_id}?workspace_id=...` 返回原图、node_state、真实结果和 recovery 能力：
+
+- queued/running：仅轮询原任务，跨页不会启动第二个任务。
+- completed：读取持久结果；部分节点失败仍展示真实错误。
+- failed/interrupted：恢复图、已有状态和失败原因，不声称节点续算。当前没有可重放中间输出检查点，`can_resume=false`；重算需明确新任务。
+
+对话工作流卡仅点击后进入工作台，不因历史重放自动切走用户画布。工作台保留空间、session_id 和 run_id。旧 model/validate 展示板通过 legacy_recovery 标记保留历史内容，需要另建可执行研究，禁止猜测原训练配置。
+
+新图用 `source.params.research_freq=day/week/month` 明确研究采样；报价频率 `freq` 不能代替研究采样。缺省保留旧节点行为，不静默改变历史图。布尔 `wf_refit` 与原中文“是/否”均正确显示，不在渲染时改写图。
+
+Codex 的待审批工具可能返回尚未完成的 Code Mode cell；Agent 必须继续等待同一个 cell，不能输出 final 来等待人工确认。结束回合会撤销该回合权限，取消卡必须明确显示，不能自动批准或后台重试。此提示不是节点续算协议。
+
+研究级回测在已选持仓缺少退出行情时仍失败关闭，不用未来收益可用性换股或补假价。真实停牌下的持仓延续/复牌退出账本尚待完善。分析报告保留下来不等于回测节点成功。
