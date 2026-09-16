@@ -523,6 +523,12 @@ class TestLiveClientSourceEcho:
             catalog_digest="b" * 64,
             schema_registry_digest=p3_registry.registry_digest)
         stub = _ProbeStub({"ok": True, "status": "ok",
+                           "source": "tencent_realtime_quote",
+                           "provider": "tencent", "actual_provider": "tencent",
+                           "fallback_level": 0, "attempted_sources": [],
+                           "cache_hit": False, "network_used": True,
+                           "circuit_state": "closed",
+                           "schema_version": "guanlan.live-source-result.v2",
                            "items": [{"name": "贵州茅台", "price": 1000.0}],
                            "n": 1, "error": "", "note": "",
                            "pulled_at": "2026-07-16T15:00:00"})
@@ -533,14 +539,14 @@ class TestLiveClientSourceEcho:
         assert raw.capability_ref == spec.capability_ref
         assert raw.request_digest == req.request_digest
 
-    def test_supported_set_is_exactly_the_three_methods(self):
+    def test_supported_set_is_exactly_the_four_methods(self):
         assert live_data._SUPPORTED_METHOD_IDS == frozenset(
-            {"verified_snapshot", "news", "ohlcv"})
+            {"verified_snapshot", "news", "ohlcv", "indicators"})
 
     @pytest.mark.parametrize(
-        "method_id", ["indicators", "fundamentals", "signals", "instrument_names"])
+        "method_id", ["fundamentals", "signals", "instrument_names"])
     def test_unsupported_methods_refuse_loudly(self, method_id):
-        """WRONG-INPUT arm: the other four sealed method ids raise the typed
+        """WRONG-INPUT arm: the other three sealed method ids raise the typed
         ``RoutingConfigurationError`` BEFORE any probe/scope use — Task 2's
         supported-set guard stands on this refusal firing first."""
         surf = phase3_data_surface()
@@ -759,9 +765,9 @@ class TestDEDeterministicHandlerABI:
         bytes, same ids at version 1), and the SAME raw bundle now resolves a
         trusted factory for both, from ``pipeline/pv_aux.py``.  The pre-flip
         refusal text is asserted ABSENT so the flip cannot be satisfied by a
-        weaker binding, and the ``handler_registry``-free call shape in
-        live_decide is re-pinned: the closure had to reach production without a
-        second wiring."""
+        weaker binding.  Live-decide's current explicit registry call is also
+        re-pinned: it supplies the durable payload reader required by these
+        deterministic handlers, never a second implementation or fallback."""
         from guanlan_v2.orchestration.pipeline import pv_aux as PV
 
         for hid in ("handler.pv.price_action", "handler.pv.microstructure"):
@@ -775,8 +781,11 @@ class TestDEDeterministicHandlerABI:
         with pytest.raises(CatalogMaterialError, match="no handler factory bound"):
             bundle.factories.handler_factory(
                 _catalog_handler_ref(snap, "handler.quant.factor"))
-        # live_decide's deep bundle passes no handler_registry, by source:
-        assert "build_production_catalog_runtime(snapshot)" in inspect.getsource(LD)
+        # The production specialization carries only the durable payload reader
+        # that resolves the data bridge's typed evidence.
+        live_source = inspect.getsource(LD)
+        assert "handler_registry=_pv_aux.pv_aux_handler_registry(" in live_source
+        assert "payload_reader=stores.payloads" in live_source
 
     def test_two_stage_handler_abi(self, snap, bundle):
         """The executor's deterministic branch is two-stage:

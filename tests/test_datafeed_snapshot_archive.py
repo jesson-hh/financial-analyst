@@ -397,9 +397,17 @@ import inspect  # noqa: E402
 
 def test_guard_read_tape_read_live_signatures_unchanged():
     """SWR 热路径签名逐参不变(纯加法 phase 绝不改 read_tape/read_live 契约)。"""
-    assert list(inspect.signature(mt.read_tape).parameters) == ["fresh_within_s"]
-    assert list(inspect.signature(ff.read_live).parameters) == [
-        "kind", "refresh", "cache_dir", "ttl_s", "now", "sector_fn", "build_fn"]
+    # ``allow_refresh`` is the reviewed keyword-only scoped-read extension:
+    # health/Codex audits may inspect the cache without turning a read into a
+    # network or persistence side effect.  The original positional ABI stays.
+    tape_params = inspect.signature(mt.read_tape).parameters
+    assert list(tape_params) == ["fresh_within_s", "allow_refresh"]
+    assert tape_params["allow_refresh"].kind is inspect.Parameter.KEYWORD_ONLY
+    live_params = inspect.signature(ff.read_live).parameters
+    assert list(live_params) == [
+        "kind", "refresh", "cache_dir", "ttl_s", "now", "sector_fn", "build_fn",
+        "allow_refresh"]
+    assert live_params["allow_refresh"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_guard_read_tape_warming_payload_keys_unchanged(monkeypatch, tmp_path):
@@ -408,7 +416,10 @@ def test_guard_read_tape_warming_payload_keys_unchanged(monkeypatch, tmp_path):
     monkeypatch.setattr(mt, "_CACHE_PATH", tmp_path / "nope.json")
     monkeypatch.setattr(mt, "_trigger_refresh", lambda *a, **k: True)
     out = mt.read_tape()
-    assert set(out) == {"ok", "warming", "pulled_at", "sources", "derived", "freshness", "note"}
+    assert set(out) == {
+        "ok", "warming", "pulled_at", "sources", "derived", "freshness",
+        "refresh_state", "note",
+    }
 
 
 def test_guard_read_live_payload_keys_unchanged(tmp_path):

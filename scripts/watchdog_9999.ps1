@@ -11,12 +11,33 @@
 #   - listener but HTTP dead -> after $HangLimit consecutive failures, kill by PID and restart
 # Logs: var\watchdog-9999.log (watchdog) and var\server-9999.log (server stdout/stderr).
 # The server itself (guanlan_v2/server.py) is never modified.
+param(
+    [string]$RepoRoot = $env:GUANLAN_REPO_ROOT,
+    [string]$PythonPath = $env:GUANLAN_PYTHON
+)
 
 $ErrorActionPreference = 'Continue'
 
-$Repo       = 'G:\guanlan-v2'
-$Python     = 'G:\financial-analyst\.venv\Scripts\python.exe'
+$Repo = if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+} else {
+    (Resolve-Path -LiteralPath $RepoRoot -ErrorAction Stop).Path
+}
+$PythonCandidates = @(
+    $PythonPath,
+    $(if ($env:VIRTUAL_ENV) { Join-Path $env:VIRTUAL_ENV 'Scripts\python.exe' }),
+    (Join-Path $Repo '.venv\Scripts\python.exe'),
+    $(try { (Get-Command python.exe -ErrorAction Stop).Source } catch { $null })
+) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+$Python = $PythonCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $Python) {
+    throw 'No Python interpreter found. Pass -PythonPath or set GUANLAN_PYTHON/VIRTUAL_ENV.'
+}
+$Python = (Resolve-Path -LiteralPath $Python).Path
 $ServerPy   = Join-Path $Repo 'guanlan_v2\server.py'
+if (-not (Test-Path -LiteralPath $ServerPy -PathType Leaf)) {
+    throw "Invalid Guanlan repository root (missing guanlan_v2\server.py): $Repo"
+}
 $VarDir     = Join-Path $Repo 'var'
 $WdLog      = Join-Path $VarDir 'watchdog-9999.log'
 $SrvLog     = Join-Path $VarDir 'server-9999.log'

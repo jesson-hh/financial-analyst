@@ -131,7 +131,7 @@ from guanlan_v2.orchestration.pipeline.candidates import (
 )
 from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 from guanlan_v2.orchestration.pipeline.live_decide import (
-    SubjectPromptAssembler,
+    ScreeningSubjectPromptAssembler,
     make_orchestrated_decide,
 )
 from guanlan_v2.orchestration.pipeline.screening import (
@@ -329,7 +329,7 @@ def _det_handler_factory(payload_builder):
     def factory(worker, resolved):
         def handler(*, node, input_snapshot, contributions, data_result_refs):
             return W.ModelResult(payload=payload_builder(), rendered_text="det",
-                                 input_tokens=0, output_tokens=1)
+                                 input_tokens=0, output_tokens=0)
         return handler
     return factory
 
@@ -553,8 +553,8 @@ def a_chain(env, trimmed_catalog, tmp_path_factory):
         gateway_factories[i] = gateway_factory
 
         subject = RunSubject(code=lane.code, as_of=slate.as_of)
-        assembler = SubjectPromptAssembler(subject=subject,
-                                           subject_ref=lane.subject_ref)
+        assembler = ScreeningSubjectPromptAssembler(
+            subject=subject, subject_ref=lane.subject_ref)
         binding = LaneExecutionBinding(
             lane="main", candidate_plan_digest=lane.candidate_plan_digest,
             reservation_id=reservation.reservation_id,
@@ -628,7 +628,7 @@ class TestAChainE2E:
         assert {o.lease_id for o in outcomes} == {lease.lease_id}
         assert lease.max_admissions == preview.n_codes == 3
         assert (lease.budget_cap_llm_invocations
-                == preview.total_budget_llm_invocations == 18)
+                == preview.total_budget_llm_invocations == 36)
         for outcome, entry in zip(outcomes, a_chain.batch.entries):
             assert outcome.approval.decision is ApprovalDecision.APPROVED
             assert outcome.approval.actor_id == f"lease:{lease.lease_id}"
@@ -747,7 +747,10 @@ class TestAChainE2E:
                        lane.request.request_id)},
             key=len, reverse=True)
         digest_re = re.compile(r"[0-9a-f]{32,}")
-        code_re = re.compile(r"(?<!\d)\d{6}(?!\d)")
+        # Match the fixture's stock identities, not every six-digit integer:
+        # the v2 retry/repair token envelope is legitimately six digits.
+        code_re = re.compile(
+            rf"(?<!\d)(?:{'|'.join(re.escape(code) for code in CODES)})(?!\d)")
         for schema_key in _PLAN_SIDE_SCHEMAS:
             for stored in stored_by_schema.get(schema_key, ()):
                 blob = stored.model.model_dump_json()
@@ -911,7 +914,7 @@ class TestBChainE2E:
         """The Task-8b posture on the live lane: one store, two subjects, the
         completed run's events beside the refused candidate's evidence."""
         stored = dict(b_chain.env.stores._shared.backend.payloads).values()
-        subjects = [s for s in stored if s.schema_key == "RunSubject@1"]
+        subjects = [s for s in stored if s.schema_key == "RunSubject@2"]
         codes = {json_blob for s in subjects
                  for json_blob in re.findall(r'"(\d{6})"',
                                              s.model.model_dump_json())}
@@ -1048,7 +1051,8 @@ def _late_failure_draft(env) -> tuple[OrchestrationRequest, PlanDraft]:
         catalog_digest=env["snapshot"].catalog_digest,
         schema_registry_digest=env["registry"].registry_digest,
         approval_policy=ApprovalPolicy.REQUIRED,
-        budget_request_tokens=2_000_000, budget_request_llm_invocations=2,
+        # Two LLM nodes × (one primary + one bounded schema repair).
+        budget_request_tokens=2_000_000, budget_request_llm_invocations=4,
         max_concurrency=2, stop_condition_refs=(), legacy_source_schema=None,
         legacy_source_config_digest=None, legacy_mapping_digest=None)
     return request, draft
@@ -1381,7 +1385,9 @@ class TestRedLines:
             assert '"trade"' not in source and "'trade'" not in source, name
             kinds = set(re.findall(r"persist_decision\(\s*['\"](\w+)['\"]",
                                    source))
-            assert kinds <= {"decide", "order"}, (name, kinds)
+            # ``deep_attempt`` is append-only diagnostics for a failed/refused
+            # research run; it is not an execution or trading instruction.
+            assert kinds <= {"decide", "order", "deep_attempt"}, (name, kinds)
 
     def test_escalation_constants_digest_is_unchanged(self):
         assert (escalation_mod.ESCALATION_CONSTANTS_DIGEST

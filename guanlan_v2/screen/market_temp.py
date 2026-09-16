@@ -58,7 +58,8 @@ def _gate(astock_temp: Any, main_net_yi: Any, break_rate: Any) -> Optional[Dict[
     return {"level": "neutral", "reasons": []}
 
 
-def build_market_temp(now: Optional[datetime] = None) -> Dict[str, Any]:
+def build_market_temp(now: Optional[datetime] = None, *,
+                      allow_refresh: bool = True) -> Dict[str, Any]:
     """组装市场温度上下文:{gate, global, board, flow, llm, notes}。
 
     四块各自独立 try/except:任一块(含其 import)挂 → 该块 None + note,函数绝不抛。
@@ -94,9 +95,13 @@ def build_market_temp(now: Optional[datetime] = None) -> Dict[str, Any]:
     b: Optional[Dict[str, Any]] = None
     try:
         from guanlan_v2.datafeed.market_tape import read_tape
-        t = read_tape()
+        t = read_tape(allow_refresh=allow_refresh)
         if t.get("warming"):
-            notes.append("board:盘口快照预热中(后台首拉已触发,本次无数据)")
+            notes.append(
+                "board:盘口快照预热中(后台首拉已触发,本次无数据)"
+                if allow_refresh else
+                "board:只读模式无盘口缓存(未启动刷新)"
+            )
         else:
             der = t.get("derived") or {}
             b = {"zt_count": der.get("zt_count"), "zb_count": der.get("zb_count"),
@@ -116,10 +121,13 @@ def build_market_temp(now: Optional[datetime] = None) -> Dict[str, Any]:
     try:
         from guanlan_v2.fundflow import pulse as ff_pulse
         if ff_pulse._load_live_cache("industry") is None:
-            ff_pulse._trigger_live_refresh("industry")   # 后台预热(单飞,失败绝不冒泡)
-            notes.append("flow:大盘资金无缓存(后台预热已触发,本次无数据)")
+            if allow_refresh:
+                ff_pulse._trigger_live_refresh("industry")   # 后台预热(单飞,失败绝不冒泡)
+                notes.append("flow:大盘资金无缓存(后台预热已触发,本次无数据)")
+            else:
+                notes.append("flow:只读模式无资金缓存(未启动刷新)")
         else:
-            d = ff_pulse.read_live("industry")
+            d = ff_pulse.read_live("industry", allow_refresh=allow_refresh)
             market = d.get("market") or {}
             if market:
                 mn = _num(market.get("main_net"))    # fetch_market row 单位=元

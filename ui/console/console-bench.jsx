@@ -38,7 +38,6 @@ function WwBench({ state, workspaceId, focus, chatWide, onToggleWide, onClose, o
     const first = !lastRef.current.startsWith(sidPrefix);
     lastRef.current = identity;
     const drive = (art) => {
-      if (art.kind === 'workflow') return; // 整图仅通过对话卡显式打开；历史重放不能发交棒。
       const pg = PAGES[art.page];
       if (!pg) return;
       const assetId = art.page === 'factor' && art.payload && /^wa_[0-9a-f]{16}$/.test(String(art.payload.asset_id || ''))

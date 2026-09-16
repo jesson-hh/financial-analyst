@@ -59,10 +59,12 @@ def _iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def test_build_pulse_writes_snapshot_and_delta(tmp_path):
+def test_build_pulse_writes_snapshot_and_delta(tmp_path, monkeypatch):
     snap = tmp_path / "snapshots.jsonl"
+    fixed = datetime(2026, 7, 16, 12, 0, 0)
+    monkeypatch.setattr(mp, "_now", lambda: fixed)
     # 预置 25h 前的老快照:同 id 概率 0.5 → Δ = now_prob - 0.5;外加脏行须容忍
-    old = {"ts": _iso(datetime.now() - timedelta(hours=25)),
+    old = {"ts": _iso(fixed - timedelta(hours=25)),
            "markets": [{"source": "polymarket", "id": "pm_517311", "prob": 0.5}],
            "temps": {}, "astock_temp": None}
     snap.write_text(json.dumps(old) + "\n" + "NOT-JSON-DIRTY-LINE\n", encoding="utf-8")
@@ -151,3 +153,100 @@ def test_load_history_filters_by_market(tmp_path):
     assert [h["prob"] for h in hist] == [0.40, 0.55]
     themed = mp.load_history(theme="fed", snapshot_path=snap)
     assert [h["temp"] for h in themed] == [40.0, 55.0]
+
+
+# ── 月轮转:snapshots.jsonl 恒为当月,非本月行归档 ───────────
+
+def _row(dt, mid, prob, temps=None):
+    return {"ts": _iso(dt),
+            "markets": [{"source": "polymarket", "id": mid, "prob": prob}],
+            "temps": temps or {}, "astock_temp": None}
+
+
+def _lines(path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").strip().splitlines()]
+
+
+def test_write_rotates_stale_months_into_archives(tmp_path, monkeypatch):
+    fixed = datetime(2026, 7, 16, 12, 0, 0)
+    monkeypatch.setattr(mp, "_now", lambda: fixed)
+    snap = tmp_path / "snapshots.jsonl"
+    previous = datetime(2026, 6, 10, 12, 0, 0)
+    older = datetime(2026, 4, 10, 12, 0, 0)
+    snap.write_text(json.dumps(_row(older, "pm_old2", 0.2)) + "\n"
+                    + json.dumps(_row(previous, "pm_old", 0.3)) + "\n", encoding="utf-8")
+
+    out = mp.build_pulse(refresh=True, snapshot_path=snap,
+                         astock_fn=_NO_ASTOCK, translate_fn=_NO_ZH, http=FakeHttp())
+    assert out["ok"] is True
+    current = _lines(snap)
+    assert len(current) == 1 and current[0]["ts"][:7] == "2026-07"
+    archived = [row for month in ("202604", "202606")
+                for row in _lines(tmp_path / f"snapshots-{month}.jsonl")]
+    assert {row["markets"][0]["id"] for row in archived} == {"pm_old", "pm_old2"}
+
+
+def test_delta24h_reads_latest_archive_across_month_boundary(tmp_path, monkeypatch):
+    fixed = datetime(2026, 7, 1, 12, 0, 0)
+    monkeypatch.setattr(mp, "_now", lambda: fixed)
+    snap = tmp_path / "snapshots.jsonl"
+    archive = tmp_path / "snapshots-202606.jsonl"
+    archive.write_text(json.dumps(_row(fixed - timedelta(hours=25), "pm_517311", 0.5))
+                       + "\n", encoding="utf-8")
+    snap.write_text(json.dumps(_row(fixed - timedelta(hours=1), "pm_other", 0.9))
+                    + "\n", encoding="utf-8")
+
+    out = mp.build_pulse(refresh=True, snapshot_path=snap,
+                         astock_fn=_NO_ASTOCK, translate_fn=_NO_ZH, http=FakeHttp())
+    fed = next(theme for theme in out["themes"] if theme["id"] == "fed")
+    market = next(row for row in fed["markets"] if row["id"] == "pm_517311")
+    assert market["delta24h"] == pytest.approx(0.63 - 0.5)
+    assert len(_lines(archive)) == 1
+
+
+def test_read_recent_skips_archive_when_current_has_old_row(tmp_path):
+    now = datetime(2026, 7, 16, 12, 0, 0)
+    snap = tmp_path / "snapshots.jsonl"
+    (tmp_path / "snapshots-202606.jsonl").write_text(
+        json.dumps(_row(now - timedelta(days=30), "pm_marker", 0.1)) + "\n",
+        encoding="utf-8")
+    snap.write_text(json.dumps(_row(now - timedelta(hours=25), "pm_a", 0.4)) + "\n"
+                    + json.dumps(_row(now - timedelta(hours=1), "pm_a", 0.6)) + "\n",
+                    encoding="utf-8")
+    got = mp._read_recent(snap, now)
+    assert {market["id"] for row in got for market in row["markets"]} == {"pm_a"}
+
+    snap.write_text(json.dumps(_row(now - timedelta(hours=1), "pm_a", 0.6)) + "\n",
+                    encoding="utf-8")
+    got = mp._read_recent(snap, now)
+    assert {market["id"] for row in got for market in row["markets"]} == {"pm_a", "pm_marker"}
+
+
+def test_load_history_spans_archives_and_current(tmp_path):
+    snap = tmp_path / "snapshots.jsonl"
+    (tmp_path / "snapshots-202606.jsonl").write_text(
+        json.dumps(_row(datetime(2026, 6, 20, 10, 0, 0), "pm_1", 0.30, {"fed": 30.0}))
+        + "\n", encoding="utf-8")
+    snap.write_text(
+        json.dumps(_row(datetime(2026, 7, 5, 10, 0, 0), "pm_1", 0.55, {"fed": 55.0}))
+        + "\n", encoding="utf-8")
+    assert [row["prob"] for row in mp.load_history(market_id="pm_1", snapshot_path=snap)] == [0.30, 0.55]
+    assert [row["temp"] for row in mp.load_history(theme="fed", snapshot_path=snap)] == [30.0, 55.0]
+
+
+def test_rotation_appends_into_existing_archive_dedup_by_ts(tmp_path, monkeypatch):
+    fixed = datetime(2026, 7, 16, 12, 0, 0)
+    monkeypatch.setattr(mp, "_now", lambda: fixed)
+    snap = tmp_path / "snapshots.jsonl"
+    old1 = datetime(2026, 6, 10, 12, 0, 0)
+    old2 = old1 + timedelta(hours=1)
+    archive = tmp_path / "snapshots-202606.jsonl"
+    archive.write_text(json.dumps(_row(old1, "pm_x", 0.2)) + "\n", encoding="utf-8")
+    snap.write_text(json.dumps(_row(old1, "pm_x", 0.2)) + "\n"
+                    + json.dumps(_row(old2, "pm_y", 0.3)) + "\n", encoding="utf-8")
+
+    mp.build_pulse(refresh=True, snapshot_path=snap,
+                   astock_fn=_NO_ASTOCK, translate_fn=_NO_ZH, http=FakeHttp())
+    got = _lines(archive)
+    assert [row["ts"] for row in got] == sorted({row["ts"] for row in got})
+    assert {row["markets"][0]["id"] for row in got} == {"pm_x", "pm_y"}

@@ -3,6 +3,7 @@ import json
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 from financial_analyst.agent.base import SubAgent
+from financial_analyst.data.pit import is_historical_asof
 from financial_analyst.llm.client import LLMClient
 
 
@@ -61,6 +62,10 @@ class WhaleAnalyst(SubAgent[WhaleOutput]):
         quote = inputs.get("quote-fetcher", {})
         factors = inputs.get("factor-computer", {})
         code = quote.get("code", "") if isinstance(quote, dict) else ""
+        requested_asof = inputs.get("asof_date")
+        if not requested_asof and isinstance(quote, dict):
+            requested_asof = quote.get("asof_date") or quote.get("as_of")
+        historical = bool(requested_asof) and is_historical_asof(requested_asof)
 
         upstream = json.dumps({
             "quote": quote,
@@ -75,7 +80,14 @@ class WhaleAnalyst(SubAgent[WhaleOutput]):
         # 600519. 30 captures the latest discussion wave without bleeding into
         # ancient sentiment.
         social_block = ""
-        if code:
+        historical_social_note = ""
+        if historical:
+            historical_social_note = (
+                "retail sentiment unavailable: NewsDB.social_posts has no "
+                f"provable point-in-time snapshot for {requested_asof}"
+            )
+            social_block = "\n\n# 散户情绪\n- " + historical_social_note
+        elif code:
             try:
                 from financial_analyst.data.news_db import NewsDB
                 db = NewsDB()
@@ -127,4 +139,12 @@ class WhaleAnalyst(SubAgent[WhaleOutput]):
             response_format={"type": "json_object"},
             temperature=0.2,
         )
-        return json.loads(response["choices"][0]["message"]["content"])
+        parsed = json.loads(response["choices"][0]["message"]["content"])
+        if historical_social_note:
+            alerts = parsed.get("alerts")
+            if not isinstance(alerts, list):
+                alerts = []
+            if not any("retail sentiment unavailable" in str(item) for item in alerts):
+                alerts.append(historical_social_note)
+            parsed["alerts"] = alerts
+        return parsed

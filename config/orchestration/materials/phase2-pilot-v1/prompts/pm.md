@@ -14,6 +14,9 @@ Method
 1. Start from the research manager's recommendation. Endorse, upgrade or
    downgrade it, and make the `executive_summary` state which and why in two or
    three sentences.
+   When a fast-baseline direction is present in the run context, explicitly say
+   whether the deep ResearchPlan confirms or changes it and identify the
+   evidence responsible for a change; never overwrite it silently.
 2. Build the `investment_thesis` from the strongest corroborated evidence across
    both upstream reports, and name the key risk that would invalidate it.
 3. Apply A-share reality: if a name is suspended, limit-locked, or ST-restricted,
@@ -29,3 +32,7 @@ Boundaries — advisory only
 - Anti-fabrication is absolute: every figure traces to an upstream block or the
   constraint-check result. When the chain is too weak to arbitrate, return Hold
   and explain the gap.
+- Private workspace-history text is never supplied here. A
+  `workspace_history_ref_digest` on the structured fast baseline is only an
+  irreversible provenance marker; never retrieve, reconstruct, quote or guess
+  its underlying text.

@@ -1,4 +1,4 @@
-"""Task 6:bear 反驳波(deps 加 bull-advocate)+ 辩护人/风控/写手使用 V4 思考档。
+"""Task 6:bear 反驳波 + 辩论席 V4 思考档与终端 JSON 预算。
 
 零网络零真 LLM:LLMClient.for_agent 全桩(照 tests/test_report_prompt_evidence.py 的
 _CapLLM 同款)。覆盖:
@@ -13,8 +13,8 @@ _CapLLM 同款)。覆盖:
    orchestrator),断言 bear 现在比 bull 晚一波(= bull 波次 + 1),且不在 bear 下游因
    果链上的节点(tier1/tier2 + bull-advocate 自身)波次与"假设 bear 无 bull 依赖"的
    基线完全一致——即 bear 加 bull 依赖零 orchestrator 改动、零上游节点连带改动。
-4. config/llm.yaml 守护:四座席(bull-advocate/bear-advocate/risk-officer/
-   report-writer)deep 档字段存在(照 test_llm_config_guard.py 现有模式独立复核)。
+4. config/llm.yaml 守护：bull/bear 开启 deep thinking；risk/report 关闭
+   thinking 以保留最终 JSON token，同时保持输出与超时预算。
 """
 from __future__ import annotations
 
@@ -222,24 +222,27 @@ def test_bear_wave_shifts_after_bull_other_upstream_nodes_unchanged():
 
 
 # ---------------------------------------------------------------------------
-# 4. config/llm.yaml 守护:四座席 deep 档(独立复核 test_llm_config_guard.py 同款断言)
+# 4. config/llm.yaml 守护:辩论席深思考、终端 JSON 席关闭 thinking
 # ---------------------------------------------------------------------------
 
-def test_llm_yaml_four_debate_seats_deep_tier():
+def test_llm_yaml_debate_and_terminal_seats_have_explicit_budgets():
     cfg = yaml.safe_load((_REPO_ROOT / "config" / "llm.yaml").read_text(encoding="utf-8"))
     ov = cfg.get("agent_overrides") or {}
-    for seat in ("bull-advocate", "bear-advocate", "risk-officer", "report-writer"):
+    for seat in ("bull-advocate", "bear-advocate"):
         entry = ov.get(seat)
         assert entry is not None, f"llm.yaml 缺 {seat} 的 agent_overrides"
         assert entry.get("provider") == "deepseek"
         assert entry.get("model") == "deepseek-v4-flash", f"{seat} 应为 V4 思考档"
-        if seat in ("bull-advocate", "bear-advocate"):
-            assert entry.get("thinking") is True
-            assert entry.get("reasoning_effort") == "high"
-        else:
-            # risk/report are terminal structured-output nodes: upstream seats
-            # perform the reasoning and these two preserve the JSON budget.
-            assert entry.get("thinking") is False
-            assert "reasoning_effort" not in entry
+        assert entry.get("thinking") is True
+        assert entry.get("reasoning_effort") == "high"
+        assert entry.get("max_tokens") == 8192
+        assert entry.get("timeout") == 300
+    for seat in ("risk-officer", "report-writer"):
+        entry = ov.get(seat)
+        assert entry is not None, f"llm.yaml 缺 {seat} 的 agent_overrides"
+        assert entry.get("provider") == "deepseek"
+        assert entry.get("model") == "deepseek-v4-flash"
+        assert entry.get("thinking") is False
+        assert "reasoning_effort" not in entry
         assert entry.get("max_tokens") == 8192
         assert entry.get("timeout") == 300

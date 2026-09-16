@@ -9,9 +9,18 @@ __pycache__/
 .env
 .env.local
 .env.*.local
+.env.*
+!.env.example
+**/secrets.env
+*.pem
+*.key
+*.p12
+*.pfx
 
 # 引擎运行产物
 out/
+.data/*.log
+*.bak-*
 .fa-data-update.log
 .engine-verify*.log
 .report-verify*.log
@@ -70,6 +79,12 @@ logs/
 
 # Codex/pytest 本地验证与部署暂存目录（均为可再生成产物）
 /.codex_deploy_stage_*/
+/.codex_backup*/
+/.codex_backups/
+/.codex_deploy_backup*/
+/.codex_runtime_backup*/
+/*.rollback
+/tmp/
 /.pytest-*/
 /.test-tmp-*/
 /.npm-cache-codex/

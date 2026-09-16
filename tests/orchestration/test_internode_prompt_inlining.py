@@ -63,8 +63,10 @@ from guanlan_v2.orchestration.schemas import (
     SentimentReport,
 )
 from guanlan_v2.orchestration.spec import Dependency, PlanNode
-from guanlan_v2.orchestration.pipeline.deep_decide import RUN_SUBJECT_SCHEMA_REF
-from guanlan_v2.orchestration.pipeline.contracts import RunSubject
+from guanlan_v2.orchestration.pipeline.deep_decide import (
+    DeepRunSubject,
+    RUN_SUBJECT_SCHEMA_REF,
+)
 from guanlan_v2.orchestration.pipeline.live_decide import SubjectPromptAssembler
 
 from tests.orchestration.test_worker import FakeModelGateway, build_env
@@ -199,7 +201,9 @@ def _channel(assembled) -> dict:
 
 
 def _subject_assembler() -> SubjectPromptAssembler:
-    subject = RunSubject(code="600519", as_of=datetime(2026, 7, 31, tzinfo=UTC))
+    subject = DeepRunSubject(
+        code="600519", as_of=datetime(2026, 7, 31, tzinfo=UTC),
+        evidence_tf="day")
     ref = TypedPayloadRef(
         schema_ref=RUN_SUBJECT_SCHEMA_REF,
         payload_ref=PayloadRef(namespace="main", object_id="subj-1",

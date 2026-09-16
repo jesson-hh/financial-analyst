@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 
@@ -31,10 +31,30 @@ def build_datafeed_router() -> APIRouter:
         return JSONResponse(await asyncio.to_thread(ov.read_overseas))
 
     @router.get("/data/newsradar")
-    async def newsradar_ep(sectors: str = "", days: int = 7, limit: int = 200):
-        """产业一手 RSS 资讯雷达(SWR,非阻塞)。sectors=逗号分隔赛道 hint(空=全部)。"""
+    async def newsradar_ep(
+            sectors: str = "",
+            days: int = Query(7, ge=1, le=30),
+            limit: int = Query(200, ge=1, le=500),
+            include_future: bool = False,
+            refresh: bool = False):
+        """产业 RSS 雷达(SWR)。源声明未来时间条目仅在 include_future=true 时独立返回。"""
         from guanlan_v2.datafeed import newsradar as nr
-        secs = [s for s in (sectors or "").split(",") if s.strip()] or None
-        return JSONResponse(await asyncio.to_thread(nr.read_radar_swr, secs, int(days), int(limit)))
+        secs = list(dict.fromkeys(
+            s.strip().lower() for s in (sectors or "").split(",") if s.strip()
+        )) or None
+        if secs:
+            industries, _sources = await asyncio.to_thread(nr.load_sources)
+            allowed = {str(row.get("key") or "") for row in industries if isinstance(row, dict)}
+            bad = [value for value in secs if value not in allowed]
+            if bad:
+                raise HTTPException(
+                    status_code=422,
+                    detail="未知 NewsRadar 赛道: " + ",".join(bad)
+                           + "；可选 " + ",".join(sorted(allowed)),
+                )
+        return JSONResponse(await asyncio.to_thread(
+            nr.read_radar_swr, secs, int(days), int(limit),
+            include_future=bool(include_future), force_refresh=bool(refresh),
+        ))
 
     return router

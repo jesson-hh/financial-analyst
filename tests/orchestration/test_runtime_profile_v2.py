@@ -17,8 +17,8 @@ behavior is byte-identical (regression pins):
 * the gate-metric evaluation matrix (passed / failed / unavailable×{fail,degrade,
   skip} -> GateResult + downstream disposition);
 * the bounded retry + schema-repair control loop over the real ``BudgetLedger``
-  (per-attempt reservation + settlement, one committed output per key, idempotent
-  replay, deterministic zero-LLM retries).
+  (per-attempt reservation + settlement, one committed output per key, fail-closed
+  LLM replay, deterministic zero-LLM retries).
 
 Run: ``python -m pytest tests/orchestration/test_runtime_profile_v2.py -v``
 """
@@ -81,7 +81,11 @@ from guanlan_v2.orchestration.runtime_support import (
 from guanlan_v2.orchestration.pool import fold_reducer_producers
 from guanlan_v2.orchestration import dag as D
 from guanlan_v2.orchestration import worker as W
-from guanlan_v2.orchestration.budget import BudgetLedger
+from guanlan_v2.orchestration.budget import (
+    BudgetExceeded,
+    BudgetLedger,
+    IdempotencyReplayRefused,
+)
 from guanlan_v2.orchestration.context import RunBudget
 from guanlan_v2.orchestration.eventstore import RuntimeStores, SchemaRegistryResolver
 
@@ -289,6 +293,10 @@ def test_v2_supported_end_to_end_with_context_and_retry():
     under v2 but REJECTED under v1 (retries_unsupported) — the retry unlock proved on
     the real admission fixture."""
     sc = build_scenario(node_over={"max_attempts": 2})
+    sc.draft = sc.draft.model_copy(update={
+        "budget_request_llm_invocations": 4,
+        "budget_request_tokens": 4 * 32_768,
+    })
     v1 = sc.check(profile=static_runtime_profile())
     v2 = sc.check(profile=STATIC_RUNTIME_PROFILE_V2)
     assert not v1.supported and "retries_unsupported" in _codes(v1)
@@ -352,6 +360,10 @@ def test_v1_v2_byte_identical_on_a_plain_plan_regression_pin():
     issue set under v1 and v2 — v2 changes nothing for plans that use no unlock (only
     the profile digest differs)."""
     sc = build_scenario()
+    sc.draft = sc.draft.model_copy(update={
+        "budget_request_llm_invocations": 2,
+        "budget_request_tokens": 2 * 32_768,
+    })
     v1 = sc.check(profile=static_runtime_profile())
     v2 = sc.check(profile=STATIC_RUNTIME_PROFILE_V2)
     assert v1.supported and v2.supported
@@ -466,14 +478,70 @@ def test_analyze_retry_repair_over_limit():
     """Row 6: max_attempts=3 under v2 (limit 2) yields an analyzer issue."""
     runtime, view, snap, red_ref, gm_ref = build_multiwriter_catalog()
     draft = build_mw_draft(red_ref=red_ref, snapshot=snap, max_attempts=3)
-    issues = analyze_retry_repair(draft, profile=STATIC_RUNTIME_PROFILE_V2)
+    issues = analyze_retry_repair(draft, catalog=runtime, profile=STATIC_RUNTIME_PROFILE_V2)
     assert any(i.code == "max_attempts_exceeds_limit" and i.node_id == "n1" for i in issues)
 
 
 def test_analyze_retry_repair_at_limit_is_ok():
     runtime, view, snap, red_ref, gm_ref = build_multiwriter_catalog()
     draft = build_mw_draft(red_ref=red_ref, snapshot=snap, max_attempts=2)
-    assert analyze_retry_repair(draft, profile=STATIC_RUNTIME_PROFILE_V2) == ()
+    assert analyze_retry_repair(
+        draft, catalog=runtime, profile=STATIC_RUNTIME_PROFILE_V2
+    ) == ()
+
+
+def test_retry_repair_budget_preflight_uses_catalog_llm_kind_and_default_token_ceiling():
+    sc = build_scenario(node_over={"max_attempts": 2})
+    draft = sc.draft.model_copy(update={
+        "budget_request_llm_invocations": 3,
+        "budget_request_tokens": 4 * 32_768 - 1,
+    })
+    issues = analyze_retry_repair(
+        draft, catalog=sc.runtime, profile=STATIC_RUNTIME_PROFILE_V2
+    )
+    assert [(issue.code, issue.model_path) for issue in issues] == [
+        ("retry_repair_llm_budget_under_requested",
+         "PlanDraft.budget_request_llm_invocations"),
+        ("retry_repair_token_budget_under_requested", "PlanDraft.budget_request_tokens"),
+    ]
+
+
+def test_retry_repair_budget_preflight_honors_positive_node_token_reservation():
+    sc = build_scenario(node_over={"max_attempts": 2, "token_reservation": 5_000})
+    draft = sc.draft.model_copy(update={
+        "budget_request_llm_invocations": 4,
+        "budget_request_tokens": 20_000,
+    })
+    assert analyze_retry_repair(
+        draft, catalog=sc.runtime, profile=STATIC_RUNTIME_PROFILE_V2
+    ) == ()
+
+
+def test_retry_repair_budget_preflight_ignores_deterministic_nodes():
+    runtime, view, snap, red_ref, gm_ref = build_multiwriter_catalog()
+    draft = build_mw_draft(red_ref=red_ref, snapshot=snap, max_attempts=2)
+    assert analyze_retry_repair(
+        draft, catalog=runtime, profile=STATIC_RUNTIME_PROFILE_V2
+    ) == ()
+
+
+def test_v2_runtime_report_rejects_under_requested_retry_budget():
+    sc = build_scenario(node_over={"max_attempts": 2})
+    report = sc.check(profile=STATIC_RUNTIME_PROFILE_V2)
+    assert not report.supported
+    assert {
+        "retry_repair_llm_budget_under_requested",
+        "retry_repair_token_budget_under_requested",
+    } <= _codes(report)
+
+
+def test_v2_runtime_report_returns_unsupported_for_unknown_worker_without_raising():
+    sc = build_scenario()
+    unknown = sc.draft.nodes[0].model_copy(update={"worker_id": "worker.unknown"})
+    sc.draft = sc.draft.model_copy(update={"nodes": (unknown,)})
+    report = sc.check(profile=STATIC_RUNTIME_PROFILE_V2)
+    assert not report.supported
+    assert "phase1_report_invalid" in _codes(report)
 
 
 def test_retry_llm_upper_bound_formula():
@@ -571,7 +639,10 @@ def test_gate_unavailable_follows_policy(policy, expected):
 # =========================================================================== #
 # 7/8/9/10. bounded retry + schema repair control loop                          #
 # =========================================================================== #
-def _node_run(status, *, reason_code=None, attempt=1, itok=0, otok=0) -> NodeRun:
+def _node_run(
+    status, *, reason_code=None, attempt=1, itok=0, otok=0,
+    llm_invocations=0,
+) -> NodeRun:
     now = _dt()
     success = status in (NodeStatus.COMPLETED, NodeStatus.DEGRADED)
     okeys = ("primary",) if success else ()
@@ -582,21 +653,28 @@ def _node_run(status, *, reason_code=None, attempt=1, itok=0, otok=0) -> NodeRun
         attempt_id=f"att-{attempt}", attempt=attempt, input_snapshot_digest=DIG,
         started_at=now, finished_at=now, output_keys=okeys, output_artifact_ids=oids,
         tool_call_records=(), data_result_refs=(), execution_evidence_refs=(),
-        input_tokens=itok, output_tokens=otok)
+        input_tokens=itok, output_tokens=otok,
+        warnings=W.llm_invocation_evidence_warnings(llm_invocations))
 
 
 class _ScriptedAttempts:
     """Returns a scripted (status, reason_code, otok) per invocation ordinal; records
     how many times it was called and which ordinals were repairs."""
 
-    def __init__(self, script):
+    def __init__(self, script, *, provider_attempted=True):
         self.script = script          # list of (status, reason_code, otok)
         self.calls = []               # (ordinal, is_repair)
+        self.provider_attempted = provider_attempted
 
     def __call__(self, ordinal, *, is_repair):
         self.calls.append((ordinal, is_repair))
         status, reason, otok = self.script[len(self.calls) - 1]
-        nr = _node_run(status, reason_code=reason, attempt=ordinal, itok=5, otok=otok)
+        nr = _node_run(
+            status, reason_code=reason, attempt=ordinal,
+            itok=(5 if self.provider_attempted else 0),
+            otok=(otok if self.provider_attempted else 0),
+            llm_invocations=(1 if self.provider_attempted else 0),
+        )
         art = object() if status in (NodeStatus.COMPLETED, NodeStatus.DEGRADED) else None
         return nr, art
 
@@ -646,11 +724,45 @@ def test_schema_repair_invalid_then_valid_completes():
     state = ledger.replay()
     for r in out.reservations:
         assert state.reservations[r.reservation_id].status == "settled"
+        assert state.reservations[r.reservation_id].actual_llm_invocations == 1
     # the LEDGER now carries the truth: the base attempt is a plain node child,
     # the repair attempt is a first-class schema_repair-scope reservation.
     by_role = {r.role: r for r in out.reservations}
     assert state.reservations[by_role["primary"].reservation_id].scope_type == "node"
     assert state.reservations[by_role["schema_repair"].reservation_id].scope_type == "schema_repair"
+
+
+def test_bounded_retry_settles_exact_tokens_above_the_legacy_4096_clamp():
+    ledger = _real_ledger()
+    plan_res = _reserve_plan(ledger, tokens=5000, llm=2, concurrency=1)
+    script = _ScriptedAttempts([(NodeStatus.COMPLETED, None, 4200)])
+
+    out = W.execute_with_bounded_retry(
+        node_id="n1", run_id="run-1", is_llm=True, max_attempts=1,
+        schema_repairs_per_attempt=1, budget=ledger,
+        plan_reservation_id=plan_res.reservation_id,
+        node_token_reservation=4500, attempt_fn=script)
+
+    settled = ledger.replay().reservations[out.reservations[0].reservation_id]
+    assert settled.actual_tokens == 5 + 4200 == 4205
+
+
+def test_bounded_retry_never_clamps_an_over_reservation_actual():
+    ledger = _real_ledger()
+    plan_res = _reserve_plan(ledger, tokens=5000, llm=2, concurrency=1)
+    script = _ScriptedAttempts([(NodeStatus.COMPLETED, None, 4092)])
+
+    with pytest.raises(BudgetExceeded, match="exceeds the reservation"):
+        W.execute_with_bounded_retry(
+            node_id="n1", run_id="run-1", is_llm=True, max_attempts=1,
+            schema_repairs_per_attempt=1, budget=ledger,
+            plan_reservation_id=plan_res.reservation_id,
+            node_token_reservation=4096, attempt_fn=script)
+
+    child = next(
+        r for r in ledger.replay().reservations.values()
+        if r.scope_type == "node")
+    assert child.status == "reserved" and child.actual_tokens == 0
 
 
 def test_schema_repair_invalid_twice_is_incomplete_no_artifact():
@@ -671,29 +783,84 @@ def test_schema_repair_invalid_twice_is_incomplete_no_artifact():
     state = ledger.replay()
     for r in out.reservations:
         assert state.reservations[r.reservation_id].status == "settled"
+        assert state.reservations[r.reservation_id].actual_llm_invocations == 1
 
 
-def test_crash_between_repair_and_settle_replays_idempotently():
-    """Row 9: re-running the loop with the SAME scripted outcomes + ledger is
-    idempotent — no duplicate reservations, no duplicated invocation billed."""
+def test_llm_transient_failure_uses_one_explicit_retry_cycle():
+    """The v8 News/Technical retry is a durable cycle, never a hidden transport retry."""
+    ledger, plan_res = _fresh_ledger_with_plan()
+    script = _ScriptedAttempts([
+        (NodeStatus.FAILED, "model_error", 0),
+        (NodeStatus.COMPLETED, None, 7),
+    ])
+    out = W.execute_with_bounded_retry(
+        node_id="n1", run_id="run-1", is_llm=True, max_attempts=2,
+        schema_repairs_per_attempt=1, budget=ledger,
+        plan_reservation_id=plan_res.reservation_id,
+        node_token_reservation=1024, attempt_fn=script)
+
+    assert out.succeeded and out.artifact is not None
+    assert out.invocations == 2
+    assert [r.role for r in out.reservations] == ["primary", "retry"]
+    assert script.calls == [(1, False), (2, False)]
+
+
+def test_two_llm_cycles_with_invalid_json_exhaust_strictly_without_artifact():
+    """Two cycles mean four budgeted samples, not acceptance of invalid output."""
+    ledger, plan_res = _fresh_ledger_with_plan()
+    script = _ScriptedAttempts([
+        (NodeStatus.INCOMPLETE, "output_schema_invalid", 3),
+        (NodeStatus.INCOMPLETE, "output_schema_invalid", 3),
+        (NodeStatus.INCOMPLETE, "output_schema_invalid", 3),
+        (NodeStatus.INCOMPLETE, "output_schema_invalid", 3),
+    ])
+    out = W.execute_with_bounded_retry(
+        node_id="n1", run_id="run-1", is_llm=True, max_attempts=2,
+        schema_repairs_per_attempt=1, budget=ledger,
+        plan_reservation_id=plan_res.reservation_id,
+        node_token_reservation=1024, attempt_fn=script)
+
+    assert not out.succeeded
+    assert out.node_run.status is NodeStatus.INCOMPLETE
+    assert out.artifact is None and out.invocations == 4
+    assert [r.role for r in out.reservations] == [
+        "primary", "schema_repair", "retry", "schema_repair"]
+    assert script.calls == [
+        (1, False), (2, True), (3, False), (4, True)]
+
+
+def test_crash_window_replay_refuses_before_a_second_llm_dispatch():
+    """Row 9: an old attempt key is possible provider spend, not permission.
+
+    Re-running the loop with the same ledger must stop before ``attempt_fn``;
+    budget-command idempotency alone cannot make an external LLM call exactly
+    once.
+    """
     ledger, plan_res = _fresh_ledger_with_plan()
 
-    def run_once():
-        script = _ScriptedAttempts([
-            (NodeStatus.INCOMPLETE, "output_schema_invalid", 3),
-            (NodeStatus.COMPLETED, None, 7),
-        ])
-        return W.execute_with_bounded_retry(
+    first_script = _ScriptedAttempts([
+        (NodeStatus.INCOMPLETE, "output_schema_invalid", 3),
+        (NodeStatus.COMPLETED, None, 7),
+    ])
+    first = W.execute_with_bounded_retry(
+        node_id="n1", run_id="run-1", is_llm=True, max_attempts=1,
+        schema_repairs_per_attempt=1, budget=ledger,
+        plan_reservation_id=plan_res.reservation_id, node_token_reservation=1024,
+        attempt_fn=first_script)
+    n_events_after_first = len(ledger.replay().reservations)
+
+    replay_script = _ScriptedAttempts([
+        (NodeStatus.COMPLETED, None, 99),
+    ])
+    with pytest.raises(IdempotencyReplayRefused, match="fresh-only"):
+        W.execute_with_bounded_retry(
             node_id="n1", run_id="run-1", is_llm=True, max_attempts=1,
             schema_repairs_per_attempt=1, budget=ledger,
-            plan_reservation_id=plan_res.reservation_id, node_token_reservation=1024,
-            attempt_fn=script)
+            plan_reservation_id=plan_res.reservation_id,
+            node_token_reservation=1024, attempt_fn=replay_script)
 
-    first = run_once()
-    n_events_after_first = len(ledger.replay().reservations)
-    second = run_once()  # "replay" after a crash: same idempotency keys
-    assert [r.reservation_id for r in first.reservations] == [r.reservation_id for r in second.reservations]
-    # no NEW reservations minted on replay (idempotent).
+    assert first.invocations == 2
+    assert replay_script.calls == []
     assert len(ledger.replay().reservations) == n_events_after_first
 
 
@@ -704,7 +871,7 @@ def test_deterministic_retry_reserves_zero_llm_and_one_output():
     script = _ScriptedAttempts([
         (NodeStatus.FAILED, "handler_error", 0),   # first attempt fails
         (NodeStatus.COMPLETED, None, 0),            # retry succeeds
-    ])
+    ], provider_attempted=False)
     out = W.execute_with_bounded_retry(
         node_id="n1", run_id="run-1", is_llm=False, max_attempts=2, schema_repairs_per_attempt=1,
         budget=ledger, plan_reservation_id=plan_res.reservation_id, node_token_reservation=1024,
@@ -755,7 +922,7 @@ def test_retry_and_repair_reservations_mint_fresh_ids_through_the_real_sink():
         plan_reservation_id=plan_res.reservation_id, node_token_reservation=1024,
         attempt_fn=_ScriptedAttempts([
             (NodeStatus.FAILED, "handler_error", 0),
-            (NodeStatus.COMPLETED, None, 0)]))
+            (NodeStatus.COMPLETED, None, 0)], provider_attempted=False))
     # schema_repair (LLM invalid -> valid) mints a real schema_repair-scope reservation.
     repair_out = W.execute_with_bounded_retry(
         node_id="n_repair", run_id="run-1", is_llm=True, max_attempts=1,

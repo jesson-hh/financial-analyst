@@ -22,27 +22,21 @@ Capability ids are bound to the *implemented* Phase-3 refs
 (``data.catalog.data_capability_refs``, clause (c)); the generator invents no
 capability and grants nothing — it produces mapping material + a lint only.
 
-FROZEN TABLE STATE (HAZARD note): the material currently freezes against the
-77-row ``WW_TOOL_TABLE`` after the reviewed workspace, media, realtime,
-control-plane and deterministic data-screening additions. The manifest records the
-exact frozen table shape it derives from (``source_tool_count`` +
-``source_tool_digest`` over the sorted tool-name projection) so a foreign commit
-that changes the table trips the drift guard with concrete numbers, never
-silently.
+FROZEN TABLE STATE: the material is derived from the 105-row production
+``WW_TOOL_TABLE``.  The table now also contains workspace research, watch-alert
+and workflow-authoring surfaces.  Those additions do not join
+``_METHOD_TOOL_INTENT``: they are separate application/control-plane interfaces,
+many with confirmation-gated writes, rather than suppliers of the six sealed
+Phase-3 data capabilities.  The manifest still records the exact table shape it
+derives from (``source_tool_count`` + ``source_tool_digest`` over the sorted
+tool-name projection), so any later table change trips the drift guard instead
+of silently widening a worker allowlist.
 
-Re-freeze history: sealed at 60 rows, re-generated to 64 after ``b969c93`` added
-the four orchestration-router tools (``ww_orchestrate_start`` / ``_status`` /
-``_runs``, ``ww_ta_ingest``). None of the four joins ``_METHOD_TOOL_INTENT``:
-they are control-plane and ingest surfaces (two of them ``confirm``-gated writes
-that open a paid approval door / append to the D7 inbox), not suppliers of any
-Phase-3 market-data capability. Mapping one under a data capability would let a
-worker's DATA allowlist reach a money-spending door — exactly the 承诺-供给
-confusion :func:`lint_skill_supply` exists to catch. The re-freeze therefore moves
-``source_tool_count`` / ``source_tool_digest`` only; every row is byte-identical.
-Re-generated to 76 for the 2026-08 product integration; the additional tools
-remain presentation/control/workspace surfaces and do not grant a new Phase-3
-market-data capability. Re-generated to 77 when ``ww_data_screen`` joined the
-reviewed ``signals`` capability as a deterministic typed-rule read.
+Re-freeze history: sealed at 60, 64, 77 and 80 rows as reviewed tools landed;
+re-generated at 105 after the workspace/watch/workflow families were integrated.
+Only a separately reviewed data supplier may be added to
+``_METHOD_TOOL_INTENT``.  Consequently this re-freeze moves the source count and
+source digest but leaves all six capability rows byte-for-byte equivalent.
 
 Regenerate: ``python -m guanlan_v2.orchestration.capability_manifest``.
 """
@@ -114,14 +108,13 @@ _METHOD_TOOL_INTENT: dict[str, tuple[str, ...]] = {
         "ww_fundflow", "ww_macro_pulse", "ww_market_tape",
     ),
     "verified_snapshot": (
-        "ww_live_text", "ww_market_tape", "ww_orderbook", "ww_overseas", "ww_ticks",
+        "ww_auction", "ww_live_text", "ww_market_tape", "ww_orderbook", "ww_overseas", "ww_ticks",
     ),
     "fundamentals": (
         "ww_f10",
     ),
     "signals": (
-        "ww_data_screen", "ww_factor_analyze", "ww_model_health", "ww_rescore",
-        "ww_screen_run",
+        "ww_factor_analyze", "ww_model_health", "ww_rescore", "ww_screen_run",
     ),
 }
 
@@ -140,17 +133,16 @@ _METHOD_NOTES: dict[str, str] = {
         "sentiment temperature) — display-only, never trade signals."
     ),
     "verified_snapshot": (
-        "Live quote / order-book / tick / overseas snapshots (ww_live_text "
-        "realtime_quote probe)."
+        "Live quote / order-book / tick / overseas snapshots plus the local-TQ/TDX "
+        "opening call-auction snapshot/history adapter."
     ),
     "fundamentals": (
         "F10 structured corporate facts (valuation, share capital, events, LHB, "
         "broker ratings)."
     ),
     "signals": (
-        "Deterministic typed-rule screening plus model / factor signal reads "
-        "(v4 screening, rescore overlay, model health, factor IC) — research / "
-        "display, never order signals."
+        "Model / factor signal reads (v4 screening, rescore overlay, model health, "
+        "factor IC) — research / display, never order signals."
     ),
 }
 

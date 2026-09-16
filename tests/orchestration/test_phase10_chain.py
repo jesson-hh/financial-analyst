@@ -7,7 +7,8 @@ as a pure ADDITION over the sealed Phase-9 adapter chain (never a fork, never a
 
 * ``build_phase10_registry(expected_phase9_digest)`` builds a *fresh sealed*
   cumulative registry over the exact Phase-9 cumulative set plus the reviewed
-  six :data:`PHASE10_PUBLIC_MODELS` — five at ``@1`` under their own names plus
+  seven :data:`PHASE10_PUBLIC_MODELS` — the original five ``@1`` payloads,
+  the evidence-bound ``RunSubject@2``, plus
   ``PlanPresetRecordV2`` registered as **``PlanPresetRecord@2``** (Amendment 3);
   a wrong base digest is rejected before any registration; inherited entries
   stay byte-identical to their Phase-<=9 goldens; the digest matches the
@@ -64,9 +65,9 @@ CATALOG_GOLDEN = GOLDEN_DIR / "phase10_catalog_manifest_v1.json"
 #: sha256 pins of the immediate upstream goldens — Phase 10 never regenerates them.
 UPSTREAM_GOLDEN_SHA256 = {
     "phase9_schema_manifest_v1.json":
-        "e7f198ce80a90581cfdfe818e6d62c0d366e1d98bc319ec42ef3d49369e40765",
+        "adb34e54e7b4a97aa66841c749b06579f8cf21aa823bdf8c49d1b28aa6c66509",
     "phase9_catalog_manifest_v1.json":
-        "60130c07b9064b281557d5939a2a6c67a0d2e1a159e5195c537466fc0d9a4cb5",
+        "45c5462ea9a91d8da1f07222bb09ea89c40776e98f89a6562c0c58eea620f642",
 }
 
 #: the Phase-10 contract modules whose public ContractModel subclasses the
@@ -84,7 +85,8 @@ PHASE10_CONTRACT_MODULES = (
     "guanlan_v2.orchestration.pipeline.chain",
 )
 
-#: the six reviewed public names + their REGISTERED keys (Amendment 3: the v2
+#: the six reviewed public family names + their SEVEN registered keys (deep
+#: decisions add RunSubject@2 while screening keeps RunSubject@1; Amendment 3's
 #: preset record registers under the Phase-7 family name at version 2).
 EXPECTED_PUBLIC_NAMES = frozenset({
     "CandidateSlate", "RecommendationSlate", "EscalationReport",
@@ -92,7 +94,7 @@ EXPECTED_PUBLIC_NAMES = frozenset({
 })
 EXPECTED_NEW_KEYS = frozenset({
     "CandidateSlate@1", "RecommendationSlate@1", "EscalationReport@1",
-    "TaSubmission@1", "RunSubject@1", "PlanPresetRecord@2",
+    "TaSubmission@1", "RunSubject@1", "RunSubject@2", "PlanPresetRecord@2",
 })
 
 #: the nine reviewed INTERNAL ContractModel value carriers.
@@ -195,12 +197,13 @@ def test_inherited_entries_are_byte_identical_to_the_phase9_golden():
     # every Phase-9 (cumulative) key is inherited byte-identical …
     for key, digest in phase9.items():
         assert manifest[key] == digest, f"inherited schema {key} drifted in phase10"
-    # … and the only new keys are exactly the six Phase-10 registered keys
-    # (five own-name @1 plus PlanPresetRecord@2 — and NEVER PlanPresetRecordV2@2).
+    # … and the only new keys are exactly the seven Phase-10 registered keys
+    # (five original @1 payloads, RunSubject@2, plus PlanPresetRecord@2 — and
+    # NEVER PlanPresetRecordV2@2).
     new_keys = set(manifest) - set(phase9)
     assert new_keys == set(EXPECTED_NEW_KEYS)
     assert "PlanPresetRecordV2@2" not in manifest
-    assert len(new_keys) == 6
+    assert len(new_keys) == 7
 
 
 def test_inherited_entries_are_byte_identical_across_every_upstream_manifest():
@@ -320,8 +323,8 @@ def test_registration_order_independence():
 # =========================================================================== #
 def test_public_tuple_shape_and_names():
     assert isinstance(ch.PHASE10_PUBLIC_MODELS, tuple)
-    assert len(ch.PHASE10_PUBLIC_MODELS) == 6
-    assert len(set(ch.PHASE10_PUBLIC_MODELS)) == 6
+    assert len(ch.PHASE10_PUBLIC_MODELS) == 7
+    assert len(set(ch.PHASE10_PUBLIC_MODELS)) == 7
     names = {m.__name__ for m in ch.PHASE10_PUBLIC_MODELS}
     assert names == EXPECTED_PUBLIC_NAMES
     for model in ch.PHASE10_PUBLIC_MODELS:

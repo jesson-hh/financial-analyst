@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 import zlib
@@ -26,7 +27,9 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 
-VAR = Path(__file__).resolve().parents[2] / "var"
+VAR = Path(os.environ.get("GUANLAN_SEATS_VAR_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var"
+))
 DEFAULT_DB_PATH = VAR / "realtime" / "seats_bars.sqlite3"
 SUPPORTED_FREQS = frozenset({"1min", "5min"})
 _CODE_RE = re.compile(r"^(?:(SH|SZ|BJ))?(\d{6})(?:\.(SH|SZ|BJ))?$", re.I)

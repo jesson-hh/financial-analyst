@@ -573,7 +573,7 @@ def parse_planner_output(raw_text: str) -> PlannerDraftEnvelope:
 # =========================================================================== #
 # Runtime-stamped, shrink-only dynamic draft assembly (Task 2)                 #
 # =========================================================================== #
-# The five generation-side shape issue codes. Each is a *planner-attributed*
+# The generation-side shape issue codes. Each is a *planner-attributed*
 # rejection of an authored proposal that the closed parser grammar cannot catch
 # (worker identity / dynamic-selectability / budget headroom / symbol grammar /
 # duplicate node id). ``planner_worker_not_dynamic`` structurally excludes every
@@ -584,6 +584,15 @@ _S_WORKER_NOT_DYNAMIC = "planner_worker_not_dynamic"
 _S_BUDGET_EXCEEDS = "planner_budget_exceeds_remaining"
 _S_UNIVERSE_INVALID = "planner_universe_symbol_invalid"
 _S_DUPLICATE_NODE_ID = "planner_duplicate_node_id"
+_S_EMPTY_NODES = "planner_empty_nodes"
+_S_EMPTY_SINKS = "planner_empty_sink_node_ids"
+_S_UNKNOWN_SINK = "planner_unknown_sink_node"
+_S_DUPLICATE_SINK = "planner_duplicate_sink_node"
+_S_DEPENDENCY_MISSING_NODE = "planner_dependency_missing_node"
+_S_ARTIFACT_SLOT_MISMATCH = "planner_artifact_slot_mismatch"
+_S_CYCLE = "planner_cycle"
+_S_UNREACHABLE_NODE = "planner_unreachable_node"
+_S_UNREDUCED_MULTI_WRITE = "planner_unreduced_multi_write"
 
 
 class PlannerShapeRejected(ValueError):
@@ -638,6 +647,78 @@ def _lift_node(node: PlannerNodeEnvelope) -> PlanNode:
         timeout_sec=node.timeout_sec,
         token_reservation=node.token_reservation,
     )
+
+
+def _planner_structure_codes(envelope: PlannerDraftEnvelope) -> set[str]:
+    """Return every model-attributable pure-DAG issue before PlanDraft build.
+
+    Dynamic v1 never lets the Planner author reducers or auxiliary nodes.  It
+    therefore has a smaller structural grammar than a general ``PlanDraft``:
+    every slot must have one writer, every dependency must name an existing
+    upstream node and echo its slot, the graph must be acyclic, and every node
+    must contribute to a sink.  Detecting that grammar here keeps malformed model
+    output inside the bounded repair loop instead of leaking a Pydantic
+    ``PlanStructureError`` through the HTTP launcher as a 503.
+    """
+    codes: set[str] = set()
+    node_by_id: dict[str, PlannerNodeEnvelope] = {}
+    for node in envelope.nodes:
+        node_by_id.setdefault(node.id, node)
+
+    for node in envelope.nodes:
+        for dep in node.dependencies:
+            upstream = node_by_id.get(dep.upstream_node_id)
+            if upstream is None:
+                codes.add(_S_DEPENDENCY_MISSING_NODE)
+            elif dep.artifact_slot != upstream.writes_slot:
+                codes.add(_S_ARTIFACT_SLOT_MISMATCH)
+
+    successors: dict[str, list[str]] = {node_id: [] for node_id in node_by_id}
+    indegree: dict[str, int] = {node_id: 0 for node_id in node_by_id}
+    for node in envelope.nodes:
+        predecessors = {
+            dep.upstream_node_id
+            for dep in node.dependencies
+            if dep.upstream_node_id in node_by_id
+        }
+        indegree[node.id] = len(predecessors)
+        for predecessor in predecessors:
+            successors[predecessor].append(node.id)
+    queue = [node_id for node_id, degree in indegree.items() if degree == 0]
+    processed = 0
+    while queue:
+        current = queue.pop()
+        processed += 1
+        for successor in successors.get(current, ()):
+            indegree[successor] -= 1
+            if indegree[successor] == 0:
+                queue.append(successor)
+    has_cycle = processed != len(node_by_id)
+    if has_cycle:
+        codes.add(_S_CYCLE)
+
+    if not has_cycle:
+        reachable: set[str] = set()
+        stack = [sink for sink in envelope.sink_node_ids if sink in node_by_id]
+        while stack:
+            current = stack.pop()
+            if current in reachable:
+                continue
+            reachable.add(current)
+            stack.extend(
+                dep.upstream_node_id
+                for dep in node_by_id[current].dependencies
+                if dep.upstream_node_id in node_by_id
+            )
+        if any(node_id not in reachable for node_id in node_by_id):
+            codes.add(_S_UNREACHABLE_NODE)
+
+    slot_writers: dict[str, int] = {}
+    for node in envelope.nodes:
+        slot_writers[node.writes_slot] = slot_writers.get(node.writes_slot, 0) + 1
+    if any(count > 1 for count in slot_writers.values()):
+        codes.add(_S_UNREDUCED_MULTI_WRITE)
+    return codes
 
 
 def assemble_dynamic_draft(
@@ -701,6 +782,8 @@ def assemble_dynamic_draft(
     codes: set[str] = set()
     worker_by_id = {w.id: w for w in catalog.workers}
     seen_ids: set[str] = set()
+    if not envelope.nodes:
+        codes.add(_S_EMPTY_NODES)
     for node in envelope.nodes:
         if node.id in seen_ids:
             codes.add(_S_DUPLICATE_NODE_ID)
@@ -710,6 +793,15 @@ def assemble_dynamic_draft(
             codes.add(_S_UNKNOWN_WORKER)
         elif worker.selection_scope != "dynamic_allowed":
             codes.add(_S_WORKER_NOT_DYNAMIC)
+
+    if not envelope.sink_node_ids:
+        codes.add(_S_EMPTY_SINKS)
+    if len(set(envelope.sink_node_ids)) != len(envelope.sink_node_ids):
+        codes.add(_S_DUPLICATE_SINK)
+    for sink_id in envelope.sink_node_ids:
+        if sink_id not in seen_ids:
+            codes.add(_S_UNKNOWN_SINK)
+    codes.update(_planner_structure_codes(envelope))
 
     if remaining_tokens is not None and envelope.budget_request_tokens > remaining_tokens:
         codes.add(_S_BUDGET_EXCEEDS)
@@ -825,18 +917,69 @@ def _planner_trusted_digests(
     roster: list[dict[str, Any]],
     prior_issue_codes: tuple[str, ...],
 ) -> tuple[NamedEvidenceDigest, ...]:
-    """The trusted-channel named digests (goal + remaining budget + roster + prior
-    codes on k>1), canonically ordered by name — never raw untrusted narrative."""
-    named: dict[str, str] = {
-        "goal": content_digest(request.goal),
-        "budget_headroom": content_digest(
-            {"tokens": remaining_tokens, "llm_invocations": remaining_llm_invocations}
-        ),
-        "worker_roster": content_digest(roster),
+    """Named digests for the visible goal, constraints, budget, roster and repairs.
+
+    Their actual values are inlined only by the digest-verifying production
+    assembler. ContextSnapshot narrative remains reference-only and untrusted.
+    """
+    values = _planner_trusted_values(
+        request=request,
+        remaining_tokens=remaining_tokens,
+        remaining_llm_invocations=remaining_llm_invocations,
+        roster=roster,
+        prior_issue_codes=prior_issue_codes,
+    )
+    named = {name: content_digest(value) for name, value in values.items()}
+    return tuple(NamedEvidenceDigest(name=n, digest=named[n]) for n in sorted(named))
+
+
+def _planner_trusted_values(
+    *,
+    request: OrchestrationRequest,
+    remaining_tokens: int,
+    remaining_llm_invocations: int,
+    roster: list[dict[str, Any]],
+    prior_issue_codes: tuple[str, ...],
+) -> dict[str, Any]:
+    """The actual trusted Planner inputs paired with the named digest channel."""
+    values: dict[str, Any] = {
+        "goal": request.goal,
+        "budget_headroom": {
+            "tokens": remaining_tokens,
+            "llm_invocations": remaining_llm_invocations,
+        },
+        "plan_shape_constraints": [
+            "prefer a small admissible DAG over an exhaustive plan; emit JSON immediately without narration",
+            "use a distinct writes_slot for every node; reducers are runtime-owned and unavailable",
+            "each dependency artifact_slot must exactly equal its upstream node writes_slot",
+            "the dependency graph must be acyclic and every node must reach a listed sink",
+            "sink_node_ids must be non-empty, duplicate-free, and name existing nodes",
+            "universe accepts only A-share six-digit symbols; for themes, sectors, or overseas symbols leave universe empty",
+        ],
+        "planner_output_template": {
+            "nodes": [
+                {
+                    "id": "unique-node-id",
+                    "worker_id": "copy-an-exact-worker_id-from-worker_roster",
+                    "params": {},
+                    "dependencies": [],
+                    "writes_slot": "slot.unique-node-id",
+                    "timeout_sec": 300,
+                    "token_reservation": 0,
+                }
+            ],
+            "sink_node_ids": ["unique-node-id"],
+            "universe": [],
+            "budget_request_tokens": 0,
+            "budget_request_llm_invocations": 1,
+            "max_concurrency": 1,
+            "rationale": "short justification",
+        },
+        "worker_roster": roster,
     }
     if prior_issue_codes:
-        named["prior_issue_codes"] = content_digest(sorted(set(prior_issue_codes)))
-    return tuple(NamedEvidenceDigest(name=n, digest=named[n]) for n in sorted(named))
+        values["prior_issue_codes"] = sorted(set(prior_issue_codes))
+    return values
 
 
 def _planner_untrusted_blocks(
@@ -1108,7 +1251,7 @@ def run_planner(
             roster=roster,
             prior_issue_codes=prior_issue_codes,
         )
-        assembled = prompt_assembler.assemble(
+        assemble_kwargs = dict(
             plan_digest=request_digest,
             node_id=f"planner.attempt.{k}",
             worker_id=planner_spec.planner_id,
@@ -1118,6 +1261,25 @@ def run_planner(
             trusted_input_digests=trusted,
             untrusted_blocks=untrusted_blocks,
         )
+        assemble_with_values = getattr(
+            prompt_assembler, "assemble_with_trusted_values", None
+        )
+        if callable(assemble_with_values):
+            trusted_values = _planner_trusted_values(
+                request=request,
+                remaining_tokens=remaining.tokens,
+                remaining_llm_invocations=remaining.llm_invocations,
+                roster=roster,
+                prior_issue_codes=prior_issue_codes,
+            )
+            assembled = assemble_with_values(
+                trusted_input_values=trusted_values, **assemble_kwargs
+            )
+        else:
+            # Protocol-compatible injected assemblers retain the Phase-7 call shape.
+            # Production binds StaticPromptAssembler, whose opt-in value channel above
+            # is required for an actually informed Planner.
+            assembled = prompt_assembler.assemble(**assemble_kwargs)
         prompt_ref = TypedPayloadRef(
             schema_ref=_PROMPT_ASSEMBLY_SR,
             payload_ref=payload_store.put(

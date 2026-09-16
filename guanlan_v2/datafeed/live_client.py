@@ -1,7 +1,9 @@
 """统一实时源客户端 —— 观澜现拉的唯一门户(数据中台件①)。
 
-子进程跑 stocks 正典 CLI `scripts/probe_live_sources.py`(统一信封 status:ok|planned|error),
-零重造零落盘只读。模块级跨调用最小间隔补「跨进程零共享节流」缺口(东财防封);
+子进程跑 stocks 正典 CLI `scripts/probe_live_sources.py`，同时支持 source 探针与
+dataset 级自动主备路由。统一信封显式区分正常空、暂无、限流、占用、网络、字段变化、
+陈旧缓存与熔断冷却；
+不写正典数据；last-good/健康状态存于观澜有界运行缓存。模块级跨调用最小间隔补「跨进程零共享节流」缺口(东财防封);
 catalog 动态派生源目录(缓存 1h,探针失败回静态兜底表)。
 诚实约定:caller/机械错误 → ok:False;上游 planned/error → ok:True 经 status/error 显形,恒不编造。
 """
@@ -17,6 +19,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .live_runtime import child_environment, maintain_last_good, drain_worker_stderr
+
 _STOCKS_PROBE = Path(os.environ.get("GUANLAN_LIVE_PROBE",
                                     r"G:\stocks\scripts\probe_live_sources.py"))
 _MIN_INTERVAL_S = 1.0     # 相邻子进程起跑最小间隔(probe 内另有请求级串行限流)
@@ -26,7 +30,26 @@ _CATALOG_TTL_S = 3600.0
 
 _LOCK = threading.Lock()
 _LAST_LAUNCH = [0.0]
-_CATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "rows": None}
+_CATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "rows": None, "generation": 0}
+_CATALOG_LOCK = threading.RLock()
+_CATALOG_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+_LIVE_SOURCE_STATUSES = frozenset({
+    "ok",
+    "empty",
+    "not_available",
+    "stale",
+    "planned",
+    "circuit_open",
+    "provider_busy",
+    "rate_limited",
+    "network_error",
+    "schema_error",
+    "unknown_error",
+    "error",
+})
+_DATA_QUERY_SCHEMA_VERSION = "guanlan.data-query.v2"
+_DATA_QUERY_STATUSES = frozenset({"ok", "partial", "empty", "error"})
+_DATA_QUERY_MODES = frozenset({"auto", "canonical", "live"})
 
 # ── 常驻 probe worker(2026-07-30 T2 提速)────────────────────────────────────
 # 单条 probe() 走常驻 stocks worker(stdin/stdout JSON-lines,RS=0x1e 前缀防杂散打印),
@@ -54,7 +77,8 @@ _WORKER_STDERR_LOG = Path(os.environ.get(
     "GUANLAN_PROBE_WORKER_LOG",
     str(Path(__file__).resolve().parents[2] / "var" / "live" / "probe_worker.stderr.log")))
 _WORKER_STATE: Dict[str, Any] = {"state": "cold", "spawn_fails": 0, "cooldown_until": 0.0,
-                                 "last_error": "", "last_ok_ts": 0.0}
+                                 "last_error": "", "last_ok_ts": 0.0,
+                                 "reload_required": False, "reload_reason": ""}
 
 
 def _worker_enabled() -> bool:
@@ -65,8 +89,41 @@ def worker_status() -> Dict[str, Any]:
     """worker 通道自检快照(health 总闸 probe_worker 运维项消费;只读)。"""
     return {"enabled": _worker_enabled(), "script_exists": _STOCKS_WORKER.exists(),
             "alive": bool(_WORKER.get("w") and _WORKER["w"]["proc"].poll() is None),
-            **{k: _WORKER_STATE[k] for k in
-               ("state", "spawn_fails", "cooldown_until", "last_error", "last_ok_ts")}}
+            **{k: _WORKER_STATE.get(k) for k in
+               ("state", "spawn_fails", "cooldown_until", "last_error", "last_ok_ts",
+                "reload_required", "reload_reason")}}
+
+
+def request_worker_catalog_reload(reason: str = "data catalog changed") -> bool:
+    """Safely recycle the persistent stocks worker after a registry revision.
+
+    The worker imports the stocks registries exactly once at process start.  A
+    newly discovered source/dataset would therefore be advertised by a fresh
+    one-shot catalog while an old worker still rejects it.  Marking reload first
+    closes that split brain.  If no request is active we recycle immediately;
+    otherwise the next request performs the recycle after it acquires the normal
+    worker lock.  An in-flight pipe is never killed.
+
+    Returns ``True`` when the recycle completed synchronously, ``False`` when it
+    is pending behind an active request.
+    """
+    why = str(reason or "data catalog changed").replace("\r", " ").replace("\n", " ")[:240]
+    _WORKER_STATE["reload_required"] = True
+    _WORKER_STATE["reload_reason"] = why
+    # A code/catalog revision is a new generation and must not inherit a prior
+    # spawn cooldown.  If the new generation also fails it will establish its
+    # own cooldown through _worker_note_spawn_failure.
+    _WORKER_STATE["cooldown_until"] = 0.0
+    if not _WORKER_LOCK.acquire(blocking=False):
+        return False
+    try:
+        _worker_kill(_WORKER.get("w"))
+        _WORKER["w"] = None
+        _WORKER_STATE["reload_required"] = False
+        _WORKER_STATE["state"] = "cold"
+        return True
+    finally:
+        _WORKER_LOCK.release()
 
 
 def _throttle_launch() -> None:
@@ -85,35 +142,42 @@ def _worker_kill(w: Optional[Dict[str, Any]]) -> None:
         w["proc"].kill()
     except Exception:  # noqa: BLE001
         pass
+    try:
+        w["proc"].wait(timeout=1.0)
+    except Exception:  # noqa: BLE001
+        pass
+    stderr_thread = w.get("stderr_thread")
+    if stderr_thread is not None:
+        stderr_thread.join(timeout=1.0)
 
 
 def _worker_spawn(ready_timeout: float = 30.0) -> Optional[Dict[str, Any]]:
     """起常驻 worker + reader 线程,等 __ready__(导入预热完成)。失败返 None(回落)。"""
     import queue as _queue
 
-    # stderr 落文件(每次 spawn 截断):worker 的 import 崩遗言/运行期噪声都可查,
-    # 绝不再 DEVNULL 吞掉唯一诊断(评审 important)。文件打不开才退 DEVNULL。
+    # Parent drains in bounded chunks into rotating logs, including native
+    # newline-free output. Never let a long-lived child grow one file forever.
     try:
         _WORKER_STDERR_LOG.parent.mkdir(parents=True, exist_ok=True)
-        stderr_sink: Any = open(_WORKER_STDERR_LOG, "wb")
+        with open(_WORKER_STDERR_LOG, "wb"):
+            pass
     except OSError:
-        stderr_sink = subprocess.DEVNULL
+        pass
     try:
         proc = subprocess.Popen(
             [sys.executable, str(_STOCKS_WORKER)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_sink,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
             cwd=str(_STOCKS_PROBE.parents[1]),
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            env=child_environment())
     except Exception as _se:  # noqa: BLE001
         _worker_note_spawn_failure(f"spawn 异常: {type(_se).__name__}: {_se}")
         return None
-    finally:
-        try:
-            if stderr_sink is not subprocess.DEVNULL:
-                stderr_sink.close()      # 子进程已持有 fd;父进程句柄即关
-        except Exception:  # noqa: BLE001
-            pass
+    stderr_thread = threading.Thread(
+        target=drain_worker_stderr, args=(proc.stderr, _WORKER_STDERR_LOG),
+        daemon=True, name="probe-worker-stderr",
+    )
+    stderr_thread.start()
     q: Any = _queue.Queue()
 
     def _read() -> None:
@@ -126,7 +190,7 @@ def _worker_spawn(ready_timeout: float = 30.0) -> Optional[Dict[str, Any]]:
         q.put(None)                          # EOF 哨兵
 
     threading.Thread(target=_read, daemon=True, name="probe-worker-reader").start()
-    w = {"proc": proc, "q": q}
+    w = {"proc": proc, "q": q, "stderr_thread": stderr_thread}
     deadline = time.time() + ready_timeout
     while True:
         remain = deadline - time.time()
@@ -141,6 +205,7 @@ def _worker_spawn(ready_timeout: float = 30.0) -> Optional[Dict[str, Any]]:
             _worker_note_spawn_failure("ready 等待读取异常")
             return None
         if line is None:                     # 起来即死(EOF)——遗言在 stderr 日志里
+            stderr_thread.join(timeout=0.2)
             _worker_note_spawn_failure("worker 起来即死(EOF)")
             return None
         try:
@@ -187,6 +252,15 @@ def _worker_request(spec: Dict[str, Any], timeout: float) -> Dict[str, Any]:
     if not _WORKER_LOCK.acquire(timeout=_WORKER_LOCK_WAIT_S):
         return {"ok": False, "note": "worker 忙(并发回落一次性)", "worker_unavailable": True}
     try:
+        maintain_last_good()
+        if _WORKER_STATE.get("reload_required"):
+            # A registry revision arrived while another request owned the pipe.
+            # Recycle only after that request has completed and this caller owns
+            # the same lock, so no response can be cut in half.
+            _worker_kill(_WORKER.get("w"))
+            _WORKER["w"] = None
+            _WORKER_STATE["reload_required"] = False
+            _WORKER_STATE["state"] = "cold"
         w = _WORKER.get("w")
         if w is None or w["proc"].poll() is not None:
             w = _worker_spawn()
@@ -232,6 +306,7 @@ def _worker_request(spec: Dict[str, Any], timeout: float) -> Dict[str, Any]:
             return {"ok": True, "payload": resp.get("payload")}
     finally:
         _WORKER_LOCK.release()
+        maintain_last_good()
 
 
 # 静态兜底目录(source_id -> alias;与 stocks LIVE_SOURCE_REGISTRY 手抄同步,source_id
@@ -338,13 +413,52 @@ CODE_PASSTHROUGH = {"ths_hot_list", "eastmoney_industry_reports", "tencent_realt
                     "overseas_stock_quote", "overseas_index_quote"}
 
 
+def _dynamic_catalog_rows(*, now: Optional[float] = None) -> tuple[Dict[str, Any], ...]:
+    """Return only a still-fresh, previously validated dynamic source index."""
+    instant = time.time() if now is None else float(now)
+    with _CATALOG_LOCK:
+        rows = _CATALOG_CACHE.get("rows")
+        observed_at = float(_CATALOG_CACHE.get("ts") or 0.0)
+        if not isinstance(rows, list) or instant - observed_at >= _CATALOG_TTL_S:
+            return ()
+        return tuple(dict(row) for row in rows)
+
+
+def source_catalog_generation() -> int:
+    """Return the process-local catalog generation used for refresh CAS."""
+    with _CATALOG_LOCK:
+        return int(_CATALOG_CACHE.get("generation") or 0)
+
+
+def revoke_source_catalog(
+    reason: str = "source catalog unavailable",
+    *,
+    expected_generation: Optional[int] = None,
+) -> bool:
+    """Revoke dynamic aliases without letting an old refresh erase a new one.
+
+    When ``expected_generation`` is supplied this is a compare-and-swap.  A
+    refresh that began against an older generation may neither revoke nor
+    recycle the worker after a newer refresh has already committed.
+    """
+    with _CATALOG_LOCK:
+        generation = int(_CATALOG_CACHE.get("generation") or 0)
+        if expected_generation is not None and generation != expected_generation:
+            return False
+        had_dynamic_rows = bool(_CATALOG_CACHE.get("rows"))
+        _CATALOG_CACHE.update(ts=0.0, rows=None, generation=generation + 1)
+    if had_dynamic_rows:
+        request_worker_catalog_reload(reason)
+    return True
+
+
 def _alias_index() -> Dict[str, str]:
     """alias/source_id → source_id(小写键)。"""
     out: Dict[str, str] = {}
     for sid, alias in _STATIC_SOURCES.items():
         out[sid.lower()] = sid
         out[str(alias).lower()] = sid
-    rows = _CATALOG_CACHE.get("rows") or []
+    rows = _dynamic_catalog_rows()
     for row in rows:
         sid = str(row.get("source_id") or "")
         if sid:
@@ -364,10 +478,79 @@ def resolve_source(source: str) -> str:
 def known_sources() -> List[str]:
     """canonical source_id 全集(动态 catalog ∪ 静态兜底)。"""
     ids = set(_STATIC_SOURCES)
-    for row in _CATALOG_CACHE.get("rows") or []:
+    for row in _dynamic_catalog_rows():
         if row.get("source_id"):
             ids.add(str(row["source_id"]))
     return sorted(ids)
+
+
+def accept_source_catalog(
+    rows: Any,
+    *,
+    observed_at: Optional[float] = None,
+    expected_generation: Optional[int] = None,
+) -> bool:
+    """Atomically install a validated dynamic source index for this process.
+
+    Runtime capability discovery may obtain the source and dataset catalogs in
+    one paired probe instead of calling :func:`catalog`.  Installing those same
+    source rows here makes a newly advertised direct ``source=<id>`` callable in
+    the already-running Console process.  Ambiguous aliases and malformed ids
+    fail closed; the previous last-good index remains untouched.
+    """
+    if not isinstance(rows, list) or not rows:
+        return False
+    normalized: List[Dict[str, Any]] = []
+    source_ids: set[str] = set()
+    alias_owners: Dict[str, str] = {}
+    for sid, alias in _STATIC_SOURCES.items():
+        alias_owners[sid.lower()] = sid
+        alias_owners[str(alias).lower()] = sid
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        source_id = str(row.get("source_id") or "").strip()
+        alias = str(row.get("alias") or source_id).strip()
+        if not _CATALOG_ID_RE.fullmatch(source_id) \
+                or not _CATALOG_ID_RE.fullmatch(alias) \
+                or source_id in source_ids:
+            return False
+        for key in (source_id.lower(), alias.lower()):
+            owner = alias_owners.get(key)
+            if owner is not None and owner != source_id:
+                return False
+            alias_owners[key] = source_id
+        source_ids.add(source_id)
+        normalized.append(dict(row))
+    observed = float(observed_at if observed_at is not None else time.time())
+    with _CATALOG_LOCK:
+        generation = int(_CATALOG_CACHE.get("generation") or 0)
+        if expected_generation is not None and generation != expected_generation:
+            return False
+        # A caller carrying an older observation timestamp cannot resurrect an
+        # index that a later observation already replaced.
+        if observed < float(_CATALOG_CACHE.get("ts") or 0.0):
+            return False
+        previous_index = tuple(sorted(
+            (
+                str(row.get("source_id") or ""),
+                str(row.get("alias") or row.get("source_id") or ""),
+            )
+            for row in (_CATALOG_CACHE.get("rows") or ())
+            if isinstance(row, dict)
+        ))
+        next_index = tuple(sorted(
+            (str(row["source_id"]), str(row.get("alias") or row["source_id"]))
+            for row in normalized
+        ))
+        _CATALOG_CACHE.update(
+            ts=observed,
+            rows=normalized,
+            generation=generation + 1,
+        )
+    if previous_index != next_index:
+        request_worker_catalog_reload("source catalog identity set changed")
+    return True
 
 
 def _clip_value(v: Any) -> Any:
@@ -440,14 +623,17 @@ def _run_probe(args: List[str], timeout: float = _TIMEOUT_S) -> Dict[str, Any]:
     cmd = [sys.executable, str(_STOCKS_PROBE), *args, "--json"]
     _throttle_launch()                # 只节流「起跑间隔」,不串行整个子进程生命周期
     try:
+        maintain_last_good()
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=timeout,
                               cwd=str(_STOCKS_PROBE.parents[1]),
-                              env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                              env=child_environment())
     except subprocess.TimeoutExpired:
         return {"ok": False, "note": f"probe 超时({int(timeout)}s),外源可能限流/阻塞;稍后再试"}
     except Exception as e:  # noqa: BLE001 — 启动失败诚实显形
         return {"ok": False, "note": f"probe 启动失败: {e}"}
+    finally:
+        maintain_last_good()
     if proc.returncode != 0:
         tail = (proc.stderr or "").strip()[-300:]
         return {"ok": False, "note": f"probe 退出码 {proc.returncode}: {tail}"}
@@ -466,11 +652,12 @@ def _run_probe_batch(specs: List[Dict[str, Any]], timeout: float) -> Dict[str, A
     cmd = [sys.executable, str(_STOCKS_PROBE), "--batch"]
     _throttle_launch()
     try:
+        maintain_last_good()
         proc = subprocess.run(cmd, input=json.dumps(specs, ensure_ascii=False),
                               capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=timeout,
                               cwd=str(_STOCKS_PROBE.parents[1]),
-                              env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                              env=child_environment())
     except subprocess.TimeoutExpired:
         # 评审红线:超时=子进程跑到一半被杀,已完成条目都真实打过上游——绝不回退重打
         # (恰在上游限流时加压),按机械失败诚实作废(channel_absent=False)。
@@ -478,6 +665,8 @@ def _run_probe_batch(specs: List[Dict[str, Any]], timeout: float) -> Dict[str, A
                 "note": f"batch probe 超时({int(timeout)}s),外源可能限流/阻塞;本批作废不重拉"}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "channel_absent": True, "note": f"batch probe 启动失败: {e}"}
+    finally:
+        maintain_last_good()
     if proc.returncode != 0:
         # 退出码非 0=通道不存在(旧 CLI 不认 --batch,argparse 在任何上游请求前退出)
         # 或进程级崩溃——两者都未真正打过上游,允许逐条回退。
@@ -499,15 +688,59 @@ def _run_probe_batch(specs: List[Dict[str, Any]], timeout: float) -> Dict[str, A
 def catalog(max_age_s: float = _CATALOG_TTL_S) -> Dict[str, Any]:
     """源目录:{ok, sources, origin:probe|cache|static, note}。探针失败回静态兜底。"""
     now = time.time()
-    if _CATALOG_CACHE["rows"] is not None and now - _CATALOG_CACHE["ts"] < max_age_s:
-        return {"ok": True, "sources": _CATALOG_CACHE["rows"], "origin": "cache", "note": ""}
+    # Snapshot rows + timestamp under one lock.  Reading them in two lock
+    # sections can pair an old row set with a newer generation's timestamp.
+    with _CATALOG_LOCK:
+        raw_cached_rows = _CATALOG_CACHE.get("rows")
+        cached_at = float(_CATALOG_CACHE.get("ts") or 0.0)
+        cached_age = now - cached_at
+        cached_rows = tuple(
+            dict(row) for row in raw_cached_rows
+        ) if (
+            isinstance(raw_cached_rows, list)
+            and cached_age < _CATALOG_TTL_S
+        ) else ()
+    if cached_rows and cached_age < max(0.0, float(max_age_s)):
+        return {"ok": True, "sources": list(cached_rows), "origin": "cache", "note": ""}
+    refresh_generation = source_catalog_generation()
     r = _run_probe(["--source=catalog"], timeout=30)
     if r.get("ok"):
         payload = r["payload"]
-        rows = (payload.get("rows") if isinstance(payload, dict) else None) or []
-        if rows:
-            _CATALOG_CACHE.update(ts=now, rows=rows)
-            return {"ok": True, "sources": rows, "origin": "probe", "note": ""}
+        if (
+            isinstance(payload, dict)
+            and payload.get("source") == "catalog"
+            and payload.get("write_enabled") is False
+            and payload.get("default_write") is False
+            and isinstance(payload.get("rows"), list)
+        ):
+            rows = payload["rows"]
+            if accept_source_catalog(
+                rows,
+                observed_at=now,
+                expected_generation=refresh_generation,
+            ):
+                return {
+                    "ok": True,
+                    "sources": rows,
+                    "origin": "probe",
+                    "note": "",
+                }
+    # A newer refresh won the race while this probe was running.  Never let the
+    # older success/failure overwrite or revoke that committed generation.
+    if source_catalog_generation() != refresh_generation:
+        current_rows = _dynamic_catalog_rows()
+        if current_rows:
+            return {
+                "ok": True,
+                "sources": list(current_rows),
+                "origin": "cache",
+                "note": "本次旧目录刷新已被更新代际取代",
+            }
+    else:
+        revoke_source_catalog(
+            "source catalog refresh failed",
+            expected_generation=refresh_generation,
+        )
     fallback = [{"source_id": sid, "alias": alias, "status": "unknown"}
                 for sid, alias in _STATIC_SOURCES.items()]
     return {"ok": True, "sources": fallback, "origin": "static",
@@ -558,22 +791,348 @@ def probe(source: str, code: str = "", date: str = "", limit: int = 20,
     return out
 
 
+def _operational_note(status: str, payload: Dict[str, Any], items: List[Any]) -> str:
+    """Translate stable live-source states without guessing provider intent."""
+
+    error = str(payload.get("error") or "").strip()
+    if status == "planned":
+        return "该源已登记但探针未实现(planned),诚实空返"
+    if status == "empty":
+        return "正常空数据(0 行):接口请求成功，但该查询条件本次没有条目"
+    if status == "not_available":
+        return "暂无数据:接口可达，但上游不提供该标的或时间窗的数据"
+    if status == "provider_busy":
+        return ("接口占用:同一 provider 正在处理其他请求，稍后重试" + (f";{error}" if error else ""))[:500]
+    if status == "rate_limited":
+        return ("接口限流:已停止继续施压，稍后按冷却策略恢复" + (f";{error}" if error else ""))[:500]
+    if status == "network_error":
+        return ("网络错误:本次未取得新数据" + (f";{error}" if error else ""))[:500]
+    if status == "schema_error":
+        return ("字段变化:上游响应不符合当前适配器契约，本次结果作废" + (f";{error}" if error else ""))[:500]
+    if status == "circuit_open":
+        return ("熔断冷却中:连续失败后暂不请求上游" + (f";{error}" if error else ""))[:500]
+    if status == "stale":
+        age = payload.get("stale_age")
+        age_text = f"{float(age):.1f}s" if isinstance(age, (int, float)) else "未知"
+        origin = "last-good 缓存" if payload.get("cache_hit") else "上游陈旧快照"
+        return (f"陈旧数据:{origin}, stale_age={age_text};已标注时间，不冒充最新"
+                + (f";本次错误={error}" if error else ""))[:500]
+    if status in {"error", "unknown_error"}:
+        return (f"上游探针出错:{error}" if error else "上游探针出错:未提供错误详情")[:500]
+    if not items:
+        return "正常空数据(0 行):旧版上游返回 ok 但没有条目"
+    return ""
+
+
 def _shape_payload(base: Dict[str, Any], p: Any, lim: int) -> Dict[str, Any]:
     """把上游 probe 载荷收进统一信封(probe/probe_many 共用,语义逐位一致)。"""
     if not isinstance(p, dict):           # 合法 JSON 但非对象(数组/标量)→ 诚实作废,不 .get 崩
         return {**base, "note": "probe 输出非对象 JSON(结构异常),该次结果作废不编造"}
-    status = str(p.get("status") or "")
-    items = [_clip_row(i) for i in (p.get("items") or [])[:lim]]
-    note = ""
-    if status == "planned":
-        note = "该源已在 stocks 登记但探针未实现(planned),诚实空返"
-    elif status == "error":
-        note = f"上游探针出错: {p.get('error') or ''}"[:300]
-    elif not items:
-        note = "该源本次返回 0 行(非交易日/无相关条目等;上游不报原因,不臆断)"
-    return {**base, "status": status or "ok", "items": items, "n": len(items),
-            "error": str(p.get("error") or ""), "note": note,
-            "fetched_ts": p.get("fetched_ts")}
+    expected_source = str(base.get("source") or "")
+    if str(p.get("source_id") or "") != expected_source:
+        return {
+            **base,
+            "ok": False,
+            "status": "schema_error",
+            "items": [],
+            "n": 0,
+            "error_kind": "schema_error",
+            "note": "probe source 回显与请求不一致；本次结果作废",
+        }
+    if p.get("write_enabled") is not False:
+        return {
+            **base,
+            "ok": False,
+            "status": "schema_error",
+            "items": [],
+            "n": 0,
+            "error_kind": "schema_error",
+            "note": "probe 未证明 read-only；本次结果作废",
+        }
+    raw_items = p.get("items")
+    if not isinstance(raw_items, list):
+        return {
+            **base,
+            "ok": False,
+            "status": "schema_error",
+            "items": [],
+            "n": 0,
+            "error_kind": "schema_error",
+            "note": "probe items 不是数组；本次结果作废",
+        }
+    raw_status = p.get("status")
+    if type(raw_status) is not str or raw_status not in _LIVE_SOURCE_STATUSES:
+        return {
+            **base,
+            "ok": False,
+            "status": "schema_error",
+            "items": [],
+            "n": 0,
+            "error_kind": "schema_error",
+            "note": "probe status 缺失或不在已审阅状态集合；本次结果作废",
+        }
+    status = raw_status
+    items = [_clip_row(i) for i in raw_items[:lim]]
+    note = _operational_note(status, p, items)
+    out = {
+        **base,
+        "status": status,
+        "items": items,
+        "n": len(items),
+        "error": str(p.get("error") or ""),
+        "note": note,
+        "error_kind": str(p.get("error_kind") or ""),
+        "stale_age": p.get("stale_age"),
+        "schema_version": str(p.get("schema_version") or ""),
+        "fetched_ts": p.get("fetched_ts"),
+    }
+    # These fields are provenance attestations, not presentation defaults.
+    # Preserve exact presence, type and value so the orchestration adapter can
+    # reject missing or malformed evidence instead of accepting values invented
+    # by this facade.
+    for field in (
+        "provider",
+        "actual_provider",
+        "fallback_level",
+        "cache_hit",
+        "network_used",
+        "circuit_state",
+        "attempted_sources",
+    ):
+        if field in p:
+            out[field] = p[field]
+    return out
+
+
+def _shape_dataset_payload(base: Dict[str, Any], payload: Any, lim: int) -> Dict[str, Any]:
+    def _schema_error(note: str) -> Dict[str, Any]:
+        return {
+            **base,
+            "ok": False,
+            "status": "schema_error",
+            "items": [],
+            "n": 0,
+            "error_kind": "schema_error",
+            "note": note,
+        }
+
+    if not isinstance(payload, dict):
+        return _schema_error("dataset query 输出非对象 JSON,该次结果作废")
+    expected_dataset = str(base.get("dataset") or "")
+    if str(payload.get("dataset_id") or "") != expected_dataset:
+        return _schema_error("dataset 回显与请求不一致；本次结果作废")
+    if (
+        payload.get("write_enabled") is not False
+        or payload.get("canonical_write") is not False
+    ):
+        return _schema_error("dataset query 未证明 read-only；本次结果作废")
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        return _schema_error("dataset query items 不是数组；本次结果作废")
+
+    schema_version = payload.get("schema_version")
+    if schema_version != _DATA_QUERY_SCHEMA_VERSION:
+        return _schema_error(
+            "dataset query schema_version 缺失或与已审阅版本不一致；本次结果作废"
+        )
+    status = payload.get("status")
+    if type(status) is not str or status not in _DATA_QUERY_STATUSES:
+        return _schema_error(
+            "dataset query status 缺失或不在已审阅状态集；本次结果作废"
+        )
+    diagnostics = payload.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        return _schema_error("dataset query diagnostics 不是对象；本次结果作废")
+
+    requested_mode = payload.get("requested_mode")
+    effective_mode = payload.get("effective_mode")
+    expected_mode = str(base.get("mode") or "live").strip().lower()
+    if (
+        type(requested_mode) is not str
+        or requested_mode not in _DATA_QUERY_MODES
+        or requested_mode != expected_mode
+    ):
+        return _schema_error("dataset query requested_mode 回显与请求不一致；本次结果作废")
+    allowed_effective_modes = (
+        frozenset({"auto", "canonical"})
+        if requested_mode == "auto"
+        else frozenset({requested_mode})
+    )
+    if type(effective_mode) is not str or effective_mode not in allowed_effective_modes:
+        return _schema_error("dataset query effective_mode 与请求模式矛盾；本次结果作废")
+
+    canonical_fetched = payload.get("canonical_fetched")
+    live_fetched = payload.get("live_fetched")
+    if (
+        type(canonical_fetched) is not int
+        or canonical_fetched < 0
+        or type(live_fetched) is not int
+        or live_fetched < 0
+    ):
+        return _schema_error(
+            "dataset query canonical_fetched/live_fetched 必须是非负整数；本次结果作废"
+        )
+    fetched_total = canonical_fetched + live_fetched
+    if status in {"empty", "error"}:
+        if raw_items or fetched_total != 0:
+            return _schema_error(
+                f"dataset query status={status} 必须空返且 fetched count 为 0；本次结果作废"
+            )
+    elif not raw_items or len(raw_items) > fetched_total:
+        return _schema_error(
+            f"dataset query status={status} 与 items/fetched count 矛盾；本次结果作废"
+        )
+
+    actual_provider = payload.get("actual_provider")
+    fallback_level = payload.get("fallback_level")
+    network_used = payload.get("network_used")
+    queried_at = payload.get("queried_at")
+    if not isinstance(actual_provider, str):
+        return _schema_error("dataset query actual_provider 必须是字符串；本次结果作废")
+    if type(fallback_level) is not int or fallback_level < 0:
+        return _schema_error("dataset query fallback_level 必须是非负整数；本次结果作废")
+    if type(network_used) is not bool:
+        return _schema_error("dataset query network_used 必须是布尔值；本次结果作废")
+    if not isinstance(queried_at, str) or not queried_at.strip():
+        return _schema_error("dataset query queried_at 必须是非空时间字符串；本次结果作废")
+
+    live_status_raw = diagnostics.get("live_status")
+    if "live_status" in diagnostics and (
+        type(live_status_raw) is not str
+        or live_status_raw not in _LIVE_SOURCE_STATUSES
+    ):
+        return _schema_error(
+            "dataset query diagnostics.live_status 不在已审阅状态集；本次结果作废"
+        )
+    if "cache_hit" in diagnostics and type(diagnostics["cache_hit"]) is not bool:
+        return _schema_error(
+            "dataset query diagnostics.cache_hit 必须是布尔值；本次结果作废"
+        )
+    if "circuit_state" in diagnostics and (
+        not isinstance(diagnostics["circuit_state"], str)
+        or not diagnostics["circuit_state"]
+    ):
+        return _schema_error(
+            "dataset query diagnostics.circuit_state 必须是非空字符串；本次结果作废"
+        )
+    if "attempted_sources" in diagnostics and not isinstance(
+        diagnostics["attempted_sources"], list
+    ):
+        return _schema_error(
+            "dataset query diagnostics.attempted_sources 必须是数组；本次结果作废"
+        )
+
+    items = [_clip_row(item) for item in raw_items[:lim]]
+    live_status = live_status_raw if isinstance(live_status_raw, str) else ""
+    operational_status = live_status or status
+    error_kind = str(payload.get("error_kind") or diagnostics.get("error_kind") or "")
+    error = str(
+        payload.get("error")
+        or diagnostics.get("live_error")
+        or diagnostics.get("canonical_error")
+        or diagnostics.get("live_warning")
+        or ""
+    )
+    meta = {
+        "error": error,
+        "error_kind": error_kind,
+        "cache_hit": bool(diagnostics.get("cache_hit")),
+        "stale_age": payload.get("stale_age"),
+    }
+    note = _operational_note(operational_status, meta, items)
+    if status == "partial" and not note:
+        note = "部分可用:已返回可验证的数据行，但至少一个查询分支失败"
+    request_error = error_kind == "invalid_request"
+    out = {
+        **base,
+        "ok": not request_error,
+        "dataset": expected_dataset,
+        "status": status,
+        "live_status": live_status,
+        "items": items,
+        "n": len(items),
+        "note": note,
+        "error": error,
+        "error_kind": error_kind,
+        "actual_provider": actual_provider,
+        "fallback_level": fallback_level,
+        "stale_age": payload.get("stale_age"),
+        "schema_version": schema_version,
+        "network_used": network_used,
+        "canonical_fetched": canonical_fetched,
+        "live_fetched": live_fetched,
+        "effective_mode": effective_mode,
+        "as_of": payload.get("as_of"),
+        "fetched_ts": queried_at,
+        "diagnostics": diagnostics,
+    }
+    # These diagnostics are provenance attestations, not presentation defaults.
+    # Preserve exact upstream presence/type/value; canonical-only queries may
+    # legitimately omit every live diagnostic, which is different from proving
+    # cache_hit=false, circuit=closed or that no source was attempted.
+    for field in ("cache_hit", "circuit_state", "attempted_sources"):
+        if field in diagnostics:
+            out[field] = diagnostics[field]
+    return out
+
+
+def query_dataset(dataset: str, code: str = "", date: str = "", limit: int = 20,
+                  mode: str = "live", as_of: str = "", start: str = "", end: str = "",
+                  live_source: str = "", timeout: float = _TIMEOUT_S) -> Dict[str, Any]:
+    """Read a dataset through stocks routing; this never writes canonical data."""
+
+    pulled_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+    dataset_id = str(dataset or "").strip()
+    base: Dict[str, Any] = {
+        "ok": True,
+        "source": "auto",
+        "dataset": dataset_id,
+        "code": code,
+        "date": date,
+        "mode": mode,
+        "status": "",
+        "items": [],
+        "n": 0,
+        "error": "",
+        "note": "",
+        "pulled_at": pulled_at,
+    }
+    if not dataset_id:
+        return {**base, "ok": False, "note": "dataset 不能为空"}
+    mode_key = str(mode or "live").strip().lower()
+    if mode_key not in {"auto", "canonical", "live"}:
+        return {**base, "ok": False, "note": f"mode 非法:{mode!r}(允许 auto/canonical/live)"}
+    try:
+        lim = max(1, min(int(limit or 20), 300))
+    except (TypeError, ValueError):
+        return {**base, "ok": False, "note": f"limit 非法:{limit!r}(需整数)"}
+    spec = {
+        "dataset": dataset_id,
+        "code": code,
+        "date": date,
+        "limit": lim,
+        "mode": mode_key,
+        "as_of": as_of,
+        "start": start,
+        "end": end,
+        "source": live_source,
+    }
+    wr = _worker_request(spec, timeout)
+    if not wr.get("worker_unavailable"):
+        if wr.get("ok"):
+            return _shape_dataset_payload(base, wr.get("payload"), lim)
+        return {**base, "note": wr["note"]}
+    args = [f"--dataset={dataset_id}", f"--code={code}", f"--date={date}",
+            f"--limit={lim}", f"--mode={mode_key}", f"--start={start}",
+            f"--end={end}", f"--as-of={as_of}"]
+    if live_source:
+        args.append(f"--live-source={live_source}")
+    result = _run_probe(args, timeout=timeout)
+    if not result.get("ok"):
+        return {**base, "note": result["note"], "worker_fallback": wr["note"]}
+    out = _shape_dataset_payload(base, result["payload"], lim)
+    out["worker_fallback"] = wr["note"]
+    return out
 
 
 def probe_many(requests: List[Dict[str, Any]], timeout: Optional[float] = None) -> List[Dict[str, Any]]:

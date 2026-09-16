@@ -1,8 +1,8 @@
 """研报失败链路两个 HIGH BUG 的回归锁(后端审计 2026-06-15 发现)。
 
-BUG#1 研报失败仍 exit 0 → _call_buddy_report 用 glob 取最新 md,会把隔日陈旧报告冒充本次成功。
-   修法 = 只接受 mtime ≥ 子进程起跑时刻 t0 的 md(本次真产出的);否则诚实 ok:False,拒绝旧档。
-   锁:_freshest_report_md 对「只有旧档」返 None、对「有本次新档」返最新的那份。
+BUG#1 研报失败仍 exit 0 → code-only glob 会把隔日/另一 asof 报告冒充本次成功。
+   修法 = 只接受精确 {code}_{asof}.md 且 mtime ≥ 子进程起跑时刻 t0。
+   锁:_freshest_report_md 同时拒绝陈旧精确档与新鲜但错误 asof 的档。
 
 BUG#2 report-writer 13 个硬依赖,任一上游(含纯上下文 agent)失败即整份研报夭折。
    修法 = orchestrator 支持 soft_deps(软依赖只需 done 不需 ok),把上下文类 agent 标软。
@@ -54,20 +54,42 @@ def test_hard_dep_failure_still_blocks_dependent():
 # ── BUG#1: stale-md guard ──
 def test_freshest_rejects_stale_only(tmp_path):
     t_now = time.time()
-    old = tmp_path / "SH600519_20260101_120000.md"
+    old = tmp_path / "SH600519_2026-01-01.md"
     old.write_text("旧研报", encoding="utf-8")
     os.utime(old, (t_now - 10000, t_now - 10000))   # 远早于本次起跑
-    assert _freshest_report_md(tmp_path, "SH600519", t_now) is None, \
+    assert _freshest_report_md(tmp_path, "SH600519", t_now, asof="2026-01-01") is None, \
         "只有旧档时必须返 None(拒绝冒充)"
 
 
 def test_freshest_picks_this_run_output(tmp_path):
     t0 = time.time()
-    old = tmp_path / "SH600519_20260101_120000.md"
-    old.write_text("旧研报", encoding="utf-8")
-    os.utime(old, (t0 - 10000, t0 - 10000))
-    new = tmp_path / "SH600519_20260615_103000.md"
-    new.write_text("本次新研报", encoding="utf-8")
-    os.utime(new, (t0 + 30, t0 + 30))               # 本次起跑后写入
-    got = _freshest_report_md(tmp_path, "SH600519", t0)
-    assert got is not None and got.name == "SH600519_20260615_103000.md"
+    exact = tmp_path / "SH600519_2026-06-15.md"
+    exact.write_text("本次精确研报", encoding="utf-8")
+    os.utime(exact, (t0 + 20, t0 + 20))
+    other = tmp_path / "SH600519_2026-06-16.md"
+    other.write_text("另一截面且更新", encoding="utf-8")
+    os.utime(other, (t0 + 30, t0 + 30))
+
+    got = _freshest_report_md(tmp_path, "SH600519", t0, asof="2026-06-15")
+    assert got is not None and got.name == "SH600519_2026-06-15.md"
+
+
+def test_freshest_never_falls_back_to_other_asof(tmp_path):
+    t0 = time.time()
+    wrong = tmp_path / "SH600519_2026-06-16.md"
+    wrong.write_text("错误截面", encoding="utf-8")
+    os.utime(wrong, (t0 + 30, t0 + 30))
+
+    assert _freshest_report_md(tmp_path, "SH600519", t0, asof="2026-06-15") is None
+
+
+def test_freshest_default_current_request_keeps_today_filename(tmp_path):
+    from datetime import date
+
+    t0 = time.time()
+    today = date.today().isoformat()
+    current = tmp_path / f"SH600519_{today}.md"
+    current.write_text("今天研报", encoding="utf-8")
+    os.utime(current, (t0 + 10, t0 + 10))
+
+    assert _freshest_report_md(tmp_path, "SH600519", t0) == current

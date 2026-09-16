@@ -1,5 +1,5 @@
 # tests/test_seats_decide_pa.py
-# decide 接线价格行为:pa 开→prompt 含两块 + 响应/落盘带 pa_features;pa 关→prompt 不含但响应仍带几何。
+# decide 接线价格行为:确定性形态事实始终注入；pa 开关只控制可编辑方法论。
 import sys
 import json as _json
 from pathlib import Path
@@ -83,12 +83,12 @@ def test_pa_on_empty_method_uses_default(tmp_path, monkeypatch):
     assert "T+1" in _CAP["user"]   # 默认模板兜底
 
 
-def test_pa_off_no_blocks_but_features_present(tmp_path, monkeypatch):
+def test_pa_off_keeps_deterministic_facts_but_omits_methodology(tmp_path, monkeypatch):
     _CAP.clear()
     r = _post(_client(monkeypatch, tmp_path))
     assert r["ok"] is True
-    assert isinstance(r.get("pa_features"), dict)          # 几何常显:响应仍带
-    assert "【价量形态·确定性" not in _CAP["user"]
+    assert isinstance(r.get("pa_features"), dict)
+    assert "【价量形态·确定性" in _CAP["user"]
     assert "【价格行为读法" not in _CAP["user"]
     rec = _json.loads((tmp_path / "dec.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert rec.get("pa") is False

@@ -19,6 +19,7 @@ import re
 from datetime import datetime, timezone
 from typing import List
 
+from financial_analyst.data.code_norm import is_bj_code
 from financial_analyst.data.net import domestic_session, rate_limited
 
 _HOME = "https://xueqiu.com/"
@@ -36,7 +37,7 @@ def _normalize_symbol(code: str) -> str:
             return "SH" + c
         if c[0] in "03":
             return "SZ" + c
-        if c[0] in "84":
+        if is_bj_code(c):
             return "BJ" + c
     return c
 

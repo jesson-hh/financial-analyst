@@ -4,8 +4,9 @@
 The FINAL migration batch. Covers (per brief Step 1):
 * the WorkerSpec matrix per roster row (lane/tier/model_tier/tool policy/allowlist/
   guardrails/read_categories/output/inputs/params/decision authority), field-for-field;
-* the clause-(d) pilot updates: the ``dec.research_mgr`` / ``dec.pm`` WorkerSpecs differ
-  from the frozen Phase-7 baseline in EXACTLY the reviewed fields;
+* the clause-(d) pilot updates plus the reviewed 2026-08-29 live execution corrections:
+  ``dec.research_mgr`` and the late-speaking ``dec.bear`` use the same V4-Flash model
+  through non-thinking ``fast`` after reasoning-only/truncated-final completions;
 * the 交付物③ byte-verbatim install: both pilot tree files equal the spec-extracted fenced
   blocks (+ trailing newline); the supersession-set extension in test_skilltree;
 * skill-v1 grammar + mirror byte identity for all six; the sole-``reasoner_deep`` invariant
@@ -122,7 +123,7 @@ EXPECTED = {
                 ("news_digest", "NewsDigestReport", False, "one"),
                 ("opponent_case", "BearCase", False, "one"))),
     "dec.bear": dict(
-        lane="decision", tier="critic", model_tier="reasoner", tool_calls="forbidden",
+        lane="decision", tier="critic", model_tier="fast", tool_calls="forbidden",
         guardrails=("guardrail.debate_rounds", "guardrail.number_provenance",
                     "guardrail.untrusted_input_isolation", "guardrail.vf_anchor_dict"),
         prompt="prompt.dec.bear", skill="skill.dec.bear", output="BearCase",
@@ -198,6 +199,13 @@ def test_debate_seats_use_only_fast_or_reasoner(specs):
         assert specs[wid].execution.model_tier in ("fast", "reasoner")
 
 
+def test_late_bear_uses_non_thinking_v4_flash_alias(specs):
+    """The largest debate prompt must leave its output budget to BearCase JSON."""
+    bear = specs["dec.bear"]
+    assert bear.execution.model_tier == "fast"
+    assert bear.execution.thinking_budget == 0
+
+
 def test_asymmetric_ammo(specs):
     # invariant 6: bear carries announcement_risk; bull does not
     bear_inputs = {i.name for i in specs["dec.bear"].inputs}
@@ -213,7 +221,13 @@ def test_asymmetric_ammo(specs):
 def test_research_mgr_pilot_update_changes_only_reviewed_fields(specs, baseline):
     b, u = baseline["dec.research_mgr"], specs["dec.research_mgr"]
     changed = [f for f in type(b).model_fields if getattr(b, f) != getattr(u, f)]
-    assert changed == ["skills", "guardrail_refs", "inputs"]
+    assert changed == ["execution", "skills", "guardrail_refs", "inputs"]
+    # Live contract correction: same reviewed V4-Flash provider/model is
+    # reached through the non-thinking alias so structured JSON is not starved
+    # by private reasoning.  This is the only execution-field exception.
+    assert b.execution.model_tier == "reasoner"
+    assert u.execution.model_tier == "fast"
+    assert u.execution.thinking_budget == 0
     # skills rebind to the 交付物③ tree install
     assert b.skills[0].skill_ref.id == "skill.research_mgr"
     assert u.skills[0].skill_ref.id == "skill.dec.research_mgr"
@@ -221,12 +235,19 @@ def test_research_mgr_pilot_update_changes_only_reviewed_fields(specs, baseline)
     assert [g.id for g in b.guardrail_refs] == ["guard.provenance", "guard.advisory_discipline"]
     assert [g.id for g in u.guardrail_refs] == [
         "guard.provenance", "guard.advisory_discipline", "guardrail.debate_rounds"]
-    # inputs = pilot baseline + the two reviewed optional inputs
+    # inputs = pilot baseline + the full deep evidence spine and the two
+    # original Lane-D optional faces.  The reusable WorkerSpec keeps them
+    # optional; the full preset makes the seven direct evidence edges blocking.
     added = tuple((i.name, i.schema_ref.name) for i in u.inputs[len(b.inputs):])
-    assert added == (("bullbear_transcript", "DebateTranscript"),
+    assert added == (("price_action", "PriceActionFeatureReport"),
+                     ("technical", "TechnicalReport"),
+                     ("microstructure", "MicrostructureReport"),
+                     ("news_digest", "NewsDigestReport"),
+                     ("bull_case", "BullCase"),
+                     ("bear_case", "BearCase"),
+                     ("bullbear_transcript", "DebateTranscript"),
                      ("upstream_ratings", "UpstreamRatingsExtract"))
-    # frozen fields genuinely unchanged (clause d)
-    assert u.execution == b.execution
+    # frozen fields genuinely unchanged apart from the explicit execution fix
     assert u.evidence_policy == b.evidence_policy
     assert u.capability_allowlist == b.capability_allowlist
     assert u.read_categories == b.read_categories  # NOT the roster 2-col — clause d freezes it

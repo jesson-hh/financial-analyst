@@ -48,8 +48,7 @@ def _client() -> TestClient:
 
 def _setup(tmp_path, monkeypatch, closes=None) -> TestClient:
     monkeypatch.setattr(seats_api, "_LEDGER_LOG", tmp_path / "seats_ledger.jsonl")
-    import financial_analyst.data.loader_factory as _lf
-    monkeypatch.setattr(_lf, "get_default_loader",
+    monkeypatch.setattr(seats_api, "local_query_loader",
                         lambda: _FakeLedgerLoader(closes or {}))
     # 默认钉「结算价模式」:MTM 测试用 fake 日线测昨收,不受运行时刻是否盘中影响、不触实时网络。
     monkeypatch.setattr(seats_api, "_is_trading_now", lambda *a: False)
@@ -202,8 +201,7 @@ def test_ledger_equity_mtm(tmp_path, monkeypatch):
     assert p1["upl"] == pytest.approx(500)
 
     # 某票缺价 → 该持仓 mkt_value=null 且 equity=null,covered 计已估值数
-    import financial_analyst.data.loader_factory as _lf
-    monkeypatch.setattr(_lf, "get_default_loader",
+    monkeypatch.setattr(seats_api, "local_query_loader",
                         lambda: _FakeLedgerLoader({"600001": 55.0}))
     s2 = _state(client)
     assert s2["equity"] is None and s2["equity_date"] is None

@@ -123,7 +123,7 @@ from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 
 from guanlan_v2.orchestration.budget import BudgetLedger
-from guanlan_v2.orchestration.context import RunBudget
+from guanlan_v2.orchestration.context import ContextSnapshot, RunBudget, RunContext
 from guanlan_v2.orchestration.digest import content_digest
 from guanlan_v2.orchestration.enums import ApprovalPolicy, PlanSource
 from guanlan_v2.orchestration.events import EventType
@@ -136,7 +136,7 @@ from guanlan_v2.orchestration.plan_diff import (
 )
 from guanlan_v2.orchestration.refs import PayloadRef, SchemaRef, TypedPayloadRef
 from guanlan_v2.orchestration.schema_registry import SchemaRegistry
-from guanlan_v2.orchestration.spec import OrchestrationRequest
+from guanlan_v2.orchestration.spec import OrchestrationRequest, PlanDraft
 
 from guanlan_v2.orchestration.pipeline.candidates import (
     CandidateParamsError,
@@ -160,6 +160,8 @@ from guanlan_v2.orchestration.pipeline.deep_decide import (
     DEEP_DECIDE_PRESET_IDS,
     REDUCED_DEEP_DECIDE_PRESET_ID,
     REDUCED_EVIDENCE_NOTE,
+    RUN_SUBJECT_SCHEMA_REF as DEEP_RUN_SUBJECT_SCHEMA_REF,
+    DeepRunSubject,
     DeepDecideError,
     materialize_deep_decide_draft,
     reduced_evidence_badges,
@@ -182,6 +184,10 @@ from guanlan_v2.orchestration.pipeline.screening_driver import (
     build_lane_admission,
     execute_screening_batch,
     production_archive_put,
+)
+from guanlan_v2.orchestration.pipeline.approval_driver import (
+    PipelineApprovalSurface,
+    bind_process_pipeline_approval_surface,
 )
 
 __all__ = [
@@ -228,6 +234,14 @@ _DEFAULT_MAINLINE_LIMIT = 3
 _SCREEN_GOAL = "观澜 · 编排选股批量研判(run-scoped subjects)"
 _DEEP_GOAL = "观澜 · 编排深度研判(run-scoped subject)"
 
+#: Deep preset launch semantics are part of request/run identity. Generation 10
+#: inherits v9's evidence, retry, Technical and Research Manager corrections and
+#: additionally rebinds the late-speaking ``dec.bear`` to the reviewed
+#: non-thinking V4-Flash tier after its largest debate prompt produced a
+#: reasoning-only completion followed by a length-truncated final fragment.  A
+#: v10 launch must never replay a v9 approval whose Bear seat was still thinking.
+_DEEP_LAUNCH_CONTRACT = "run-scoped-online-context-v10"
+
 #: the +08:00 session zone the deep subject's deterministic ``as_of`` anchors to.
 _SESSION_TZ = timezone(timedelta(hours=8))
 
@@ -271,6 +285,11 @@ class PipelineRouterDeps:
     #: ``() -> (ContextSnapshot, PayloadRef) | None`` — latest committed Lane-0
     #: snapshot (the Task-7 port; ``None`` result ⇒ typed refusal).
     latest_snapshot_fn: Callable[[], Any] | None = None
+    #: ``(*, base_context, now, run_id, code, evidence_tf) ->
+    #: (ContextSnapshot, PayloadRef)`` — freeze the preset run's live evidence
+    #: before its candidate digest is computed.  Production reuses the reviewed
+    #: live-decide probe→persist→context recipe; an unbound preset door refuses.
+    refresh_snapshot_fn: Callable[..., Any] | None = None
     #: per-run admission factory ``(*, run_id, requests, drafts, context,
     #: approvals, run_budget) -> PlanAdmissionService`` (the Task-7 ABI, widened
     #: to N requests/drafts for the screening batch).
@@ -294,6 +313,10 @@ class PipelineRouterDeps:
     #: so on the receipt — it never becomes a 503, because nothing needs a
     #: runner until a standing lease actually admits a lane.
     plan_runner_factory: Callable[..., Any] | None = None
+    #: process-local routing surface that retains each single-plan run's owning
+    #: admission/coordinator until a human decision reaches the console.  It is
+    #: optional for injected/legacy callers; production always binds it.
+    approval_surface: Any = None
     #: the A-line archive landing seam ``(artifact_id, artifact_type, markdown)``
     #: (production: ``screening_driver.production_archive_put``). Unbound, a
     #: built slate is honestly reported as NOT filed, never silently dropped.
@@ -413,6 +436,10 @@ class JsonlPipelineRequestStore:
         rows.reverse()  # most recently written first
         return rows[: max(0, int(limit))]
 
+    def all(self) -> tuple[dict[str, Any], ...]:
+        """Every last-write-wins record in durable insertion/recency order."""
+        return tuple(self._fold().values())
+
     def by_batch(self, batch_id: str) -> dict[str, Any] | None:
         for row in self._fold().values():
             if str(row.get("batch_id") or "") == str(batch_id):
@@ -445,16 +472,28 @@ def _pipeline_registry() -> SchemaRegistry:
 
 
 def build_stores_subject_committer(stores: Any) -> Callable[[RunSubject], TypedPayloadRef]:
-    """The production ``SubjectCommitter``: persist one ``RunSubject@1`` through
-    the registry-validated payload store and return its digest-bound typed ref."""
+    """Persist the exact screening/deep subject generation and return its ref."""
 
     def commit(subject: RunSubject) -> TypedPayloadRef:
-        digest = stores.resolver.register(_pipeline_registry())
+        is_deep = isinstance(subject, DeepRunSubject)
+        schema_ref = DEEP_RUN_SUBJECT_SCHEMA_REF if is_deep else RUN_SUBJECT_SCHEMA_REF
+        if is_deep:
+            # RunSubject@2 already owns a distinct, digest-pinned side registry
+            # in live_decide.  Reuse it; adding @2 to the historical pipeline
+            # side registry would move that registry's digest and make every
+            # existing RunSubject@1/CandidateSlate payload unreadable at boot.
+            from guanlan_v2.orchestration.pipeline.live_decide import _commit_run_subject
+
+            return _commit_run_subject(
+                stores, subject,
+                run_id=f"pipeline-{subject.semantic_digest()[:32]}")
+        registry = _pipeline_registry()
+        digest = stores.resolver.register(registry)
         ref = stores.payloads.put(
-            RUN_SUBJECT_SCHEMA_REF, subject, registry_digest=digest,
+            schema_ref, subject, registry_digest=digest,
             namespace="main",
             idempotency_key=f"pipeline-subject:{subject.semantic_digest()[:32]}")
-        return TypedPayloadRef(schema_ref=RUN_SUBJECT_SCHEMA_REF, payload_ref=ref)
+        return TypedPayloadRef(schema_ref=schema_ref, payload_ref=ref)
 
     return commit
 
@@ -561,7 +600,7 @@ def _single_plan_admit(d: Any, *, request, draft, context, now, run_id,
             {i.code for i in prep.support_report.issues})), None
     digest = prep.candidate_plan_digest
 
-    service.persist_and_reserve_candidate(
+    _candidate, reservation = service.persist_and_reserve_candidate(
         prep, idempotency_key=f"pipeline-reserve:{run_id}")
     diff = build_plan_diff(
         draft, request=request, candidate_plan_digest=digest,
@@ -579,6 +618,14 @@ def _single_plan_admit(d: Any, *, request, draft, context, now, run_id,
         admission=service,
         approvals_sink=lambda ap: approvals.__setitem__(
             (ap.request_id, ap.candidate_plan_digest), ap))
+    surface = getattr(d, "approval_surface", None)
+    if surface is not None:
+        # Attach before registration so the console mirror sees the pending card
+        # event.  The executable closure is bound by the owning route immediately
+        # after this helper returns.  A pathological concurrent decision in that
+        # tiny interval is refused as an unbound executable candidate and is
+        # safely retryable; it can never dispatch through the wrong run owner.
+        surface.attach_coordinator(coordinator)
     outcome = coordinator.register_and_try_lease(
         pending, idempotency_key=f"pipeline-card:{run_id}", now=now,
         candidate_catalog_digest=draft.catalog_digest,
@@ -586,7 +633,190 @@ def _single_plan_admit(d: Any, *, request, draft, context, now, run_id,
     # THE STOP LINE: no admit_after_approval, no freeze, no dispatch — even a
     # lease-admitted candidate awaits the downstream driver.
     return None, {"digest": digest, "outcome": outcome.outcome,
-                  "run_budget": run_budget}
+                  "run_budget": run_budget, "service": service,
+                  "coordinator": coordinator, "reservation": reservation,
+                  "lease_outcome": outcome}
+
+
+@dataclasses.dataclass(frozen=True)
+class _SinglePlanPoint:
+    """The one decision point of an interactive goal/preset plan."""
+
+    point_ordinal: int = 0
+
+
+def _bind_single_plan_execution(
+    d: Any,
+    *,
+    request: OrchestrationRequest,
+    context: Any,
+    result: Mapping[str, Any],
+    subject: Any = None,
+    subject_ref: TypedPayloadRef | None = None,
+    subject_params: Any = None,
+) -> None:
+    """Retain the run owner and compose its post-approval production runner.
+
+    This function does not approve, freeze or execute.  It installs the closure
+    the console calls *after* ``PlanApprovalCoordinator.decide`` has returned its
+    durable APPROVED event.  Injected legacy routers may omit the surface and keep
+    the historical register-only behaviour; production binds both collaborators.
+    """
+    surface = getattr(d, "approval_surface", None)
+    if surface is None:
+        return
+    runner_factory = getattr(d, "plan_runner_factory", None)
+    if runner_factory is None:
+        raise RuntimeError(
+            "an approval_surface without plan_runner_factory would accept a human "
+            "decision it cannot execute")
+
+    from guanlan_v2.orchestration.adapters.launcher import LaneExecutionBinding
+    from guanlan_v2.orchestration.pipeline.live_decide import SubjectPromptAssembler
+
+    digest = str(result["digest"])
+    service = result["service"]
+    reservation = result["reservation"]
+    run_budget = result["run_budget"]
+    coordinator = result["coordinator"]
+    assembler = (
+        SubjectPromptAssembler(subject=subject, subject_ref=subject_ref)
+        if subject is not None and subject_ref is not None
+        else None
+    )
+
+    def _execute(approval_event: Any) -> Any:
+        binding = LaneExecutionBinding(
+            lane="main", candidate_plan_digest=digest,
+            reservation_id=reservation.reservation_id,
+            approval_event_id=approval_event.event_id)
+
+        def _run_context_factory(*, lane, point, plan, data_context, memory_binding):
+            return RunContext(
+                run_id=plan.run_id, data=data_context,
+                context_snapshot_id=context.snapshot_id,
+                memory_snapshot_hash=context.memory_snapshot_hash,
+                budget=run_budget,
+                cancellation_token_id=f"cancel-{plan.run_id}")
+
+        runner = runner_factory(
+            admission=service, lane_bindings={"main": binding},
+            run_context_factory=_run_context_factory,
+            request_id=request.request_id, prompt_assembler=assembler,
+            subject_params=subject_params)
+        return runner(
+            lane="main", point=_SinglePlanPoint(), approval=None,
+            data_context=context.data_context, memory_binding=None,
+            candidate_plan_digest=digest)
+
+    surface.bind_candidate(
+        request_id=request.request_id, candidate_plan_digest=digest,
+        coordinator=coordinator, execute=_execute)
+
+
+def _single_plan_recovery_payload(
+    *,
+    request: OrchestrationRequest,
+    draft: PlanDraft,
+    context: ContextSnapshot,
+    result: Mapping[str, Any],
+    subject: Any = None,
+    subject_ref: TypedPayloadRef | None = None,
+) -> dict[str, Any]:
+    """JSON-native material needed to rebuild the run owner after restart.
+
+    This row is not approval authority.  Recovery re-runs Phase-1/support and
+    recomputes the candidate digest before the durable approval journal is read;
+    modified bytes therefore refuse instead of changing the approved plan.
+    """
+    return {
+        "schema_version": "1",
+        "candidate_plan_digest": str(result["digest"]),
+        "request": request.model_dump(mode="json"),
+        "draft": draft.model_dump(mode="json"),
+        "context": context.model_dump(mode="json"),
+        "run_budget": result["run_budget"].model_dump(mode="json"),
+        "subject": (
+            subject.model_dump(mode="json") if subject is not None else None),
+        "subject_ref": (
+            subject_ref.model_dump(mode="json")
+            if subject_ref is not None else None),
+    }
+
+
+def _recover_single_plan_executions(d: PipelineRouterDeps) -> int:
+    """Rebuild recoverable goal/preset run owners from durable request rows."""
+    surface = d.approval_surface
+    if surface is None or d.request_store is None:
+        return 0
+    recovered = 0
+    for record in d.request_store.all():
+        raw = record.get("execution_recovery")
+        if not isinstance(raw, dict) or raw.get("schema_version") != "1":
+            continue
+        run_id = str(record.get("run_id") or "")
+        if not run_id or _run_status(d.stores, run_id) in {
+                "completed", "failed", "cancelled"}:
+            continue
+        try:
+            request = OrchestrationRequest.model_validate_json(
+                json.dumps(raw["request"], ensure_ascii=False))
+            draft = PlanDraft.model_validate_json(
+                json.dumps(raw["draft"], ensure_ascii=False))
+            context = ContextSnapshot.model_validate_json(
+                json.dumps(raw["context"], ensure_ascii=False))
+            run_budget = RunBudget.model_validate_json(
+                json.dumps(raw["run_budget"], ensure_ascii=False))
+            expected = str(raw["candidate_plan_digest"])
+            # ``bind_run_budget`` is process-local even when its event backend is
+            # durable.  A fresh process must restore the exact frozen envelope
+            # before rebuilding admission or dispatching the recovered plan.
+            d.stores.bind_run_budget(run_id=run_id, run_budget=run_budget)
+            approvals: dict = {}
+            service = d.admission_factory(
+                run_id=run_id, requests={request.request_id: request},
+                drafts={draft.id: draft}, context=context,
+                approvals=approvals, run_budget=run_budget)
+            prep = service.prepare_candidate(
+                draft.id, request_id=request.request_id)
+            if prep.candidate_plan_digest != expected:
+                raise ValueError(
+                    "recovery candidate digest does not recompute from its "
+                    "stored request/draft/context")
+            _candidate, reservation = service.persist_and_reserve_candidate(
+                prep, idempotency_key=f"pipeline-reserve:{run_id}")
+            coordinator = d.coordinator_factory(
+                admission=service,
+                approvals_sink=lambda ap, store=approvals: store.__setitem__(
+                    (ap.request_id, ap.candidate_plan_digest), ap))
+            result = {
+                "digest": expected, "service": service,
+                "coordinator": coordinator, "reservation": reservation,
+                "run_budget": run_budget,
+            }
+            subject = None
+            subject_ref = None
+            subject_params = None
+            if raw.get("subject") is not None:
+                subject = DeepRunSubject.model_validate_json(
+                    json.dumps(raw["subject"], ensure_ascii=False))
+                subject_ref = TypedPayloadRef.model_validate_json(
+                    json.dumps(raw["subject_ref"], ensure_ascii=False))
+                from guanlan_v2.orchestration.data.runtime import SubjectParams
+
+                subject_params = SubjectParams.project(
+                    code=subject.code, as_of=subject.as_of,
+                    evidence_tf=subject.evidence_tf)
+            _bind_single_plan_execution(
+                d, request=request, context=context, result=result,
+                subject=subject, subject_ref=subject_ref,
+                subject_params=subject_params)
+            recovered += 1
+        except Exception:  # noqa: BLE001 - one corrupt row cannot forge or hide others
+            _LOG.exception(
+                "pipeline single-plan recovery refused for request %s",
+                record.get("request_id"))
+    return recovered
 
 
 # =========================================================================== #
@@ -599,8 +829,8 @@ _SOURCE_KIND_DEPS = (
 
 _PRESET_DEPS = (
     "stores", "preset_registry", "catalog", "schema_registry", "clock",
-    "subject_committer", "latest_snapshot_fn", "admission_factory",
-    "coordinator_factory", "request_store")
+    "subject_committer", "latest_snapshot_fn", "refresh_snapshot_fn",
+    "admission_factory", "coordinator_factory", "request_store")
 
 _GOAL_DEPS = (
     "stores", "schema_registry", "clock", "planner_runner",
@@ -844,7 +1074,11 @@ def _start_preset(d: Any, body: Mapping[str, Any]) -> JSONResponse:
     session_dt = datetime.strptime(session_date, "%Y-%m-%d").replace(
         tzinfo=_SESSION_TZ)
     try:
-        subject = RunSubject(code=code, as_of=session_dt)
+        # Deep-decide's data bridge is timeframe-bound.  The console door is a
+        # daily research entry.  This seed validates the symbol only; the
+        # committed subject is rebuilt below against the freshly frozen cutoff.
+        subject_seed = DeepRunSubject(
+            code=code, as_of=session_dt, evidence_tf="day")
     except Exception:  # noqa: BLE001 — outside the Phase-3 grammar, never guessed
         return _fail("bad_code", 422, detail=(
             f"{code!r} is outside the Phase-3 symbol grammar"))
@@ -854,19 +1088,50 @@ def _start_preset(d: Any, body: Mapping[str, Any]) -> JSONResponse:
         return _fail("context_snapshot_unavailable", 422, detail=(
             "no committed Lane-0 ContextSnapshot is available "
             "(ContextSnapshotRefused semantics)"))
-    context, ctx_ref = pair
+    base_context, _base_ctx_ref = pair
+    # The preset's sealed semantics are part of the idempotent door identity.
+    # Reusing a receipt after the same preset id is re-sealed with different
+    # graph/budget semantics would replay an approval card for the wrong plan.
+    preset_record_digest = d.preset_registry.get(preset_id).semantic_digest()
 
     request_id = _derive_request_id("pipeline-deep", {
-        "preset_id": preset_id, "code": subject.code, "session": session_date,
-        "context": context.content_digest})
+        "launch_contract": _DEEP_LAUNCH_CONTRACT,
+        "preset_id": preset_id, "code": subject_seed.code,
+        "session": session_date, "base_context": base_context.content_digest,
+        "preset_record_digest": preset_record_digest})
     replay = _replay_receipt(d, request_id)
     if replay is not None:
         return replay
     # the preset id is part of the run identity (route A): two generations of the
     # deep graph under the same code+session are genuinely different runs, and
-    # they must not share a budget ledger, a reservation or a receipt.
+    # they must not share a budget ledger, a reservation or a receipt.  The
+    # Lane-0 authority is equally semantic: a refreshed base context gets a new
+    # run journal as well as a new request receipt.
     run_id = "pipeline-deep-" + content_digest(
-        [preset_id, subject.code, session_date])[:12]
+        [_DEEP_LAUNCH_CONTRACT, preset_id, subject_seed.code, session_date,
+         base_context.content_digest, preset_record_digest])[:12]
+
+    try:
+        refreshed = d.refresh_snapshot_fn(
+            base_context=base_context, now=now, run_id=run_id,
+            code=subject_seed.code, evidence_tf=subject_seed.evidence_tf)
+        if not isinstance(refreshed, tuple) or len(refreshed) != 2:
+            raise DeepDecideError(
+                "run-scoped context refresher did not return (context, ref)")
+        context, ctx_ref = refreshed
+        if (
+            not isinstance(context, ContextSnapshot)
+            or getattr(ctx_ref, "content_digest", None) != context.content_digest
+        ):
+            raise DeepDecideError(
+                "run-scoped context/ref identity is invalid")
+        subject = DeepRunSubject(
+            code=subject_seed.code, as_of=context.data_context.as_of,
+            evidence_tf=subject_seed.evidence_tf)
+    except Exception as exc:  # noqa: BLE001 — no fresh PIT authority, no card
+        return _fail(
+            "run_scoped_context_unavailable", 503,
+            detail=f"{type(exc).__name__}: {exc}")
 
     subject_ref = d.subject_committer(subject)
     request = OrchestrationRequest(
@@ -879,18 +1144,17 @@ def _start_preset(d: Any, body: Mapping[str, Any]) -> JSONResponse:
             context_snapshot_ref=ctx_ref, subject_ref=subject_ref,
             clock=d.clock, context=context, catalog=d.catalog,
             schema_registry=d.schema_registry, draft_id=f"plan-{run_id}",
-            run_id=run_id)
+            run_id=run_id, subject=subject)
     except DeepDecideError as exc:
         return _fail("deep_decide_refused", 422,
                      detail=f"{type(exc).__name__}: {exc}")
     draft = materialized.draft
-    record_digest = d.preset_registry.get(preset_id).semantic_digest()
 
     def card_builder(*, draft, request, candidate_plan_digest, diff, diff_ref, now):
         return _deep_pending_card(
             draft=draft, request=request,
             candidate_plan_digest=candidate_plan_digest, diff=diff,
-            diff_ref=diff_ref, preset_record_digest=record_digest,
+            diff_ref=diff_ref, preset_record_digest=preset_record_digest,
             run_id=run_id, requested_at=now, preset_id=preset_id)
 
     refusal, result = _single_plan_admit(
@@ -898,6 +1162,10 @@ def _start_preset(d: Any, body: Mapping[str, Any]) -> JSONResponse:
         run_id=run_id, expected_digest=None, card_builder=card_builder)
     if refusal is not None:
         return refusal
+    _bind_single_plan_execution(
+        d, request=request, context=context, result=result,
+        subject=subject, subject_ref=subject_ref,
+        subject_params=materialized.subject_params)
 
     response = {
         "ok": True, "request_id": request_id, "mode": "preset",
@@ -922,6 +1190,13 @@ def _start_preset(d: Any, body: Mapping[str, Any]) -> JSONResponse:
         as_of=context.data_context.as_of.isoformat(), now=now,
         response=response,
         extra_record={"run_id": run_id, "code": subject.code,
+                      "launch_contract": _DEEP_LAUNCH_CONTRACT,
+                      "base_context_digest": base_context.content_digest,
+                      "preset_record_digest": preset_record_digest,
+                      "execution_recovery": _single_plan_recovery_payload(
+                          request=request, draft=draft, context=context,
+                          result=result, subject=subject,
+                          subject_ref=subject_ref),
                       "lanes": [{"lane_index": 0, "code": subject.code,
                                  "run_id": run_id,
                                  "candidate_plan_digest": result["digest"]}]})
@@ -977,6 +1252,8 @@ def _start_goal(d: Any, body: Mapping[str, Any]) -> JSONResponse:
         run_id=run_id, expected_digest=reported, card_builder=card_builder)
     if refusal is not None:
         return refusal
+    _bind_single_plan_execution(
+        d, request=request, context=context, result=result_admit)
 
     response = {
         "ok": True, "request_id": request_id, "mode": "goal",
@@ -996,6 +1273,9 @@ def _start_goal(d: Any, body: Mapping[str, Any]) -> JSONResponse:
         as_of=context.data_context.as_of.isoformat(), now=now,
         response=response,
         extra_record={"run_id": run_id,
+                      "execution_recovery": _single_plan_recovery_payload(
+                          request=request, draft=draft, context=context,
+                          result=result_admit),
                       "lanes": [{"lane_index": 0, "run_id": run_id,
                                  "candidate_plan_digest": result_admit["digest"]}]})
 
@@ -1358,6 +1638,7 @@ def build_production_pipeline_deps() -> PipelineRouterDeps:
     stores.resolver.register(registry)
     root = Path(getattr(stores, "root", Path("var") / "orchestration"))
     clock = SystemClock()
+    approval_surface = PipelineApprovalSurface(clock=clock)
     catalog = _chain.phase9_catalog_snapshot()
     presets = load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
 
@@ -1365,6 +1646,7 @@ def build_production_pipeline_deps() -> PipelineRouterDeps:
     from guanlan_v2.orchestration.adapters.api import (
         build_plan_approval_coordinator,
     )
+    from guanlan_v2.orchestration.adapters.identity import ConfigOperatorVerifier
     from guanlan_v2.orchestration.admission import PlanAdmissionService
     from guanlan_v2.orchestration.runtime_support import STATIC_RUNTIME_PROFILE_V2
     from guanlan_v2.orchestration.pipeline.assembly import (
@@ -1375,9 +1657,33 @@ def build_production_pipeline_deps() -> PipelineRouterDeps:
         production_bridge_view,
         production_gateway_factory,
     )
-    from guanlan_v2.orchestration.pipeline.live_decide import _ApprovalsBridge
+    from guanlan_v2.orchestration.pipeline.live_decide import (
+        _ApprovalsBridge,
+        _fresh_deep_snapshot_production,
+        _precaptured_indicator_lookup_production,
+    )
+    from guanlan_v2.orchestration.adapters.live_data import (
+        bind_precaptured_indicator_store_lookup,
+    )
+    from guanlan_v2.orchestration.pipeline import pv_aux as _pv_aux
 
-    bundle = build_production_catalog_runtime(catalog)
+    # The preset door now freezes the same request-bound indicator payload as
+    # live_decide.  After a restart, the runtime must resolve that persisted
+    # RawFetch by digest rather than probing a post-freeze quote.
+    bind_precaptured_indicator_store_lookup(
+        lambda request_digest: _precaptured_indicator_lookup_production(
+            stores=stores, registry_digest=registry.registry_digest,
+            request_digest=request_digest))
+
+    # Price-action / technical are deterministic aux seats over typed data
+    # refs.  Bind the durable payload reader explicitly; the generic catalog
+    # builder's reader-less default is an intentional fail-closed tripwire.
+    bundle = build_production_catalog_runtime(
+        catalog,
+        handler_registry=_pv_aux.pv_aux_handler_registry(
+            payload_reader=stores.payloads),
+    )
+    verifier = ConfigOperatorVerifier()
     # ONE analyzer map for BOTH halves of this binding set — the admission view
     # here and the plan runner below. live_decide's binding block records why
     # (2026-07-31: the runner half received NO analyzers and refused at
@@ -1436,7 +1742,8 @@ def build_production_pipeline_deps() -> PipelineRouterDeps:
             runtime_registry_digest=registry.registry_digest,
             runtime_limit=4, catalog=bundle, bridge_analyzers=bridge_analyzers,
             prompt_assembler=prompt_assembler, subject_params=subject_params,
-            refusal_sink=data_refusal_sink)
+            refusal_sink=data_refusal_sink,
+            runtime_profile=STATIC_RUNTIME_PROFILE_V2)
 
     def admission_factory(*, run_id, requests, drafts, context, approvals,
                           run_budget):
@@ -1451,18 +1758,18 @@ def build_production_pipeline_deps() -> PipelineRouterDeps:
 
     def coordinator_factory(*, admission, approvals_sink):
         # the reviewed durable builder (replay path) over the ONE production
-        # lease journal; verifier-free — the start routes only REGISTER cards
-        # (register_pending / register_and_try_lease need no verifier; human
-        # decisions are recorded by the approval console with the production
-        # verifier). The reviewed live_decide idiom, verbatim.
+        # lease journal. Start routes still only REGISTER; the verifier lets this
+        # same run-owning coordinator later accept the console's human decision.
+        # Lease consumption remains verifier-free inside the coordinator.
         return build_plan_approval_coordinator(
-            admission=admission, clock=clock, verifier=None,
+            admission=admission, clock=clock, verifier=verifier,
             approvals=_ApprovalsBridge(approvals_sink),
             preset_registry=presets,
             catalog_digest=catalog.catalog_digest,
             registry_digest=registry.registry_digest)
 
-    return PipelineRouterDeps(
+    request_store = JsonlPipelineRequestStore(root / "pipeline_requests.jsonl")
+    deps = PipelineRouterDeps(
         stores=stores,
         preset_registry=presets,
         catalog=catalog,
@@ -1471,16 +1778,22 @@ def build_production_pipeline_deps() -> PipelineRouterDeps:
         ranking_reader=build_production_ranking_reader(),
         subject_committer=build_stores_subject_committer(stores),
         latest_snapshot_fn=lambda: _latest_snapshot_production(stores),
+        refresh_snapshot_fn=lambda **kwargs: _fresh_deep_snapshot_production(
+            stores=stores, registry_digest=registry.registry_digest,
+            clock=clock, schema_registry=registry, **kwargs),
         admission_factory=admission_factory,
         coordinator_factory=coordinator_factory,
         planner_runner=build_production_planner_runner(
             stores=stores, catalog=bundle, schema_registry=registry,
             preset_registry=presets, clock=clock),
-        request_store=JsonlPipelineRequestStore(root / "pipeline_requests.jsonl"),
+        request_store=request_store,
         ta_inbox_dir=Path("var") / "ta_inbox",
         plan_runner_factory=plan_runner_factory,
+        approval_surface=approval_surface,
         archive_put=production_archive_put,
     )
+    _recover_single_plan_executions(deps)
+    return deps
 
 
 def bind_production_pipeline_deps() -> dict[str, Any]:
@@ -1491,9 +1804,13 @@ def bind_production_pipeline_deps() -> dict[str, Any]:
     keeps its honest ``*_unwired`` 503 — the additive-mount contract.
     """
     try:
-        set_pipeline_router_deps(build_production_pipeline_deps())
+        deps = build_production_pipeline_deps()
+        set_pipeline_router_deps(deps)
+        bind_process_pipeline_approval_surface(deps.approval_surface)
+        deps.approval_surface.resume_approved_in_background()
         return {"state": "bound"}
     except Exception as exc:  # noqa: BLE001 — binding is additive, never fatal
+        bind_process_pipeline_approval_surface(None)
         print(f"[guanlan_v2][PIPELINE-DEPS-UNAVAILABLE] pipeline router deps "
               f"binding skipped ({type(exc).__name__}: {exc}); "
               f"/orchestration/pipeline/* keeps its honest *_unwired 503s",

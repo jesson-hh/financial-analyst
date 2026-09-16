@@ -93,11 +93,20 @@ def load_preset(
         except Exception:
             agent = SubAgentRegistry.build(agent_name, memory_root=memory_root)
 
+        input_keys = list(entry.get("input_keys", []))
+        if agent_name == "evidence-loader":
+            # Older stock-deep-dive presets declared no explicit inputs for
+            # this zero-LLM node.  Historical manifest validation must still
+            # bind the pack to the user's request identity.
+            for required_key in ("code", "asof_date"):
+                if required_key not in input_keys:
+                    input_keys.append(required_key)
+
         nodes.append(
             DAGNode(
                 agent=agent,
                 deps=entry.get("deps", []),
-                input_keys=entry.get("input_keys", []),
+                input_keys=input_keys,
                 soft_deps=entry.get("soft_deps", []),
             )
         )

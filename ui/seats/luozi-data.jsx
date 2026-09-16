@@ -1186,7 +1186,7 @@ async function fetchMarketStatus() {
 }
 
 // ───────── ④ 实时盘口(/seats/quote):实盘盯盘真现价/涨跌/盘口(腾讯实时,同引擎 /quotes 源)─────────
-//   盘中 fresh=true(报价日 > 最后日K日);盘后 fresh=false(最后收盘快照)。无后端/失败 → null(回退历史回放,诚实降级)。
+//   fresh 由服务端按交易日+交易时段+供应商时间龄期判定；盘后快照即使领先末根日K也绝不叫实时。
 async function fetchQuote(code) {
   const API = (window.GUANLAN_BACKEND || '');
   if (!API || !code) return null;
@@ -1196,12 +1196,16 @@ async function fetchQuote(code) {
     const j = await res.json();
     if (!j || !j.ok) return null;
     return {
-      code: j.code, name: j.name,
+      code: j.code, name: j.name, source: j.source || '',
       price: j.price, prevClose: j.prevClose, open: j.open, high: j.high, low: j.low,
       change: j.change, changePercent: j.changePercent,
       volume: j.volume, amount: j.amount, turnoverRate: j.turnover_rate, volRatio: j.vol_ratio,
       asof: j.asof, asofDate: j.asofDate, lastBarDate: j.lastBarDate, lastClose: j.lastClose,
-      fresh: j.fresh,
+      fresh: !!j.fresh, marketOpen: !!j.market_open, marketPhase: j.market_phase || '',
+      quoteState: j.quote_state || '', quoteAgeSeconds: j.quote_age_seconds,
+      serverNow: j.server_now || '', observedAt: j.observed_at || '',
+      capturedAt: j.captured_at || '',
+      newerThanSettledBar: j.newer_than_settled_bar,
     };
   } catch (e) { return null; }
 }
@@ -1239,7 +1243,8 @@ async function fetchWatchStatus() {
     const j = await res.json();
     if (!j || !j.ok) return null;
     return { enabled: !!j.enabled, watching: j.watching || [], todayCount: (j.today_count != null ? +j.today_count : null),
-      budget: (j.daily_budget != null ? +j.daily_budget : null), lastTick: j.last_tick || null, marketOpen: !!j.market_open };
+      budget: (j.daily_budget != null ? +j.daily_budget : null), lastTick: j.last_tick || null,
+      marketOpen: !!j.market_open, marketPhase: j.market_phase || '', serverNow: j.server_now || '' };
   } catch (e) { return null; }
 }
 async function toggleWatch(on) {
@@ -1252,7 +1257,8 @@ async function toggleWatch(on) {
     const j = await res.json();
     if (!j || !j.ok) return null;
     return { enabled: !!j.enabled, watching: j.watching || [], todayCount: (j.today_count != null ? +j.today_count : null),
-      budget: (j.daily_budget != null ? +j.daily_budget : null), lastTick: j.last_tick || null, marketOpen: !!j.market_open };
+      budget: (j.daily_budget != null ? +j.daily_budget : null), lastTick: j.last_tick || null,
+      marketOpen: !!j.market_open, marketPhase: j.market_phase || '', serverNow: j.server_now || '' };
   } catch (e) { return null; }
 }
 
@@ -1415,6 +1421,85 @@ async function fetchDecisionsTimeline(code, limit) {
     if (!j || !j.ok || !Array.isArray(j.decisions)) return null;
     return j.decisions;
   } catch (e) { return null; }
+}
+
+// 条件单有效期门控（本地自然日）：生成日计第 1 日；仅认「今日/当日有效」与「N日有效」。
+// 无日期或无法识别的文案不能证明仍有效，宁可不恢复、不重新武装。
+function seatOrderIsActive(validity, asof, ts, now) {
+  const dayOf = (v) => {
+    const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!m) return null;
+    const d = new Date(+m[1], +m[2] - 1, +m[3]);
+    return isNaN(d.getTime()) ? null : d;
+  };
+  // 有落盘时间时它才是条件单真正的生成日；休市时 asof 可能仍停在上一交易日。
+  const start = dayOf(ts) || dayOf(asof);
+  let today = now instanceof Date ? new Date(now.getFullYear(), now.getMonth(), now.getDate()) : dayOf(now);
+  if (!today && now == null) { const d = new Date(); today = new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+  if (!start || !today) return false;
+  const text = String(validity || '').trim();
+  let days = /(?:今日|当日)有效/.test(text) ? 1 : null;
+  const m = text.match(/(\d+)\s*日有效/);
+  if (m) days = Math.max(1, Math.min(365, +m[1]));
+  if (!days) return false;
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + days - 1);
+  return today.getTime() >= start.getTime() && today.getTime() <= end.getTime();
+}
+
+// 条件单详情恢复：/seats/order 成功后已把单据平铺落进 decisions 时间线；页面切换会
+// 卸载 OrderWatchPanel，因此返回「今日」时只读最新落盘记录重建卡片，绝不再次调用 LLM。
+// 匹配必须同时命中股票 + 当前策略实例 + 仍在有效期；任一项不能确认就诚实空态。
+function latestSeatOrderFromTimeline(rows, code, strategyId, now) {
+  const codeKey = (v) => String(v || '').toUpperCase().replace(/^(SH|SZ|BJ)/, '').replace(/\D/g, '');
+  const wantCode = codeKey(code), wantStrategy = String(strategyId || '').trim();
+  if (!wantCode || !wantStrategy || !Array.isArray(rows)) return null;
+  const r = rows.find(x => x && x.kind === 'order'
+    && codeKey(x.code) === wantCode
+    && String(x.strategy_id || '').trim() === wantStrategy
+    && seatOrderIsActive(x.validity, x.asof, x.ts, now));
+  if (!r) return null;
+  return {
+    ok: true, restored: true, decision_id: r.id || null, ts: r.ts || null,
+    code: r.code || code, name: r.name || '',
+    seat: r.strategy_id, seat_cn: r.strategy_name || '',
+    strategy_id: r.strategy_id, strategy_name: r.strategy_name || '',
+    tf: r.tf || 'day', asof: r.asof || r.ts || null,
+    model_name: r.model_name || '', ctx: null, pit: !!r.pit,
+    order: {
+      side: r.side || null,
+      triggers: Array.isArray(r.triggers) ? r.triggers : [],
+      logic: r.logic || 'AND', stop: r.stop == null ? null : r.stop,
+      take: r.take == null ? null : r.take, note: r.note || '',
+      validity: r.validity || '', tf: r.tf || 'day',
+    },
+  };
+}
+
+async function fetchLatestSeatOrder(code, strategyId) {
+  const API = (window.GUANLAN_BACKEND || '');
+  if (!API || !code || !strategyId) return { ok: false, order: null, reason: 'missing_context' };
+  try {
+    const res = await fetch(API + '/seats/decisions?code=' + encodeURIComponent(code)
+      + '&kind=order&limit=300&exclude_runs=1');
+    if (!res.ok) return { ok: false, order: null, reason: 'HTTP ' + res.status };
+    const j = await res.json();
+    if (!j || !j.ok || !Array.isArray(j.decisions)) return { ok: false, order: null, reason: 'bad_response' };
+    const order = latestSeatOrderFromTimeline(j.decisions, code, strategyId);
+    return { ok: true, order: order, reason: order ? null : 'not_found' };
+  } catch (e) { return { ok: false, order: null, reason: String(e) }; }
+}
+
+// 新生成响应与落盘恢复记录共享同一稳定身份，用于页面切换后的触发去重。
+// 不采用 decision_id：/seats/order 响应没有返回该字段，而落盘记录才有。
+function seatOrderIdentity(rec, code, strategyId) {
+  if (!rec || !rec.order) return '';
+  const o = rec.order;
+  const bare = String(rec.code || code || '').toUpperCase().replace(/^(SH|SZ|BJ)/, '').replace(/\D/g, '');
+  const raw = JSON.stringify([bare, String(rec.strategy_id || strategyId || ''), rec.asof || '',
+    rec.tf || o.tf || 'day', o.side || '', o.logic || 'AND', o.triggers || [], o.stop, o.take]);
+  let h = 2166136261;
+  for (let i = 0; i < raw.length; i++) { h ^= raw.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return 'lz:order-fired:' + (h >>> 0).toString(16);
 }
 
 // ───────── 研报(A+闭环):本股深度研报状态(/report-progress)+ 席位引用的 GL research ─────────
@@ -1618,6 +1703,10 @@ async function seatOrder(code, seat, tf, hold, extra) {
     if (!r.ok) return null;
     const j = await r.json();
     if (!j || !j.ok) return null;
+    // 后端响应里的 seat 是模板(momentum 等)，落盘匹配需要策略实例 id；在客户端补齐
+    // 本次已提交的确定上下文，使新单与稍后恢复出的同一张单拥有同一身份。
+    if (extra && extra.strategy_id) j.strategy_id = extra.strategy_id;
+    if (extra && extra.strategy_name) j.strategy_name = extra.strategy_name;
     return j;
   } catch (e) { return null; }
 }
@@ -2031,6 +2120,8 @@ Object.assign(window, {
   lzPersistWatchStrategy: persistWatchStrategy, lzEnsureDedicatedWatchStrategy: ensureDedicatedWatchStrategy,
   LZ_WATCH_EVIDENCE, LZ_WATCH_CADENCE,
   lzFetchDecisionsTimeline: fetchDecisionsTimeline,
+  lzSeatOrderIsActive: seatOrderIsActive, lzLatestSeatOrderFromTimeline: latestSeatOrderFromTimeline,
+  lzFetchLatestSeatOrder: fetchLatestSeatOrder, lzSeatOrderIdentity: seatOrderIdentity,
   lzSeedDefaultStrategy: seedDefaultStrategy, LZ_TEMPLATES: LZ_TEMPLATES, LZ_TEMPLATE_IDS: LZ_TEMPLATE_IDS,
   lzScanSeat: scanSeat, lzSeatEquity: seatEquity,
   lzHydrateRealBars: hydrateRealBars, lzHydrateRealBars5: hydrateRealBars5,

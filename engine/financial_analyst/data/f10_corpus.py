@@ -7,9 +7,26 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
+import json
 from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from financial_analyst.data.code_norm import is_bj_code
+
+from financial_analyst.data.pit import (
+    build_cache_key,
+    is_historical_asof,
+    normalize_asof,
+    timestamp_not_after_asof,
+    unavailable_receipt,
+)
+from financial_analyst.data.trusted_receipts import (
+    F10_ACQUISITION_DOMAIN,
+    verify_payload,
+)
 
 # 跨仓默认路径(可经环境变量覆盖)
 CORPUS_ROOT = Path(os.environ.get("GL_F10_ROOT", r"G:\stocks\news_data\tdx_f10"))
@@ -17,6 +34,7 @@ INDEX_PATH = Path(os.environ.get("GL_F10_INDEX", r"G:\stocks\stock_data\parquet\
 
 _DATE_RE = re.compile(r"(20\d\d-\d\d-\d\d)")
 _NUM_RE = re.compile(r"^(-?\d+(?:\.\d+)?)\s*(亿|万|%)?")
+_ACQUISITION_SCHEMA = "f10-acquisition-receipt/v1"
 
 
 def _num(s: Optional[str]) -> Optional[float]:
@@ -444,7 +462,10 @@ _CAT_PARSERS = {
 def _norm_code(code: str) -> str:
     s = code.strip().upper()
     if re.fullmatch(r"\d{6}", s):
-        s = ("SH" if s[0] in "6859" else "SZ") + s
+        if is_bj_code(s):
+            s = "BJ" + s
+        else:
+            s = ("SH" if s[0] in "659" else "SZ") + s
     return s
 
 
@@ -460,19 +481,21 @@ class F10Facts:
     holders: Optional[Dict[str, Any]] = None
     main_capital: Optional[Dict[str, Any]] = None
     provenance: List[Dict[str, Any]] = field(default_factory=list)
+    snapshot_receipts: List[Dict[str, Any]] = field(default_factory=list)
+    unavailable_sources: List[Dict[str, Any]] = field(default_factory=list)
     honest_note: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
-def locate(code: str, *, root=None) -> Optional[Dict[str, Any]]:
-    """glob {root}/{code小写}/*.txt -> {category: (path, snapshot_date)},每类取最新快照。"""
+def _snapshot_inventory(code: str, *, root=None) -> Optional[Dict[str, List[tuple]]]:
+    """List dated snapshot filenames without opening any payload."""
     base = Path(root) if root else CORPUS_ROOT
     cdir = base / _norm_code(code).lower()
     if not cdir.exists():
         return None
-    found: Dict[str, tuple] = {}
+    found: Dict[str, List[tuple]] = {}
     for p in cdir.glob("*.txt"):
         stem = p.stem
         if "_" not in stem:
@@ -480,50 +503,249 @@ def locate(code: str, *, root=None) -> Optional[Dict[str, Any]]:
         cat, date = stem.rsplit("_", 1)
         if not re.fullmatch(r"\d{8}", date):
             continue
-        prev = found.get(cat)
-        if prev is None or date > prev[1]:
-            found[cat] = (str(p), date)
+        found.setdefault(cat, []).append((str(p), date))
+    for rows in found.values():
+        rows.sort(key=lambda item: item[1], reverse=True)
     return found or None
+
+
+def locate(code: str, *, root=None, asof: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Select the newest snapshot with acquisition proof visible at ``asof``."""
+    inventory = _snapshot_inventory(code, root=root)
+    if not inventory:
+        return None
+    requested = normalize_asof(asof) if asof is not None else None
+    historical = bool(requested and is_historical_asof(requested))
+    cutoff = requested.replace("-", "") if requested is not None else None
+    selected: Dict[str, tuple] = {}
+    for category, rows in inventory.items():
+        eligible = [item for item in rows if cutoff is None or item[1] <= cutoff]
+        for path, snapshot_date in eligible:
+            if not historical:
+                selected[category] = (path, snapshot_date, None, None)
+                break
+            acquisition = _verified_acquisition(
+                path=Path(path), code=code, category=category, asof=requested,
+            )
+            if acquisition is not None:
+                receipt, content = acquisition
+                selected[category] = (path, snapshot_date, receipt, content)
+                break
+    return selected or None
+
+
+def _snapshot_source(category: str) -> str:
+    return f"f10:{category}"
+
+
+def _snapshot_date_iso(value: str) -> str:
+    return f"{value[:4]}-{value[4:6]}-{value[6:8]}"
+
+
+def _acquisition_sidecars(path: Path) -> List[Path]:
+    return [
+        path.with_suffix(path.suffix + ".receipt.json"),
+        path.with_suffix(".receipt.json"),
+    ]
+
+
+def _verified_acquisition(
+    *, path: Path, code: str, category: str, asof: str,
+) -> Optional[tuple[Dict[str, Any], bytes]]:
+    """Validate an acquisition receipt against content and filesystem vintage.
+
+    A dated filename and a hash calculated today are not acquisition evidence.
+    Historical use requires a separately persisted receipt plus payload and
+    receipt mtimes that were already present by the Hong Kong cutoff.
+    """
+    sidecar = next((item for item in _acquisition_sidecars(path) if item.is_file()), None)
+    if sidecar is None or path.is_symlink() or sidecar.is_symlink():
+        return None
+    try:
+        if sidecar.stat().st_size > 64 * 1024:
+            return None
+        receipt = json.loads(sidecar.read_text(encoding="utf-8"))
+        if not isinstance(receipt, dict):
+            return None
+        if receipt.get("schema_version") != _ACQUISITION_SCHEMA:
+            return None
+        if receipt.get("snapshot_immutable") is not True:
+            return None
+        if not str(receipt.get("receipt_id") or "").strip():
+            return None
+        if not str(receipt.get("snapshot_version") or "").strip():
+            return None
+        pulled_at = receipt.get("pulled_at")
+        if not timestamp_not_after_asof(pulled_at, asof):
+            return None
+        acquired_at = receipt.get("acquired_at")
+        if not timestamp_not_after_asof(acquired_at, asof):
+            return None
+        snapshot_asof = receipt.get("snapshot_asof")
+        if snapshot_asof not in (None, "") \
+                and not timestamp_not_after_asof(snapshot_asof, asof):
+            return None
+        for candidate in (path, sidecar):
+            modified = datetime.fromtimestamp(
+                candidate.stat().st_mtime, tz=timezone.utc,
+            ).isoformat()
+            if not timestamp_not_after_asof(modified, asof):
+                return None
+        expected_source = _snapshot_source(category)
+        if receipt.get("source") != expected_source:
+            return None
+        if receipt.get("category") != category:
+            return None
+        if receipt.get("code") != _norm_code(code):
+            return None
+        if receipt.get("snapshot_file") != path.name:
+            return None
+        unsigned_receipt = dict(receipt)
+        auth = {
+            "algorithm": unsigned_receipt.pop("algorithm", None),
+            "key_id": unsigned_receipt.pop("key_id", None),
+            "signature": unsigned_receipt.pop("signature", None),
+        }
+        if not verify_payload(F10_ACQUISITION_DOMAIN, unsigned_receipt, auth):
+            return None
+        content = path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        if receipt.get("content_sha256") != digest:
+            return None
+        return receipt, content
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def _available_snapshot_receipt(
+    *, code: str, category: str, asof: Optional[str], path: str,
+    snapshot_date: str, content: bytes,
+    acquisition: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    source = _snapshot_source(category)
+    requested = normalize_asof(asof)
+    data_asof = _snapshot_date_iso(snapshot_date)
+    digest = hashlib.sha256(content).hexdigest()
+    version = str((acquisition or {}).get("snapshot_version") or "").strip() or None
+    pulled_at = (acquisition or {}).get("pulled_at") \
+        or None
+    acquired_at = (acquisition or {}).get("acquired_at")
+    proven = bool(
+        acquisition and version
+        and timestamp_not_after_asof(pulled_at, requested)
+        and timestamp_not_after_asof(acquired_at, requested)
+    )
+    params = {
+        "category": category,
+        "snapshot_date": data_asof,
+        "snapshot_version": version,
+    }
+    return {
+        "source": source,
+        "status": "available",
+        "requested_asof": requested,
+        "data_asof": data_asof,
+        "pulled_at": pulled_at,
+        "acquired_at": acquired_at,
+        "snapshot_version": version,
+        "snapshot_asof": str((acquisition or {}).get("snapshot_asof") or data_asof),
+        "snapshot_immutable": bool(proven),
+        "content_sha256": digest,
+        "cache_key": build_cache_key(source, code, requested, params),
+        "point_in_time": bool(proven),
+        "historical_version_proven": bool(proven),
+        "proof": "verified_acquisition_sidecar+content_sha256" if proven
+        else "current_unversioned_f10_read",
+        "reason": None,
+        "category": category,
+        "snapshot_file": Path(path).name,
+        "logical_locator": {
+            "source": source,
+            "code": str(code).upper(),
+            "category": category,
+            "snapshot_file": Path(path).name,
+            "content_sha256": digest,
+        },
+    }
+
+
+def _unavailable_corpus_receipt(*, code: str, asof: Optional[str], reason: str) -> Dict[str, Any]:
+    return unavailable_receipt(
+        "f10:corpus", code=code, asof=asof,
+        params={"scope": "corpus"}, reason=reason,
+    )
 
 
 def load_facts(code: str, asof: Optional[str] = None, *, root=None) -> F10Facts:
     norm = _norm_code(code)
-    facts = F10Facts(code=norm, asof=asof)
-    snap = locate(code, root=root)
+    pit_asof = normalize_asof(asof) if asof is not None else None
+    facts = F10Facts(code=norm, asof=pit_asof)
+    snap = locate(code, root=root, asof=pit_asof)
     if not snap:
-        facts.honest_note = f"F10 无此股({norm})语料"
+        # Historical absence is deliberately invariant: a future-only filename
+        # inventory must not reveal that future data exists.
+        if pit_asof is not None:
+            facts.honest_note = f"asof {pit_asof} 无可见 F10 快照"
+        else:
+            facts.honest_note = f"F10 无此股({norm})语料"
+        receipt = _unavailable_corpus_receipt(
+            code=norm, asof=pit_asof, reason=facts.honest_note,
+        )
+        facts.snapshot_receipts.append(receipt)
+        facts.unavailable_sources.append(
+            {"source": receipt["source"], "reason": facts.honest_note}
+        )
         return facts
 
-    snap_dates = sorted({d for _, d in snap.values()}, reverse=True)
+    snap_dates = sorted({record[1] for record in snap.values()}, reverse=True)
     facts.snapshot_date = snap_dates[0] if snap_dates else None
 
-    for cat, (path, sdate) in snap.items():
+    for cat, (path, sdate, acquisition, acquired_content) in snap.items():
         kind = _CAT_PARSERS.get(cat)
         if not kind:
             continue
         try:
-            txt = Path(path).read_text(encoding="utf-8", errors="ignore")
+            raw = acquired_content if acquired_content is not None else Path(path).read_bytes()
+            txt = raw.decode("utf-8", errors="ignore")
         except OSError as exc:
-            facts.provenance.append({"category": cat, "snapshot_date": sdate, "error": str(exc)[:80]})
+            reason = f"{type(exc).__name__}: {str(exc)[:80]}"
+            facts.provenance.append({"category": cat, "snapshot_date": sdate, "error": reason})
+            receipt = unavailable_receipt(
+                _snapshot_source(cat), code=norm, asof=pit_asof,
+                params={"category": cat}, reason=reason,
+            )
+            facts.snapshot_receipts.append(receipt)
+            facts.unavailable_sources.append({"source": receipt["source"], "reason": reason})
             continue
         try:
             if kind == "valuation":
-                facts.valuation = _parse_valuation(txt, asof)
+                facts.valuation = _parse_valuation(txt, pit_asof)
             elif kind == "events":
-                facts.events.extend(_parse_events(txt, cat, asof))
+                facts.events.extend(_parse_events(txt, cat, pit_asof))
             elif kind == "broker":
-                facts.broker = _parse_broker(txt, asof)
+                facts.broker = _parse_broker(txt, pit_asof)
             elif kind == "lhb":
-                facts.lhb = _parse_lhb(txt, asof)
+                facts.lhb = _parse_lhb(txt, pit_asof)
             elif kind == "holders":
-                facts.holders = _parse_holders(txt, asof)
+                facts.holders = _parse_holders(txt, pit_asof)
             elif kind == "main_capital":
-                facts.main_capital = _parse_main_capital(txt, asof)
+                facts.main_capital = _parse_main_capital(txt, pit_asof)
             facts.provenance.append({"category": cat, "snapshot_date": sdate})
+            facts.snapshot_receipts.append(_available_snapshot_receipt(
+                code=norm, category=cat, asof=pit_asof, path=path,
+                snapshot_date=sdate, content=raw, acquisition=acquisition,
+            ))
         except Exception as exc:  # noqa: BLE001  解析失败不拖垮整体
-            facts.provenance.append({"category": cat, "snapshot_date": sdate, "error": f"{type(exc).__name__}: {str(exc)[:80]}"})
+            reason = f"{type(exc).__name__}: {str(exc)[:80]}"
+            facts.provenance.append({"category": cat, "snapshot_date": sdate, "error": reason})
+            receipt = unavailable_receipt(
+                _snapshot_source(cat), code=norm, asof=pit_asof,
+                params={"category": cat}, reason=reason,
+            )
+            facts.snapshot_receipts.append(receipt)
+            facts.unavailable_sources.append({"source": receipt["source"], "reason": reason})
 
     facts.events.sort(key=lambda e: e["date"], reverse=True)
-    if asof and not (facts.valuation or facts.events or facts.broker["ratings"] or facts.lhb["margin"]):
-        facts.honest_note = f"asof {asof} 早于 F10 快照内容,无可用料"
+    if pit_asof and not (facts.valuation or facts.events or facts.broker["ratings"] or facts.lhb["margin"]):
+        facts.honest_note = f"asof {pit_asof} 早于 F10 快照内容,无可用料"
     return facts

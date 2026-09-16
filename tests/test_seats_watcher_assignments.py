@@ -108,7 +108,14 @@ def test_missing_strategy_and_corrupt_store_fail_closed(tmp_path, monkeypatch):
 
 def test_watcher_payload_uses_assignment_evidence_and_provenance(monkeypatch):
     monkeypatch.setattr(W, "_hold_entry_for", lambda code: None)
-    monkeypatch.setattr(W, "_resolve_refs", lambda refs: ([], []))
+    def _resolve_refs(refs, *, include_diagnostics=False):
+        diagnostics = {
+            "requested": [], "resolved": [], "unresolved": [], "errors": [],
+            "status": "no_refs",
+        }
+        return ([], [], diagnostics) if include_diagnostics else ([], [])
+
+    monkeypatch.setattr(W, "_resolve_refs", _resolve_refs)
     monkeypatch.setattr(W, "_industry_for", lambda code: "电子")
     cw = {
         "code": "300750", "strategy_id": "s1", "name": "盘中策略",
@@ -118,10 +125,11 @@ def test_watcher_payload_uses_assignment_evidence_and_provenance(monkeypatch):
         "assignment_revision": 7,
     }
     payload = W._build_payload(cw, datetime(2026, 8, 14, 14, 32), {"name": "宁德"})
-    assert payload["date"] == "2026-08-14T14:32"
+    assert payload["date"] == "2026-08-14T14:32:00"
     assert payload["freq"] == "30min" and payload["mode"] == "deep"
     assert payload["requested_evidence_tf"] == payload["effective_evidence_tf"] == "30min"
     assert payload["decision_cadence"] == "30min" and payload["assignment_revision"] == 7
+    assert payload["ref_resolution"]["status"] == "no_refs"
 
 
 def test_assignment_api_list_upsert_disable_and_status_compat(tmp_path, monkeypatch):

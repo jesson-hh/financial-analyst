@@ -12,23 +12,40 @@ function Cite({ n }) {
   );
 }
 
+function EvidenceCite({ id, evidence }) {
+  const row = (Array.isArray(evidence) ? evidence : []).find(x => x && x.evidence_id === id);
+  const title = row
+    ? [row.institution, row.publish_ts, row.title].filter(Boolean).join('｜')
+    : `证据 ${id}（当前会话账本未找到）`;
+  const href = row && /^https?:\/\//i.test(String(row.source_ref || '')) ? row.source_ref : '';
+  const style = { display: 'inline-flex', alignItems: 'center', padding: '0 5px', minHeight: 16,
+    border: '1px solid var(--yin)', borderRadius: 8, color: 'var(--yin)', background: 'var(--paper-2)',
+    fontFamily: 'var(--mono)', fontSize: 8.5, lineHeight: 1.4, textDecoration: 'none',
+    margin: '0 2px', verticalAlign: 1, cursor: href ? 'pointer' : 'help' };
+  const label = id.slice(0, 4) + '…' + id.slice(-4);
+  return href
+    ? <a href={href} target="_blank" rel="noopener noreferrer" style={style} title={title}>{label}</a>
+    : <span style={style} title={title}>{label}</span>;
+}
+
 // ── renderInline (app.jsx:3234-3246, 零改) ──
-function renderInline(text) {
-  // **bold**, `code`, *italic*, [§N] 引用 简易解析 (顺序: 粗体先于斜体, 避免吃掉 **)
-  const parts = (text || '').split(/(\*\*[^*]+\*\*|`[^`]+`|\[§\d+\]|\*[^*\n]+\*)/g);
+function renderInline(text, evidence) {
+  // **bold**, `code`, *italic*, [§N] 工具引用, [R-...] 稳定证据引用。
+  const parts = (text || '').split(/(\*\*[^*]+\*\*|`[^`]+`|\[§\d+\]|\[R-[0-9A-F]{12}\]|\*[^*\n]+\*)/g);
   return parts.map((p, i) => {
     if (!p) return null;
     let m;
     if (p.startsWith('**') && p.endsWith('**')) return <strong key={i} style={{ fontWeight: 600, color: 'var(--ink)' }}>{p.slice(2, -2)}</strong>;
     if (p.startsWith('`') && p.endsWith('`')) return <code key={i} style={{ fontFamily: 'var(--mono)', fontSize: '0.9em', background: 'var(--paper-2)', padding: '0 4px' }}>{p.slice(1, -1)}</code>;
     if ((m = p.match(/^\[§(\d+)\]$/))) return <Cite key={i} n={m[1]} />;
+    if ((m = p.match(/^\[(R-[0-9A-F]{12})\]$/))) return <EvidenceCite key={i} id={m[1]} evidence={evidence} />;
     if (p.length > 2 && p.startsWith('*') && p.endsWith('*')) return <em key={i} style={{ fontStyle: 'italic', color: 'var(--ink-1)' }}>{p.slice(1, -1)}</em>;
     return <span key={i}>{p}</span>;
   });
 }
 
 // ── renderChatMarkdown 及其助手 (app.jsx:3249-3349, 零改) ──
-function renderChatMarkdown(text) {
+function renderChatMarkdown(text, evidence) {
   const lines = (text || '').split('\n');
   const out = [];
   let listBuf = [], listType = null;
@@ -41,7 +58,7 @@ function renderChatMarkdown(text) {
         {listBuf.map((it, i) => (
           <div key={i} style={{ display: 'flex', gap: 8, fontSize: 14, color: 'var(--ink)', lineHeight: 1.7, margin: '3px 0', paddingLeft: 2 + it.indent * 16 }}>
             <span style={{ flexShrink: 0, color: 'var(--yin)', fontFamily: ordered ? 'var(--mono)' : 'inherit', fontSize: ordered ? 12 : 14, minWidth: ordered ? 16 : 8 }}>{ordered ? `${it.marker}.` : '·'}</span>
-            <span style={{ flex: 1, minWidth: 0 }}>{renderInline(it.text)}</span>
+            <span style={{ flex: 1, minWidth: 0 }}>{renderInline(it.text, evidence)}</span>
           </div>
         ))}
       </div>
@@ -59,13 +76,13 @@ function renderChatMarkdown(text) {
       <table className="serif" style={{ borderCollapse: 'collapse', width: '100%', fontSize: 13 }}>
         <thead>
           <tr>{header.map((h, ci) => (
-            <th key={ci} style={{ textAlign: aligns[ci] || 'left', padding: '6px 16px 6px 0', borderBottom: '1.5px solid var(--ink-3)', color: 'var(--ink)', fontWeight: 600, whiteSpace: 'nowrap' }}>{renderInline(h)}</th>
+            <th key={ci} style={{ textAlign: aligns[ci] || 'left', padding: '6px 16px 6px 0', borderBottom: '1.5px solid var(--ink-3)', color: 'var(--ink)', fontWeight: 600, whiteSpace: 'nowrap' }}>{renderInline(h, evidence)}</th>
           ))}</tr>
         </thead>
         <tbody>
           {body.map((row, ri) => (
             <tr key={ri}>{header.map((_, ci) => (
-              <td key={ci} style={{ textAlign: aligns[ci] || 'left', padding: '5px 16px 5px 0', borderBottom: '1px solid var(--line)', color: 'var(--ink-2)', lineHeight: 1.6, verticalAlign: 'top' }}>{renderInline(row[ci] || '')}</td>
+              <td key={ci} style={{ textAlign: aligns[ci] || 'left', padding: '5px 16px 5px 0', borderBottom: '1px solid var(--line)', color: 'var(--ink-2)', lineHeight: 1.6, verticalAlign: 'top' }}>{renderInline(row[ci] || '', evidence)}</td>
             ))}</tr>
           ))}
         </tbody>
@@ -119,12 +136,12 @@ function renderChatMarkdown(text) {
       const lvl = headM[1].length;
       const fs = ({ 1: 16, 2: 15, 3: 14, 4: 14, 5: 13, 6: 13 })[lvl] || 14;
       const mt = lvl <= 2 ? 14 : 12;
-      out.push(<div key={i} className="serif" style={{ fontSize: fs, fontWeight: 600, color: 'var(--ink)', margin: `${mt}px 0 4px` }}>{renderInline(headM[2])}</div>);
+      out.push(<div key={i} className="serif" style={{ fontSize: fs, fontWeight: 600, color: 'var(--ink)', margin: `${mt}px 0 4px` }}>{renderInline(headM[2], evidence)}</div>);
       continue;
     }
-    if (trimmed.startsWith('> ')) { out.push(<blockquote key={i} className="serif" style={{ margin: '6px 0', padding: '4px 12px', borderLeft: '2px solid var(--ink-3)', color: 'var(--ink-2)', fontSize: 13, fontStyle: 'italic' }}>{renderInline(trimmed.slice(2))}</blockquote>); continue; }
+    if (trimmed.startsWith('> ')) { out.push(<blockquote key={i} className="serif" style={{ margin: '6px 0', padding: '4px 12px', borderLeft: '2px solid var(--ink-3)', color: 'var(--ink-2)', fontSize: 13, fontStyle: 'italic' }}>{renderInline(trimmed.slice(2), evidence)}</blockquote>); continue; }
     if (/^([-—*]\s?){3,}$/.test(trimmed)) { out.push(<hr key={i} style={{ border: 0, borderTop: '1px solid var(--line)', margin: '10px 0' }} />); continue; }
-    out.push(<p key={i} className="serif" style={{ fontSize: 14, color: 'var(--ink)', lineHeight: 1.85, margin: '4px 0' }}>{renderInline(trimmed)}</p>);
+    out.push(<p key={i} className="serif" style={{ fontSize: 14, color: 'var(--ink)', lineHeight: 1.85, margin: '4px 0' }}>{renderInline(trimmed, evidence)}</p>);
   }
   flushList('l-end');
   return out;
@@ -160,6 +177,11 @@ function WwMediaImageCard({ item }) {
   const [open, setOpen] = React.useState(false);
   const url = window.WW.mediaUrl(item.mediaId);
   const size = item.width && item.height ? `${item.width} × ${item.height}` : '尺寸未知';
+  const delivery = item.delivery && typeof item.delivery === 'object' ? item.delivery : null;
+  const deliveryLabels = {
+    pending: '等待投递', sending: '正在投递', sent: '已发送至 Telegram',
+    retry_wait: '等待重试', uncertain: '投递结果待确认', terminal: '投递失败', cancelled: '已放弃',
+  };
   React.useEffect(() => { setLoaded(false); setFailed(false); setOpen(false); }, [item.mediaId]);
   React.useEffect(() => {
     if (!open) return undefined;
@@ -190,7 +212,10 @@ function WwMediaImageCard({ item }) {
           <figcaption style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 4px 2px' }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div className="serif" style={{ color: 'var(--ink)', fontSize: 12.5, overflowWrap: 'anywhere' }}>{item.name}</div>
-              <div className="mono" style={{ marginTop: 3, color: 'var(--ink-3)', fontSize: 9.5 }}>{size} · {item.mime}</div>
+              <div className="mono" style={{ marginTop: 3, color: 'var(--ink-3)', fontSize: 9.5 }}>
+                {size} · {item.mime}
+                {delivery && deliveryLabels[delivery.state] && <span className={'ww-channel-delivery-badge ww-channel-delivery-' + delivery.state}> · {deliveryLabels[delivery.state]}</span>}
+              </div>
             </div>
             <a href={url} download={item.name} className="hover-link" title={`下载 ${item.name}`}
               style={{ flexShrink: 0, color: 'var(--yin)', fontFamily: 'var(--serif)', fontSize: 11, textDecoration: 'none' }}>下载 ↓</a>
@@ -217,13 +242,118 @@ function WwMediaImageCard({ item }) {
   );
 }
 
+function wwFormatAttachmentSize(value) {
+  const bytes = Number(value);
+  if (!Number.isInteger(bytes) || bytes < 0) return '大小未知';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function wwDocumentTypeLabel(mime) {
+  return {
+    'application/pdf': 'PDF',
+    'text/markdown': 'Markdown',
+    'text/plain': '文本',
+    'text/csv': 'CSV',
+    'text/tab-separated-values': 'TSV',
+    'application/json': 'JSON',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'Excel',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word',
+  }[mime] || '文件';
+}
+
+// 文件卡只提供下载；唯一网络地址由已校验的 opaque document_id 生成。
+function WwFileDocumentCard({ item }) {
+  const url = window.WW.documentUrl(item.documentId);
+  const delivery = item.delivery && typeof item.delivery === 'object' ? item.delivery : null;
+  const deliveryLabels = {
+    pending: '等待投递', sending: '正在投递', sent: '已发送至 Telegram',
+    retry_wait: '等待重试', uncertain: '投递结果待确认', terminal: '投递失败', cancelled: '已放弃',
+  };
+  return (
+    <div style={{ display: 'flex', gap: 12, animation: 'fadeIn 200ms ease-out' }}>
+      <AiAvatar />
+      <article aria-label={`文件产物：${item.title || item.name}`}
+        style={{ width: 'min(100%, 560px)', minWidth: 0, border: '1px solid var(--line)',
+          background: 'var(--paper-2)', padding: '15px 16px', userSelect: 'text' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <div aria-hidden="true" className="serif"
+            style={{ width: 48, height: 54, flex: '0 0 48px', border: '1px solid var(--ink-2)',
+              background: 'var(--paper)', color: 'var(--yin)', display: 'flex', alignItems: 'center',
+              justifyContent: 'center', fontSize: 12, letterSpacing: '.08em' }}>
+            {wwDocumentTypeLabel(item.mime)}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="mono" style={{ color: 'var(--yin)', fontSize: 9,
+              letterSpacing: '.14em', marginBottom: 4 }}>分析文件 · 仅下载</div>
+            <div className="serif" style={{ color: 'var(--ink)', fontSize: 14,
+              overflowWrap: 'anywhere' }}>{item.title || item.name}</div>
+            {item.title && item.title !== item.name && <div className="serif"
+              style={{ marginTop: 3, color: 'var(--ink-2)', fontSize: 11.5,
+                overflowWrap: 'anywhere' }}>{item.name}</div>}
+            <div className="mono" style={{ marginTop: 6, color: 'var(--ink-3)', fontSize: 9.5,
+              overflowWrap: 'anywhere' }}>
+              {wwFormatAttachmentSize(item.size)} · {item.mime}
+              {delivery && deliveryLabels[delivery.state] && <span
+                className={'ww-channel-delivery-badge ww-channel-delivery-' + delivery.state}>
+                {' · ' + deliveryLabels[delivery.state]}
+              </span>}
+            </div>
+          </div>
+          {url ? <a href={url} download={item.name} className="hover-link"
+            aria-label={`下载文件 ${item.name}`} title={`下载 ${item.name}`}
+            style={{ flexShrink: 0, border: '1px solid var(--ink-2)', padding: '7px 10px',
+              color: 'var(--ink)', fontFamily: 'var(--serif)', fontSize: 11,
+              textDecoration: 'none', background: 'var(--paper)' }}>下载 ↓</a>
+            : <span role="status" className="mono"
+              style={{ flexShrink: 0, color: 'var(--yin)', fontSize: 9.5 }}>文件不可用</span>}
+        </div>
+      </article>
+    </div>
+  );
+}
+
+function WwAnalysisBundleHeader({ item }) {
+  const summary = [
+    item.imageCount ? `${item.imageCount} 张图` : '',
+    item.documentCount ? `${item.documentCount} 个文件` : '',
+  ].filter(Boolean).join(' · ') || '没有可展示的附件';
+  return (
+    <div style={{ marginLeft: 40, padding: '7px 10px', borderLeft: '2px solid var(--jin)',
+      color: 'var(--ink-2)', fontFamily: 'var(--serif)', fontSize: 11.5 }}>
+      <span style={{ color: 'var(--ink)' }}>{item.title}</span>
+      <span className="mono" style={{ marginLeft: 8, color: 'var(--ink-3)', fontSize: 9.5 }}>
+        {summary}
+      </span>
+    </div>
+  );
+}
+
 // ── ToolChain (app.jsx:1674-1725, 适配:props改/删planning/折叠头label/删backendUrl+dispatch) ──
-function ToolChain({ msg }) {
-  const done = msg.chain.filter(c => c.status === 'done').length;
-  const total = msg.chain.length;
-  const elapsed = msg.chain.filter(c => c.status === 'done').reduce((s, c) => s + (c.t || 0), 0);
-  const hasRunning = msg.chain.some(c => c.status === 'running');
+function wwToolChainSummary(rows) {
+  const total = rows.length;
+  const done = rows.filter(c => c.status === 'done').length;
+  const running = rows.filter(c => c.status === 'running').length;
+  const pending = rows.filter(c => c.status === 'pending').length;
+  const failed = rows.filter(c => c.status === 'fail').length;
+  const cancelled = rows.filter(c => c.status === 'cancelled').length;
+  const incomplete = rows.filter(c => c.status === 'incomplete').length;
+  const elapsed = rows.filter(c => c.status === 'done').reduce((s, c) => s + (c.t || 0), 0);
+  const hasRunning = running + pending > 0;
   const allDone = total > 0 && done === total;
+  let label;
+  if (allDone) label = `已用 ${total} 个工具 · ${elapsed.toFixed(1)}s`;
+  else if (pending && !running) label = `等待确认 · ${pending} 个工具 · 尚未执行`;
+  else if (hasRunning) label = `调用工具 · ${done}/${total} · ${elapsed.toFixed(1)}s`;
+  else label = ['工具已结束', done ? `成功 ${done}` : '',
+    cancelled ? `已取消/未执行 ${cancelled}` : '', failed ? `失败 ${failed}` : '',
+    incomplete ? `结果未确认 ${incomplete}` : ''].filter(Boolean).join(' · ');
+  return { total, done, elapsed, hasRunning, allDone, label };
+}
+
+function ToolChain({ msg }) {
+  const { hasRunning, allDone, label } = wwToolChainSummary(msg.chain);
   // 默认 collapsed; 有 running 时展开; 全 done 后自动 collapse 不占视觉
   const [userExpanded, setUserExpanded] = React.useState(null);  // null = 自动, true/false = 用户覆盖
   const expanded = userExpanded !== null ? userExpanded : (hasRunning && !allDone);
@@ -241,7 +371,7 @@ function ToolChain({ msg }) {
               {expanded ? '▾' : '▸'}
             </span>
             <span className="mono" style={{ fontSize: 11, color: allDone ? 'var(--ink-3)' : 'var(--ink-2)' }}>
-              {allDone ? `已用 ${total} 个工具 · ${elapsed.toFixed(1)}s` : `调用工具 · ${done}/${total} · ${elapsed.toFixed(1)}s`}
+              {label}
             </span>
           </div>
           {expanded && (
@@ -258,23 +388,25 @@ function ToolChain({ msg }) {
 }
 
 // ── ToolRow (app.jsx:1772-1818, 适配:删onClick+cursor/删DeepReportProgress/pulse→pulseRing/加fail态) ──
-function ToolRow({ i, name, cn, args, t, status, result, last }) {
+function ToolRow({ i, name, cn, args, t, status, result, last, awaitingApproval, notExecuted }) {
   const running = status === 'running';
   const pending = status === 'pending';
   const cancelled = status === 'cancelled';
+  const incomplete = status === 'incomplete';
+  const neutral = pending || cancelled || incomplete;
   const fail = status === 'fail';
   return (
     <div style={{ display: 'flex', gap: 14, padding: '8px 12px', alignItems: 'flex-start', position: 'relative', opacity: pending ? 0.4 : 1, transition: 'opacity 250ms', borderRadius: 8 }}>
       <div style={{ position: 'relative', width: 22, flex: '0 0 22px' }}>
         <div style={{
           width: 22, height: 22,
-          background: running ? 'var(--yin)' : (pending || cancelled) ? 'transparent' : fail ? 'var(--yin)' : 'var(--ink)',
-          color: (pending || cancelled) ? 'var(--ink-3)' : 'var(--paper)',
-          border: (pending || cancelled) ? '1px dashed var(--ink-3)' : 'none',
+          background: running ? 'var(--yin)' : neutral ? 'transparent' : fail ? 'var(--yin)' : 'var(--ink)',
+          color: neutral ? 'var(--ink-3)' : 'var(--paper)',
+          border: neutral ? '1px dashed var(--ink-3)' : 'none',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontFamily: 'var(--serif)', fontSize: 11, fontWeight: 500,
           transition: 'background 250ms'
-        }}>{cancelled ? '×' : fail ? '✗' : i}</div>
+        }}>{cancelled ? '×' : incomplete ? '?' : fail ? '✗' : i}</div>
         {!last && <div style={{ position: 'absolute', top: 24, left: 10, bottom: -12, width: 2, background: 'var(--line)' }} />}
         {running && <div style={{ position: 'absolute', inset: -3, width: 28, height: 28, border: '1px solid var(--yin)', opacity: 0.5, animation: 'pulseRing 1.6s ease-in-out infinite' }} />}
       </div>
@@ -283,11 +415,11 @@ function ToolRow({ i, name, cn, args, t, status, result, last }) {
           <code style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--ink)', fontWeight: 500, whiteSpace: 'nowrap' }}>{name}</code>
           <span className="serif" style={{ fontSize: 12, color: 'var(--ink-2)', whiteSpace: 'nowrap' }}>{cn}</span>
           <span className="mono" style={{ fontSize: 10, color: fail ? 'var(--yin)' : 'var(--ink-3)', whiteSpace: 'nowrap', marginLeft: 'auto' }}>
-            {running ? '⠋ 运行中…' : pending ? '— 等待' : cancelled ? '× 已取消' : fail ? '✗ 失败' : `✓ ${t}s`}
+            {running ? '⠋ 运行中…' : pending ? (awaitingApproval ? '— 等待确认' : '— 等待') : cancelled ? (notExecuted ? '× 已取消 · 未执行' : '× 已取消') : incomplete ? '? 结果未确认' : fail ? '✗ 失败' : `✓ ${t}s`}
           </span>
         </div>
         <div className="mono" style={{ fontSize: 10.5, color: 'var(--ink-3)', marginTop: 2, wordBreak: 'break-all' }}>{args}</div>
-        {!pending && !cancelled && (
+        {!pending && (
           <div className="serif" style={{ fontSize: 12.5, color: running ? 'var(--ink-3)' : 'var(--ink-1)', marginTop: 5, fontStyle: running ? 'italic' : 'normal', display: 'flex', alignItems: 'center', gap: 6 }}>
             {!running && <span style={{ color: 'var(--ink-3)' }}>→</span>}
             <span style={{ flex: 1 }}>{running ? '正在抓取…' : result}</span>
@@ -301,12 +433,26 @@ function ToolRow({ i, name, cn, args, t, status, result, last }) {
 // ── ConfirmModal (app.jsx:2660-2729, 适配:props改/resolve改/删'a'按钮/删fromBackend等/label+detail用WW.TOOL_CN) ──
 function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
   const c = confirm;
+  const isChannelConfirm = c.action_ticket_required === true;
+  const isAnalysisConfirm = c.tool === 'ww_workspace_analysis_run';
+  const analysisArgs = isAnalysisConfirm && c.args && typeof c.args === 'object'
+    ? c.args : {};
+  const details = c.public_details && typeof c.public_details === 'object'
+    ? c.public_details : {};
+  const requiresExactPairing = c.tool === 'ww_telegram_pair_approve';
+  const pairingVerified = !requiresExactPairing
+    || (details.recipient_verified === true && !!details.telegram_user_id);
   const [sending, setSending] = React.useState('');
   const [err, setErr] = React.useState('');
+  const [secretNotice, setSecretNotice] = React.useState(null);
   const [steerDraft, setSteerDraft] = React.useState('');
   const resolve = async (ch) => {
     if (sending) return;
-    setSending(ch); setErr('');
+    if (String(ch).toLowerCase() === 'y' && !pairingVerified) {
+      setErr('接收者身份尚未由完整配对码精确核验，不能批准');
+      return;
+    }
+    setSending(ch); setErr(''); setSecretNotice(null);
     try {
       const r = await onChoice(ch);
       if (!r || r.ok !== true) { setSending(''); setErr((r && r.reason) || '确认透传失败,请重试'); }
@@ -315,38 +461,38 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
   };
   const stopTurn = async () => {
     if (sending || !onStop) return;
-    setSending('stop'); setErr('');
+    setSending('stop'); setErr(''); setSecretNotice(null);
     try {
       const r = await onStop();
-      if (!r || r.ok !== true) {
-        setSending('');
-        setErr((r && (r.reason || r.message)) || '停止请求失败，请重试');
-      }
-      // 成功后仍等 SSE 的 confirm_resolved/cancelled 收口，避免本地伪关门。
+      if (!r || r.ok !== true) { setSending(''); setErr((r && (r.reason || r.message)) || '停止请求失败，请重试'); }
     } catch (e) { setSending(''); setErr('网络错误: ' + e); }
   };
   const steerTurn = async () => {
     const text = steerDraft.trim();
     if (!text || sending || !onSteer) return;
-    setSending('steer'); setErr('');
+    setSending('steer'); setErr(''); setSecretNotice(null);
     try {
       const r = await onSteer(text);
+      if (r && r.secret_handled === true) {
+        const notice = wwSecretControlNotice(r);
+        setSteerDraft('');
+        setSending('');
+        setSecretNotice({ ...notice, text: notice.text + ' 当前工具确认仍待处理。' });
+        return;
+      }
       if (!r || r.ok !== true) {
         setSending('');
         setErr((r && (r.reason || r.message)) || '转向失败，请重试');
-      } else {
-        setSteerDraft('');
-      }
-      // 成功后等 SSE 的 confirm_resolved/steering/running 收口。
+        if (r && r.clear_input === true) setSteerDraft('');
+      } else setSteerDraft('');
     } catch (e) { setSending(''); setErr('网络错误: ' + e); }
   };
 
   React.useEffect(() => {
     const k = (e) => {
-      const target = e.target;
       const key = e.key.toLowerCase();
-      const editing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
-        || target.isContentEditable);
+      const target = e.target;
+      const editing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
       if (editing && key !== 'escape') return;
       if (key === 'y') { e.preventDefault(); resolve('y'); }
       if (key === 'n') { e.preventDefault(); resolve('n'); }
@@ -359,10 +505,12 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
   return (
     <div onClick={() => {}} style={{
       position: 'fixed', inset: 0, background: 'rgba(28,24,20,0.55)', backdropFilter: 'blur(2px)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, animation: 'fadeIn 200ms ease-out'
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
+      animation: 'fadeIn 200ms ease-out', padding: 16, boxSizing: 'border-box', overflow: 'auto'
     }}>
       <div onClick={(e) => e.stopPropagation()} style={{
-        width: 520, background: 'var(--paper)', border: '2px solid var(--yin)',
+        width: 520, maxWidth: '100%', maxHeight: '92vh', overflowY: 'auto',
+        background: 'var(--paper)', border: '2px solid var(--yin)',
         boxShadow: '0 24px 80px rgba(0,0,0,0.3)'
       }}>
         <div style={{ padding: '18px 24px 14px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'flex-start', gap: 14 }}>
@@ -371,12 +519,33 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
             <div className="mono" style={{ fontSize: 10, color: 'var(--yin)', letterSpacing: '0.2em', marginBottom: 4 }}>
               等待工具确认
             </div>
-            <div className="serif" style={{ fontSize: 17, color: 'var(--ink)', fontWeight: 500 }}>{(window.WW.TOOL_CN[c.tool] || c.tool)}</div>
+            <div className="serif" style={{ fontSize: 17, color: 'var(--ink)', fontWeight: 500 }}>{(isChannelConfirm && c.title) || window.WW.TOOL_CN[c.tool] || c.tool}</div>
           </div>
         </div>
-        <div style={{ padding: '14px 24px', fontFamily: 'var(--serif)', fontSize: 13.5, color: 'var(--ink-1)', lineHeight: 1.75, whiteSpace: 'pre-wrap' }}>
-          {JSON.stringify(c.args, null, 1)}
-        </div>
+        {isChannelConfirm ? (
+          <WwChannelConfirmDetails publicDetails={c.public_details} toolName={c.tool} />
+        ) : isAnalysisConfirm ? (
+          <div style={{ padding: '14px 24px', color: 'var(--ink-1)' }}>
+            <div className="serif" style={{ fontSize: 13, lineHeight: 1.7 }}>
+              {analysisArgs.title || '数据分析'} · 最长 {analysisArgs.timeout_seconds || 120} 秒 ·
+              输入 {Number.isInteger(analysisArgs.input_bytes) ? analysisArgs.input_bytes : 0} 字节
+            </div>
+            <div className="mono" style={{ marginTop: 7, color: 'var(--ink-3)', fontSize: 9.5,
+              overflowWrap: 'anywhere', lineHeight: 1.55 }}>
+              代码 {analysisArgs.code_sha256 || '—'}<br />输入 {analysisArgs.input_sha256 || '—'}
+            </div>
+            <div className="mono" style={{ marginTop: 10, color: 'var(--yin)', fontSize: 9.5,
+              letterSpacing: '.12em' }}>将执行的完整 Python 代码</div>
+            <pre style={{ maxHeight: '34vh', overflow: 'auto', margin: '6px 0 0', padding: 12,
+              border: '1px solid var(--line)', background: 'var(--paper-2)', color: 'var(--ink)',
+              fontFamily: 'var(--mono)', fontSize: 10.5, lineHeight: 1.55, whiteSpace: 'pre',
+              tabSize: 2 }}>{typeof analysisArgs.code === 'string' ? analysisArgs.code : ''}</pre>
+          </div>
+        ) : (
+          <div style={{ padding: '14px 24px', fontFamily: 'var(--serif)', fontSize: 13.5, color: 'var(--ink-1)', lineHeight: 1.75, whiteSpace: 'pre-wrap' }}>
+            {JSON.stringify(c.args, null, 1)}
+          </div>
+        )}
         {Array.isArray(c.facts) && c.facts.length > 0 && (
           <div style={{ margin: '0 24px 10px', padding: '10px 12px', background: 'var(--paper-2)', border: '1px solid var(--line)' }}>
             <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', letterSpacing: '0.15em', marginBottom: 6 }}>机器核数 · 实时真值</div>
@@ -387,35 +556,35 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
         )}
         {Array.isArray(c.precheck) && c.precheck.length > 0 && (
           <div style={{ margin: '0 24px 10px', padding: '10px 12px', border: '1px solid var(--yin)', background: 'rgba(140,30,20,0.05)' }}>
-            <div className="mono" style={{ fontSize: 10, color: 'var(--yin)', letterSpacing: '0.15em', marginBottom: 6 }}>⚠ 预检 {c.precheck.length} 处 · 叙述与数据矛盾</div>
+            <div className="mono" style={{ fontSize: 10, color: 'var(--yin)', letterSpacing: '0.15em', marginBottom: 6 }}>⚠ 执行前提示 · {c.precheck.length} 项</div>
             {c.precheck.map((p, i) => (
               <div key={i} className="serif" style={{ fontSize: 12.5, color: 'var(--yin)', lineHeight: 1.7 }}>{p}</div>
             ))}
           </div>
         )}
         <div style={{ margin: '0 24px 12px', padding: '10px 12px', background: 'var(--paper-2)', border: '1px solid var(--line)' }}>
-          <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', letterSpacing: '0.12em', marginBottom: 7 }}>
-            改变方向（会安全打断本次确认并继续）
-          </div>
+          <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', marginBottom: 7 }}>改变方向（安全打断本次确认并继续）</div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-            <textarea rows={2} value={steerDraft} disabled={!!sending}
-              onChange={e => setSteerDraft(e.target.value)}
+            <textarea rows={2} value={steerDraft} disabled={!!sending} onChange={e => setSteerDraft(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); steerTurn(); } }}
               placeholder="输入新方向，Enter 转向…"
               style={{ flex: 1, minHeight: 42, resize: 'vertical', border: '1px solid var(--line)', background: 'var(--paper)', color: 'var(--ink)', padding: '7px 9px', fontFamily: 'var(--serif)', fontSize: 12.5, outline: 0 }} />
             <button type="button" onClick={steerTurn} disabled={!!sending || !steerDraft.trim()}
-              style={{ height: 42, padding: '0 12px', border: '1px solid var(--ink)', background: 'var(--paper)', color: 'var(--ink)', fontFamily: 'var(--serif)', cursor: sending || !steerDraft.trim() ? 'default' : 'pointer', opacity: sending || !steerDraft.trim() ? .5 : 1 }}>
+              style={{ height: 42, padding: '0 12px', border: '1px solid var(--ink)', background: 'var(--paper)', color: 'var(--ink)', opacity: sending || !steerDraft.trim() ? .5 : 1 }}>
               {sending === 'steer' ? '转向中…' : '调整方向'}
             </button>
           </div>
         </div>
         {err && <div className="serif" style={{ margin: '0 24px 8px', color: 'var(--yin)', fontSize: 12 }}>✗ {err}</div>}
+        {secretNotice && <div role="status" className="serif" style={{
+          margin: '0 24px 8px', color: secretNotice.ok ? 'var(--dai)' : 'var(--yin)', fontSize: 12,
+        }}>{secretNotice.ok ? '✓ ' : '✗ '}{secretNotice.text}</div>}
         <div style={{ padding: '8px 24px 18px' }}>
           <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', letterSpacing: '0.15em', marginBottom: 8 }}>选择操作</div>
           <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={() => resolve('y')}
-              style={{ flex: 1, padding: '10px', background: 'var(--ink)', color: 'var(--paper)', border: 'none', fontFamily: 'var(--serif)', fontSize: 13, cursor: sending ? 'default' : 'pointer', opacity: sending ? 0.6 : 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-              <span>{sending === 'y' ? '已发送…' : '同意 · 一次'}</span>
+            <button onClick={() => resolve('y')} disabled={!!sending || !pairingVerified}
+              style={{ flex: 1, padding: '10px', background: 'var(--ink)', color: 'var(--paper)', border: 'none', fontFamily: 'var(--serif)', fontSize: 13, cursor: sending || !pairingVerified ? 'default' : 'pointer', opacity: sending || !pairingVerified ? 0.6 : 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+              <span>{sending === 'y' ? '确认中…' : (c.approve_label || '同意 · 一次')}</span>
               <span className="mono" style={{ fontSize: 9, opacity: 0.6 }}>Y</span>
             </button>
             <button onClick={() => resolve('n')}
@@ -423,10 +592,9 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
               <span>{sending === 'n' ? '已发送…' : '拒绝'}</span>
               <span className="mono" style={{ fontSize: 9, opacity: 0.6 }}>N · ESC</span>
             </button>
-            <button onClick={stopTurn} title="停止整个前台任务，不只是拒绝这一次工具调用"
-              style={{ flex: 1, padding: '10px', background: 'transparent', color: 'var(--yin)', border: '1px solid var(--yin)', fontFamily: 'var(--serif)', fontSize: 13, cursor: sending ? 'default' : 'pointer', opacity: sending ? 0.6 : 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+            <button onClick={stopTurn}
+              style={{ flex: 1, padding: '10px', background: 'transparent', color: 'var(--yin)', border: '1px solid var(--yin)', fontFamily: 'var(--serif)', fontSize: 13, opacity: sending ? .6 : 1 }}>
               <span>{sending === 'stop' ? '安全停止中…' : '停止本轮'}</span>
-              <span className="mono" style={{ fontSize: 9, opacity: 0.6 }}>CANCEL</span>
             </button>
           </div>
         </div>
@@ -460,39 +628,6 @@ function WwWorkflowCard({ item, workspace, sessionId, onOpen }) {
     </div></div>;
 }
 
-// ── WwLauncher ── 输入坞左侧 ◫:手动呼出右栏功能页(选股/工作流/经验卡/图谱),与对话「调出选股」等价
-function WwLauncher({ activated, onOpenPage }) {
-  const PAGES = window.WW.PAGES;
-  const [open, setOpen] = React.useState(false);
-  const pick = (p) => { setOpen(false); onOpenPage(p); };
-  return (
-    <div style={{ position: 'relative', flexShrink: 0 }}>
-      <div onClick={() => setOpen(o => !o)} title="呼出功能面板"
-        style={{ height: 23, padding: '0 10px', border: '1px solid ' + (open ? 'var(--ink)' : 'var(--ink-2)'), color: 'var(--ink)', display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: 'var(--serif)', letterSpacing: 2, cursor: 'pointer', borderRadius: 4, userSelect: 'none', whiteSpace: 'nowrap', background: open ? 'var(--paper-2)' : 'var(--paper-2)' }}>
-        <span className="mono" style={{ fontSize: 13, letterSpacing: 0 }}>◫</span>功能</div>
-      {open && (
-        <React.Fragment>
-          <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 30 }} />
-          <div style={{ position: 'absolute', bottom: 32, left: 0, zIndex: 31, width: 228, background: 'var(--paper)', border: '1px solid var(--ink)', boxShadow: '4px 4px 0 rgba(0,0,0,0.08)', padding: '5px 0', animation: 'fadeIn 0.12s ease' }}>
-            <div style={{ padding: '5px 14px 8px', fontSize: 10.5, color: 'var(--ink-3)', letterSpacing: 2, borderBottom: '1px solid var(--line)', fontFamily: 'var(--serif)' }}>呼出功能 · 右栏</div>
-            {Object.keys(PAGES).map(p => (
-              <div key={p} onClick={() => pick(p)}
-                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', cursor: 'pointer', fontSize: 13, fontFamily: 'var(--serif)' }}
-                onMouseEnter={e => { e.currentTarget.style.background = 'var(--paper-2)'; }}
-                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>
-                <span className="seal" style={{ fontSize: 11 }}>{PAGES[p].label[0]}</span>
-                <span style={{ flex: 1, letterSpacing: 1 }}>{PAGES[p].label}</span>
-                <span style={{ fontSize: 10, color: activated.indexOf(p) >= 0 ? 'var(--yin)' : 'var(--ink-3)' }}>{activated.indexOf(p) >= 0 ? '● 已开' : '○'}</span>
-              </div>
-            ))}
-            <div style={{ padding: '8px 14px 5px', fontSize: 10.5, color: 'var(--ink-3)', borderTop: '1px solid var(--line)' }}>也可直接下令:「调出选股」</div>
-          </div>
-        </React.Fragment>
-      )}
-    </div>
-  );
-}
-
 // ── WwThinkingMode ── 每次发令的模型档位。具体模型由服务端 llm.yaml 固定，
 // 前端只能选 standard/pro，不能注入任意 provider/model。
 function WwThinkingMode({ value, onChange, disabled }) {
@@ -513,7 +648,7 @@ function WwThinkingMode({ value, onChange, disabled }) {
     );
   };
   return (
-    <div title={pro ? 'Pro: DeepSeek-V4-Pro，开启思考并使用 max 强度，适合复杂任务' : '标准: DeepSeek-V4-Flash，关闭思考、响应更快'}
+    <div title={pro ? 'Pro：使用服务端深度研究档位，适合复杂任务' : '标准：使用服务端标准研究档位，响应更快'}
       style={{ height: 23, padding: 2, border: '1px solid ' + (pro ? 'var(--yin)' : 'var(--line)'), borderRadius: 6,
         display: 'flex', alignItems: 'center', gap: 1, background: pro ? 'rgba(168,57,45,.06)' : 'var(--paper-2)', flexShrink: 0 }}>
       {btn('standard', '标准')}
@@ -525,17 +660,34 @@ function WwThinkingMode({ value, onChange, disabled }) {
 function wwControlText(control) {
   if (!control) return '';
   if (control.status === 'error') return control.note || (control.kind === 'steer' ? '转向失败' : '停止失败');
-  if (control.status === 'stopping') return control.kind === 'steer'
-    ? '正在安全停止当前任务，准备转向…' : '正在安全停止当前任务…';
+  if (control.status === 'queued') return control.note || '指令已接收，正在启动…';
+  if (control.status === 'stopping') return control.kind === 'steer' ? '正在安全停止当前任务，准备转向…' : '正在安全停止当前任务…';
   if (control.status === 'steering') return control.note || '新方向已接收，正在安全切换…';
   if (control.status === 'continued') return control.note || '已按新方向继续';
   return control.note || '';
 }
 
+function wwSecretControlNotice(result) {
+  const source = result && typeof result === 'object' ? result : {};
+  const code = String(source.reason_code || source.error_code || '');
+  const failureCopy = {
+    channel_draft_required: '请先让 Agent 创建 Telegram 连接草稿，再提交 Bot Token。',
+    telegram_credential_invalid: 'Bot Token 未通过校验，请重新填写。',
+    action_ticket_required: '安全提交已过期，请重新提交。',
+    action_ticket_invalid: '安全提交已失效，请重新提交。',
+    channel_request_stale: '当前对话已经切换，请返回原对话核对真实状态。',
+  };
+  return {
+    ok: source.ok === true,
+    text: source.ok === true
+      ? 'Token 已安全提交，正在验证 Bot。'
+      : (failureCopy[code] || 'Token 安全提交没有完成，请重试。'),
+  };
+}
+
 // ── WwSessBar ── 对话区顶栏:本会话身份 + 本会话任务,随会话切换各不相同(用户拍板:每个对话都有不同的顶栏)
-// 三期:任务芯片旁挂哨兵徽章(平台级研判,unread>0 才显形)。全局条目
-// 进入独立的全局落子 Stage，不写入当前股票研究空间的 handoff 信箱。
-function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentrySeen, onOpenPage, onSentryFocus }) {
+// 三期:任务芯片旁挂哨兵徽章(平台级研判,unread>0 才显形),任务面板尾部挂「哨兵研判 · 全局」分区
+function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentrySeen, onSentryFocus, channelStatus, onOpenChannel }) {
   const [open, setOpen] = React.useState(false);
   const [edit, setEdit] = React.useState(null);          // 改名草稿 string|null
   React.useEffect(() => { setOpen(false); setEdit(null); }, [state.sid]);
@@ -547,16 +699,12 @@ function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentr
   const planTotal = plan.length;
   const bg = Object.values(state.bgTasks || {}).sort((a, b) => String(b.ts || '').localeCompare(String(a.ts || '')));
   const cur = plan.find(t => t.status === 'in_progress');
-  const controlText = wwControlText(state.control);
   const executing = state.busy || !!cur || bg.some(t => t.status === 'running');
-  const buttonText = controlText
-    ? (state.control.status === 'continued' ? '已转向 · 继续中'
-      : state.control.status === 'error' ? (state.control.kind === 'steer' ? '转向失败' : '停止失败')
-      : state.control.status === 'steering' ? '转向中' : '安全停止中')
-    : executing
+  const buttonText = executing
     ? (planTotal ? '执行 · ' + planDone + '/' + planTotal : '执行中')
     : (planTotal ? '计划 · ' + planDone + '/' + planTotal : '任务');
   const planMark = { done: { c: 'var(--dai)', t: '✓' }, in_progress: { c: 'var(--zhu)', t: '▶' }, pending: { c: 'var(--jin)', t: '○' } };
+  const seatsHref = '../seats/观澜 · 落子.html';
   const reportFor = (code) => {                          // done 研报 → 从事件流找回 report_md 供「查看」
     for (let i = state.events.length - 1; i >= 0; i--) {
       const ev = state.events[i];
@@ -574,8 +722,7 @@ function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentr
         <React.Fragment>
           <span title={title} style={{ fontFamily: 'var(--serif)', fontSize: 13.5, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '42%' }}>{title}</span>
           {onRename && <span title="改名" onClick={() => setEdit(title)} style={{ fontSize: 11, color: 'var(--ink-3)', cursor: 'pointer' }}
-            onMouseEnter={e => { e.currentTarget.style.color = 'var(--ink)'; }} onMouseLeave={e => { e.currentTarget.style.color = 'var(--ink-3)'; }}>✎</span>
-          }
+            onMouseEnter={e => { e.currentTarget.style.color = 'var(--ink)'; }} onMouseLeave={e => { e.currentTarget.style.color = 'var(--ink-3)'; }}>✎</span>}
         </React.Fragment>
       ) : (
         <input autoFocus value={edit} onChange={e => setEdit(e.target.value)}
@@ -583,6 +730,7 @@ function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentr
           style={{ border: '1px solid var(--ink-2)', background: 'var(--paper)', padding: '3px 8px', fontSize: 12.5, fontFamily: 'var(--serif)', color: 'var(--ink)', outline: 'none', width: 240 }} />
       )}
       <span style={{ flex: 1 }} />
+      <WwChannelStatusBadge status={channelStatus} onOpen={onOpenChannel} />
       {window.WwReviewReportCard && <WwReviewReportCard />}
       {sentry && sentry.unread > 0 && (
         <span onClick={() => setOpen(true)} title="落子哨兵新研判(平台级,点开任务面板查看)"
@@ -617,7 +765,7 @@ function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentr
           <div style={{ padding: '8px 14px 6px', fontSize: 10.5, color: 'var(--ink-3)', letterSpacing: 2, borderTop: '1px solid var(--line)', fontFamily: 'var(--serif)' }}>执行与后台</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', fontSize: 12.5, fontFamily: 'var(--serif)', color: 'var(--ink-1)', borderBottom: bg.length ? '1px solid var(--line-soft)' : 'none' }}>
             {dot(state.busy ? 'var(--zhu)' : 'var(--line)', state.busy)}
-            <span style={{ flex: 1 }}>当前对话:{controlText || (state.busy ? (cur ? '▶ ' + cur.text : '运筹中…') : '空闲')}</span>
+            <span style={{ flex: 1 }}>当前对话:{state.busy ? (cur ? '▶ ' + cur.text : '运筹中…') : '空闲'}</span>
           </div>
           {bg.map(t => (
             <div key={t.task_id} style={{ padding: '9px 14px', borderBottom: '1px solid var(--line-soft)', fontSize: 12, opacity: t.status === 'done' ? 0.75 : 1 }}>
@@ -638,18 +786,23 @@ function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentr
             </div>
           ))}
           {!bg.length && !state.busy && <div style={{ padding: '12px 14px', fontSize: 11.5, color: 'var(--ink-3)' }}>暂无任务——下达指令或启动深度研报后挂在这里。</div>}
-          {/* 平台级事实，非本会话事件流；点击后由 app 路由到 rw_general 全宽落子。 */}
-          <div style={{ padding: '8px 14px 6px', fontSize: 10.5, color: 'var(--ink-3)', letterSpacing: 2, borderTop: '1px solid var(--line)', fontFamily: 'var(--serif)' }}>哨兵研判 · 全局<span style={{ letterSpacing: 0, marginLeft: 8 }}>(独立落子)</span></div>
+          {/* 平台级哨兵事实:同顶栏一样进入完整「席位 · 落子」页；条目点击前先 handoff 本票。 */}
+          <div style={{ display: 'flex', alignItems: 'center', padding: '8px 14px 6px', fontSize: 10.5, color: 'var(--ink-3)', borderTop: '1px solid var(--line)', fontFamily: 'var(--serif)' }}>
+            <span style={{ letterSpacing: 2 }}>哨兵研判 · 全局<span style={{ letterSpacing: 0, marginLeft: 8 }}>(非本会话)</span></span>
+            <a href={seatsHref} onClick={() => setOpen(false)} style={{ marginLeft: 'auto', color: 'var(--yin)', textDecoration: 'none', whiteSpace: 'nowrap' }}>完整席位 ↗</a>
+          </div>
           {((sentry && sentry.items) || []).slice(0, 8).map((it, i) => (
-            <div key={it.id || ('sd' + i)} onClick={() => { setOpen(false); if (onSentryFocus) onSentryFocus(it); else if (onOpenPage) onOpenPage('seats'); }}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', borderBottom: '1px solid var(--line-soft)', fontSize: 11.5, fontFamily: 'var(--serif)', color: 'var(--ink-1)', cursor: 'pointer' }}
+            <a key={it.id || ('sd' + i)} href={seatsHref} title="进入完整的席位 · 落子页面"
+              onClick={() => { setOpen(false); if (onSentryFocus) onSentryFocus(it); }}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', borderBottom: '1px solid var(--line-soft)', fontSize: 11.5, fontFamily: 'var(--serif)', color: 'var(--ink-1)', cursor: 'pointer', textDecoration: 'none' }}
               onMouseEnter={e => { e.currentTarget.style.background = 'var(--paper-2)'; }}
               onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>
               <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {(it.kind === 'decide' ? '研判' : '条件单')} · {it.name || it.code || '—'}{it.direction ? ' · ' + it.direction : ''}{it.confidence != null ? ' 置信' + it.confidence : ''}
               </span>
               <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', flexShrink: 0 }}>{String(it.ts || '').slice(5, 16)}</span>
-            </div>
+              <span style={{ color: 'var(--yin)', fontSize: 10.5, flexShrink: 0 }}>席位 ↗</span>
+            </a>
           ))}
           {(!sentry || !(sentry.items || []).length) && <div style={{ padding: '10px 14px', fontSize: 11, color: 'var(--ink-3)' }}>暂无研判——落子哨兵出手后挂在这里。</div>}
         </div>
@@ -659,12 +812,22 @@ function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentr
 }
 
 // ── WwThread ──
-function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfirm, onOpenReport, onOpenPage, onOpenWorkflow, activatedPages, onRename, sentry, markSentrySeen, onSentryFocus, thinkingMode, onThinkingMode }) {
+function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfirm, onOpenReport, onOpenWorkflow, onRename, sentry, markSentrySeen, onSentryFocus, thinkingMode, onThinkingMode, channelStatus, channelDrawerOpen = false, onOpenChannel, onChannelSubmitToken, onChannelRefresh }) {
   const [draft, setDraft] = React.useState('');
-  const [submitting, setSubmitting] = React.useState(''); // send|steer|cancel；防止重复前台控制请求
+  const [submitting, setSubmitting] = React.useState('');
+  const [secretFeedback, setSecretFeedback] = React.useState(null);
   const scrollRef = React.useRef(null);
   const stickRef = React.useRef(true);
   const items = window.WW.deriveItems(state.events, state.busy);
+  const deliveryByMediaId = {};
+  ((channelStatus && channelStatus.recent_deliveries) || []).forEach(delivery => {
+    if (delivery && delivery.media_id) deliveryByMediaId[delivery.media_id] = delivery;
+  });
+  const itemsWithDelivery = items.map(item => item.kind === 'media_image'
+    ? { ...item, delivery: deliveryByMediaId[item.mediaId] || null }
+    : item.kind === 'file_document'
+      ? { ...item, delivery: deliveryByMediaId[item.documentId] || null }
+      : item);
   const latestUser = [...state.events].reverse().find(ev => ev.type === 'user_msg');
   const activeThinkingMode = latestUser && latestUser.thinking_mode === 'pro' ? 'pro' : 'standard';
   const workspaceArchived = !!(workspace && workspace.archived);
@@ -674,7 +837,9 @@ function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfi
     const el = scrollRef.current; if (!el) return;
     if (stickRef.current) el.scrollTop = el.scrollHeight;
   }, [state.events.length]);
-  React.useEffect(() => { stickRef.current = true; setSubmitting(''); }, [state.sid]);
+  React.useEffect(() => {
+    stickRef.current = true; setSubmitting(''); setSecretFeedback(null);
+  }, [state.sid]);
   React.useEffect(() => { if (!state.busy) setSubmitting(''); }, [state.busy]);
   const onScroll = () => { const el = scrollRef.current; if (el) stickRef.current = (el.scrollHeight - el.scrollTop - el.clientHeight) < 80; };
   const send = async () => {
@@ -682,9 +847,9 @@ function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfi
     if (!t || submitting || archived) return { ok: false, reason: '当前不可发送' };
     setSubmitting(state.busy ? 'steer' : 'send');
     let r;
-    try { r = await onSend(t); }
-    catch (e) { r = { ok: false, reason: '发送失败: ' + e }; }
-    if (r && r.ok) setDraft('');
+    try { r = await onSend(t); } catch (e) { r = { ok: false, reason: '发送失败: ' + e }; }
+    if (r && r.secret_handled === true) setSecretFeedback(wwSecretControlNotice(r));
+    if (r && (r.ok || r.clear_input === true)) setDraft('');
     setSubmitting('');
     return r;
   };
@@ -692,30 +857,31 @@ function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfi
     if (!state.busy || submitting || archived || !onCancel) return { ok: false, reason: '当前不可停止' };
     setSubmitting('cancel');
     let r;
-    try { r = await onCancel(); }
-    catch (e) { r = { ok: false, reason: '停止失败: ' + e }; }
+    try { r = await onCancel(); } catch (e) { r = { ok: false, reason: '停止失败: ' + e }; }
     if (!r || !r.ok) setSubmitting('');
     return r;
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }} className="paper-bg">
-      <WwSessBar state={state} workspace={workspace} onOpenReport={onOpenReport} onRename={onRename} sentry={sentry} markSentrySeen={markSentrySeen} onOpenPage={onOpenPage} onSentryFocus={onSentryFocus} />
+      <WwSessBar state={state} workspace={workspace} onOpenReport={onOpenReport} onRename={onRename} sentry={sentry} markSentrySeen={markSentrySeen} onSentryFocus={onSentryFocus} channelStatus={channelStatus} onOpenChannel={onOpenChannel} />
       <div ref={scrollRef} onScroll={onScroll} style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '24px 40px', display: 'flex', flexDirection: 'column', gap: 18, minHeight: 0 }}>
         {items.length === 0 && (
           <div style={{ textAlign: 'center', color: 'var(--ink-3)', fontSize: 13, marginTop: 80, fontFamily: 'var(--serif)', letterSpacing: 1 }}>
             对观澜下令——选股、回测、研报、研判、经验沉淀,一句话即可。
           </div>
         )}
-        {items.map(m => {
+        {itemsWithDelivery.map(m => {
           if (m.kind === 'user') return <UserBubble key={m.id} text={m.text} thinkingMode={m.thinkingMode} />;
           if (m.kind === 'chain') return <ToolChain key={m.id} msg={m} />;
+          if (m.kind === 'analysis_bundle') return <WwAnalysisBundleHeader key={m.id} item={m} />;
           if (m.kind === 'media_image') return <WwMediaImageCard key={m.id} item={m} />;
+          if (m.kind === 'file_document') return <WwFileDocumentCard key={m.id} item={m} />;
           if (m.kind === 'answer') return (
             <div key={m.id} style={{ display: 'flex', gap: 12 }}>
               <AiAvatar />
               <div style={{ flex: 1, minWidth: 0, fontFamily: 'var(--serif)', fontSize: 14, color: 'var(--ink)', padding: '4px 0' }}>
-                {m.thinkingMode === 'pro' && <div className="mono" style={{ fontSize: 9, color: 'var(--yin)', letterSpacing: 1.4, marginBottom: 5 }}>✦ PRO · V4-PRO · MAX</div>}
-                {renderChatMarkdown(m.text)}
+                {m.thinkingMode === 'pro' && <div className="mono" style={{ fontSize: 9, color: 'var(--yin)', letterSpacing: 1.4, marginBottom: 5 }}>✦ PRO · 深度研究</div>}
+                {renderChatMarkdown(m.text, state.evidence)}
                 {m.interrupted && <div className="mono" style={{ marginTop: 7, color: 'var(--ink-3)', fontSize: 10 }}>— 本段因调整方向而中止 —</div>}
                 {m.streaming && <span style={{ display: 'inline-block', width: 6, height: 14, background: 'var(--ink)', marginLeft: 4, verticalAlign: -2, animation: 'blink 1s steps(2) infinite' }} />}
               </div>
@@ -750,33 +916,39 @@ function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfi
           return null;
         })}
         {state.busy && (!items.length || items[items.length - 1].kind !== 'answer') && (
-          <div style={{ display: 'flex', gap: 12 }}><AiAvatar /><div style={{ fontSize: 12, color: controlText || activeThinkingMode === 'pro' ? 'var(--yin)' : 'var(--ink-3)', fontStyle: 'italic', padding: '6px 0' }}>{controlText || (activeThinkingMode === 'pro' ? '✦ Pro 深度思考中…' : '⠋ 运筹中…')}</div></div>
+          <div style={{ display: 'flex', gap: 12 }}><AiAvatar /><div style={{ fontSize: 12, color: (controlText || activeThinkingMode === 'pro') ? 'var(--yin)' : 'var(--ink-3)', fontStyle: 'italic', padding: '6px 0' }}>{controlText || (activeThinkingMode === 'pro' ? '✦ Pro 深度思考中…' : '⠋ 运筹中…')}</div></div>
         )}
       </div>
-      {/* 输入坞:chat Composer 视觉(app.jsx:2284-2294),保留功能呼出 + 标准/Pro 思考档 */}
+      {!channelDrawerOpen && <WwChannelActionCard status={channelStatus} archived={archived}
+        onOpen={onOpenChannel} onSubmitToken={onChannelSubmitToken} onRefresh={onChannelRefresh} />}
+      {/* 输入坞：运行版只保留标准/Pro 思考档，不挂旧功能呼出器。 */}
       <div style={{ padding: '10px 40px 18px' }}>
         {sessionArchived && <div role="status" style={{ marginBottom: 7, padding: '7px 10px', borderLeft: '2px solid var(--jin)', background: 'var(--paper-2)', color: 'var(--ink-2)', fontSize: 10.5 }}>该对话已归档 · 全部历史仍保留，请在左栏“已归档对话”中恢复后继续。</div>}
-        {state.control && <div role="status" aria-live="polite" className="mono" style={{ marginBottom: 7, padding: '6px 10px', borderLeft: '2px solid ' + (state.control.status === 'error' ? 'var(--yin)' : 'var(--jin)'), background: 'var(--paper-2)', color: state.control.status === 'error' ? 'var(--yin)' : 'var(--ink-2)', fontSize: 10.5 }}>
-          {controlText}
+        {secretFeedback && <div role="status" aria-live="polite"
+          className={'ww-channel-feedback ww-channel-composer-feedback ww-channel-feedback--'
+            + (secretFeedback.ok ? 'ok' : 'error')}>
+          {secretFeedback.text}
         </div>}
+        {state.control && <div role="status" aria-live="polite" className="mono" style={{ marginBottom: 7, padding: '6px 10px', borderLeft: '2px solid var(--jin)', background: 'var(--paper-2)', color: 'var(--ink-2)', fontSize: 10.5 }}>{controlText}</div>}
         <div style={{ border: '1px solid var(--line)', borderRadius: 13, padding: '11px 13px 11px 17px', background: 'var(--paper)', display: 'flex', alignItems: 'flex-end', gap: 10 }}
           onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--ink-2)'; }}
           onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--line)'; }}>
-          <WwLauncher activated={activatedPages || []} onOpenPage={onOpenPage} />
           <WwThinkingMode value={thinkingMode} onChange={onThinkingMode} disabled={archived || !!submitting} />
-          <textarea rows={1} value={draft} disabled={archived} onChange={e => setDraft(e.target.value)}
+          <textarea rows={1} value={draft} disabled={archived} onChange={e => {
+            if (secretFeedback) setSecretFeedback(null);
+            setDraft(e.target.value);
+          }}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
             placeholder={sessionArchived ? '该对话已归档——恢复后可继续' : workspaceArchived ? '该研究空间已归档——历史消息仅供查看' : state.busy ? '输入新方向，Enter 将安全打断并转向…' : (thinkingMode === 'pro' ? 'Pro 深度思考——适合复杂研判与多步任务…' : '对观澜下令…(Enter 发送,Shift+Enter 换行)')}
             style={{ flex: 1, border: 0, outline: 0, resize: 'none', background: 'transparent', color: 'var(--ink)', fontFamily: 'var(--serif)', fontSize: 14, lineHeight: 1.6, minHeight: 22, maxHeight: 120 }} />
-          {state.busy && !archived && <button type="button" onClick={stop} disabled={!!submitting}
-            title="安全停止当前前台任务；不会停止独立后台研报"
-            style={{ height: 25, padding: '0 9px', border: '1px solid var(--yin)', borderRadius: 4, background: 'transparent', color: 'var(--yin)', cursor: submitting ? 'default' : 'pointer', opacity: submitting ? .55 : 1, fontFamily: 'var(--serif)', fontSize: 11, whiteSpace: 'nowrap' }}>{submitting === 'cancel' ? '停止中…' : '停止'}</button>}
+          {state.busy && !archived && <button type="button" onClick={stop} disabled={!!submitting} style={{ height: 25, padding: '0 9px', border: '1px solid var(--yin)', background: 'transparent', color: 'var(--yin)' }}>{submitting === 'cancel' ? '停止中…' : '停止'}</button>}
           <button type="button" onClick={send} disabled={archived || !!submitting || !draft.trim()} className="mono"
-            title={state.busy ? '安全打断当前任务并按新方向继续' : '发送'}
-            style={{ minWidth: state.busy ? 72 : 27, height: 25, padding: state.busy ? '0 7px' : 0, border: '1px solid ' + (archived || submitting || !draft.trim() ? 'var(--line)' : 'var(--ink)'), color: archived || submitting || !draft.trim() ? 'var(--ink-3)' : 'var(--ink)', background: 'var(--paper)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, cursor: archived || submitting || !draft.trim() ? 'default' : 'pointer', borderRadius: 4, whiteSpace: 'nowrap' }}>{submitting === 'steer' ? '转向中…' : state.busy ? '调整方向 ↵' : '↵'}</button>
+            style={{ minWidth: state.busy ? 72 : 27, height: 25, border: '1px solid var(--ink)', background: 'var(--paper)', color: 'var(--ink)' }}>
+            {submitting === 'steer' ? '转向中…' : state.busy ? '调整方向 ↵' : '↵'}
+          </button>
         </div>
       </div>
-      {state.confirm && <ConfirmModal key={state.confirm.turn_id || 'confirm'} confirm={state.confirm} onChoice={onConfirm} onStop={stop} onSteer={onSend} />}
+      {state.confirm && <ConfirmModal key={(state.confirm.turn_id || 'confirm') + ':' + (state.confirm.confirm_id || 'legacy')} confirm={state.confirm} onChoice={onConfirm} onStop={stop} onSteer={onSend} />}
     </div>
   );
 }

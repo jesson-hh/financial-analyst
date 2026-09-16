@@ -147,16 +147,15 @@ _D1_GRANTED = {
 #: moving it.
 _UNGRANTED_PROBE = ("pv.price_action", "verified_snapshot")
 
-#: the POST-RE-FREEZE chain (L3 Task 5). Was ``_SPEC_CHAIN_PREFIXES``, the
-#: 2026-07-29 spec §1 values, until this phase's one chartered re-freeze moved
-#: every node except P2. Still a LIVE re-derivation vs a frozen expectation —
-#: only the frozen side moved, so the drift detector keeps working exactly as
-#: before. P2 ``b41bf223`` is byte-identical: the one chain node this program
-#: never authorized moving.
+#: the reviewed live chain after L3 plus the 2026-08-29 v8 live correction.
+#: ``pv.technical`` moves P8/P9 by transparently selecting the catalog-sealed
+#: non-thinking tier; the explicit Technical/News retry envelope also moves P10.
+#: This remains a LIVE re-derivation vs a consciously frozen expectation;
+#: unreviewed drift still fails exactly as before.
 _REFREEZE_CHAIN_PREFIXES = {
-    "P2-static": "b41bf223", "P3-data": "13210944", "P3-full": "0601eef7",
-    "P4": "8aea7bc0", "P5": "af064cba", "P6": "af064cba", "P7": "b78b63e4",
-    "P8": "17f0fed4", "P9": "6176e115", "P10": "2f81ec34",
+    "P2-static": "a9bf5b88", "P3-data": "fb2aae46", "P3-full": "04ce0696",
+    "P4": "1391592e", "P5": "72049167", "P6": "72049167", "P7": "1efbd76c",
+    "P8": "b5f19708", "P9": "00acdc15", "P10": "591f441c",
 }
 
 #: the two retired provider families' names, spelled ONLY by concatenation so
@@ -309,8 +308,8 @@ def _candidate_row(surface, method_id: str, worker_id: str) -> DataPrefetchOpera
     required = sorted(
         n for n, f in params_cls.model_fields.items()
         if f.is_required() and n != "schema_version")
-    pointer_for = {"as_of": "/asof_date", "start": "/asof_date",
-                   "end": "/asof_date", "symbols": "/code", "symbol": "/code"}
+    pointer_for = {"as_of": "/asof_date", "start": "/window_start",
+                   "end": "/asof_date", "symbols": "/code", "symbol": "/symbol"}
     targets = list(required)
     if "symbols" in params_cls.model_fields and "symbols" not in targets:
         targets.append("symbols")   # bind the universe even where it defaults
@@ -407,9 +406,11 @@ def recipe():
 
 @pytest.fixture(scope="module")
 def subject_params():
-    """The production projection recipe, from a REAL committed ``RunSubject@1``."""
-    subject = RunSubject(code=_CODE, as_of=_AS_OF)
-    return RT.SubjectParams.project(code=subject.code, as_of=subject.as_of)
+    """The production projection recipe, from a REAL committed ``RunSubject@2``."""
+    from guanlan_v2.orchestration.pipeline.deep_decide import DeepRunSubject
+    subject = DeepRunSubject(code=_CODE, as_of=_AS_OF, evidence_tf="day")
+    return RT.SubjectParams.project(
+        code=subject.code, as_of=subject.as_of, evidence_tf=subject.evidence_tf)
 
 
 @pytest.fixture(scope="module")
@@ -422,8 +423,9 @@ def bundle():
 # GATE 1 — L1 landed                                                           #
 # =========================================================================== #
 class TestGate1L1Landed:
-    def test_the_closed_pointer_set_is_the_two_pointer_l1_closure(self):
-        assert RT.SUBJECT_PARAM_POINTERS == frozenset({"/asof_date", "/code"})
+    def test_the_closed_pointer_set_is_the_reviewed_series_aware_closure(self):
+        assert RT.SUBJECT_PARAM_POINTERS == frozenset({
+            "/asof_date", "/code", "/evidence_tf", "/symbol", "/window_start"})
 
     def test_the_reviewed_rows_are_the_pm_row_plus_the_three_l3_grants(
             self, surface):
@@ -434,13 +436,16 @@ class TestGate1L1Landed:
         alone: it is the PHASE-2-scoped reviewed-grant door, and rulings D-1(0)
         forbade re-pointing it at post-Phase-2 workers (that was the (0-c)
         option, structurally impossible). What grew is the sealed binding, whose
-        three new LANE rows are claimed at the second evaluation point instead.
+        six new LANE rows are claimed at the second evaluation point instead.
         Both halves are pinned so the distinction cannot silently blur.
         """
         assert DC._REVIEWED_INTEGRATION_GRANTS == {"dec.pm": ("verified_snapshot",)}
         rows = surface.prefetch_binding.operations
         assert sorted((r.worker_id, r.method_ref.id) for r in rows) == [
             ("dec.pm", "verified_snapshot"),
+            ("pv.microstructure", "indicators"),
+            ("pv.microstructure", "verified_snapshot"),
+            ("pv.price_action", "ohlcv"),
             ("pv.technical", "verified_snapshot"),
             ("text.news", "news"),
             ("text.policy", "news")]
@@ -483,7 +488,7 @@ class TestGate1L1Landed:
         source so this file can never test a private re-implementation."""
         src = re.sub(r"\s+", " ", inspect.getsource(DD))
         assert ("subject_params = SubjectParams.project( code=subject.code, "
-                "as_of=subject.as_of)") in src
+                "as_of=subject.as_of, evidence_tf=subject.evidence_tf)") in src
 
     def test_the_ff26c23_declared_not_runnable_pins_were_consciously_flipped(self):
         """STOP condition, executable. ``ff26c23`` pinned the row as
@@ -662,12 +667,13 @@ class TestGate3AdapterInventory:
         assert recorded[2] is spec.optional
         assert recorded[3] == RT._BINDING_BY_METHOD[method_id].params_cls.__name__
 
-    def test_the_measured_real_backend_set_is_the_three_supported_methods(
+    def test_the_measured_real_backend_set_is_the_four_supported_methods(
             self):
         real = {m for m, r in _ledger_methods().items() if r[1]}
-        assert real == {"verified_snapshot", "news", "ohlcv"}
-        # the 07-29 spec statement, re-verified rather than assumed:
-        assert not _ledger_methods()["indicators"][1]
+        assert real == {"verified_snapshot", "news", "ohlcv", "indicators"}
+        # The new reviewed exact-code L1 path consciously flips indicators;
+        # fundamentals remains unsupported and cannot be inferred from it.
+        assert _ledger_methods()["indicators"][1]
         assert not _ledger_methods()["fundamentals"][1]
 
 
@@ -747,17 +753,18 @@ class TestGate4BaselineDigests:
             "sealed chain drift AFTER the one-shot re-freeze closed the window "
             f"— any movement here is now a regression: {drifted}")
         assert measured["P6"] == measured["P5"], "P6 is the identity node"
-        # the one node the re-freeze was forbidden to move, asserted by value.
-        assert measured["P2-static"].startswith("b41bf223")
+        # This feature window consciously includes the Phase-2 RM/PM materials,
+        # so the whole P2→P10 chain was re-frozen from its new reviewed root.
+        assert measured["P2-static"].startswith("a9bf5b88")
 
     def test_the_ledger_records_exactly_the_measured_chain(self):
         recorded = _ledger_chain()
         measured = _measured_chain()
         assert {n: d for n, (d, _) in recorded.items()} == measured
         frozen = {n for n, (_, cls) in recorded.items() if cls == "FROZEN"}
-        assert frozen == {"P2-static"}, (
-            "exactly one chain node does not move this phase (P2); the ledger "
-            f"marks {sorted(frozen)}")
+        assert frozen == set(), (
+            "the reviewed RM/PM + data-binding feature moves the chain from "
+            f"P2 through P10; the ledger incorrectly freezes {sorted(frozen)}")
 
     def test_the_bridge_material_movement_is_measured_not_declared(self, surface):
         """The 移动 half, derived by construction: rebuild the prefetch config +
@@ -887,24 +894,21 @@ class TestGate4BaselineDigests:
                 f"{path}:{line} is recorded {cls} but chain node {node} is "
                 f"{expected}")
 
-    def test_the_inventory_counts_are_the_spec_16_42_11(self):
+    def test_the_inventory_counts_are_the_reviewed_18_42_11(self):
         rows = _ledger_literals()
         family = [r for r in rows if r[5] in ("golden", "handoff")]
         moving_files = {r[0] for r in rows if r[4] == "MOVES"}
         assert len(family) == 42, (
             "spec §1 counted 42 chain-digest literals across the golden + "
             f"handoff family; measured {len(family)}")
-        assert len(moving_files) == 16, (
-            "spec §1 counted 16 files carrying a moving literal (9 golden + 7 "
-            f"handoff); measured {len(moving_files)}")
+        assert len(moving_files) == 18, (
+            "the reviewed full-chain refreeze has 18 files carrying a moving "
+            "literal (9 golden + 8 handoff + 1 fixture); "
+            f"measured {len(moving_files)}")
         assert sum(1 for f in moving_files if "/golden/" in f) == 9
-        assert sum(1 for f in moving_files if "handoff" in f) == 7
-        # the two out-of-family / non-moving carriers must stay untouched by
-        # Task 5 — they pin P2, the one chain node this phase may not move.
-        frozen_carriers = {r[0] for r in rows if r[4] == "FROZEN"}
-        assert "tests/orchestration/data/test_phase_handoff.py" in frozen_carriers
-        assert ("tests/orchestration/fixtures/stock_deep_dive_equivalence_v1.json"
-                in frozen_carriers)
+        assert sum(1 for f in moving_files if "handoff" in f) == 8
+        assert "tests/orchestration/fixtures/stock_deep_dive_equivalence_v1.json" \
+            in moving_files
 
 
 # =========================================================================== #
@@ -947,23 +951,19 @@ class TestGate5PointerSatisfiability:
             assert [s.code for s in params.symbols] == [_CODE]
             assert datetime.fromisoformat(params.as_of) == _AS_OF
 
-    def test_the_series_scoped_candidates_fail_on_the_element_vs_set_mismatch(
+    def test_the_series_scoped_candidates_use_the_reviewed_symbol_and_window(
             self, surface, subject_params):
-        """The exact cause, not just the verdict: ``InstrumentSeriesParams.symbol``
-        is a SINGULAR ``Symbol`` while the closed ``/code`` pointer serves the
-        singleton TUPLE. Assembly succeeds; validation refuses."""
-        from pydantic import ValidationError
-
-        for worker_id, method_id in (("pv.technical", "indicators"),
+        """The old tuple/index shortcut stays forbidden; the reviewed projection
+        now supplies a singular symbol and a non-zero server-derived window."""
+        for worker_id, method_id in (("pv.microstructure", "indicators"),
                                      ("text.news", "fundamentals")):
             row = _candidate_row(surface, method_id, worker_id)
             node = PlanNode(id="n", worker_id=worker_id, writes_slot="slot-n")
             doc = RT._assemble_params(row, node, subject_params=subject_params)
             assert sorted(doc) == ["end", "start", "symbol"]
-            with pytest.raises(ValidationError) as exc:
-                RT._BINDING_BY_METHOD[method_id].params_cls.model_validate(doc)
-            assert "symbol" in str(exc.value)
-            assert "instance of Symbol" in str(exc.value)
+            params = RT._BINDING_BY_METHOD[method_id].params_cls.model_validate(doc)
+            assert params.symbol.code == _CODE
+            assert datetime.fromisoformat(params.start) < datetime.fromisoformat(params.end)
 
     def test_the_element_pointer_is_outside_the_closure_and_is_refused(
             self, surface, subject_params):
@@ -1169,7 +1169,7 @@ class TestGate6GrantSiteReality:
         assert "one-to-one" in str(exc.value)
         assert "rows without a grant" in str(exc.value)
 
-    def test_the_fifteen_p8_grants_stand_against_four_sealed_rows(self, surface):
+    def test_the_fifteen_p8_grants_stand_against_seven_sealed_rows(self, surface):
         """The scope fact in numbers — RE-PINNED at the post-ruling reality
         (L3 Task 5; was ``test_the_seventeen_p8_grants_stand_against_one_sealed_row``).
 
@@ -1177,12 +1177,12 @@ class TestGate6GrantSiteReality:
         invariant seeing 1-vs-1 because it only ever looked at the five Phase-2
         workers. The rulings changed both sides deliberately: D-1 Option A
         withdrew two structurally unexercisable grants (17 -> 15), and D-1/D-2
-        added three reviewed rows (1 -> 4). The residual 11 rowless grants are
+        added six reviewed rows (1 -> 7). The residual 8 rowless grants are
         the OPTIONAL paper set the asymmetric criterion licensed as C3
         licensed-EMPTY, on the post-L3 backlog rather than swept in this window.
 
         Both numbers are pinned, so neither can drift without an argument:
-        a 16th grant appearing, or a 5th row, is a reviewed change.
+        a 16th grant appearing, or an 8th row, is a reviewed change.
         """
         from guanlan_v2.orchestration.data.catalog import data_capability_refs
         from guanlan_v2.orchestration.pipeline.chain import phase10_catalog_snapshot
@@ -1192,14 +1192,14 @@ class TestGate6GrantSiteReality:
         grants = {(w.id, c.id) for w in phase10_catalog_snapshot().workers
                   for c in w.capability_allowlist if (c.id, c.version) in method_by_cap}
         assert len(grants) == 15, sorted(grants)
-        assert len(surface.prefetch_binding.operations) == 4
+        assert len(surface.prefetch_binding.operations) == 7
 
-        # the 15 = 11 licensed-EMPTY paper grants + 4 rowed ones, so the
+        # the 15 = 8 licensed-EMPTY paper grants + 7 rowed ones, so the
         # asymmetric criterion's residue is a number, not a hand-wave.
         rowed = {(op.worker_id, op.capability_ref.id)
                  for op in surface.prefetch_binding.operations}
         assert rowed <= grants
-        assert len(grants - rowed) == 11
+        assert len(grants - rowed) == 8
 
         # MINOR #4 — the frozen candidate table must EQUAL the live allowlist ∩
         # data capabilities, not merely be contained in it. A grown allowlist
@@ -1285,9 +1285,12 @@ class TestGate8TheAllowedRedSetIsExecutable:
              "test_the_report_is_supported_and_the_unsupported_set_is_EMPTY"),
             ("tests/orchestration/test_pipeline_reduced_deep_preset.py",
              "test_the_ten_node_baseline_is_now_supported_with_an_empty_unmet_set"),
-            # L2-b's pv-aux typed-refusal pins (seam-review finding 5)
-            ("tests/orchestration/test_pv_aux_nodes.py", "AuxDataUngranted"),
-            ("tests/orchestration/test_pv_aux_nodes.py", "aux_data_ungranted"),
+            # The post-L3 pv evidence closure: typed computation plus critical
+            # BLOCK topology (never a decorative licensed-empty aux lane).
+            ("tests/orchestration/test_pv_aux_nodes.py",
+             "test_price_action_computes_the_reviewed_feature_set_from_typed_ohlcv"),
+            ("tests/orchestration/test_pv_aux_nodes.py",
+             "test_the_full_graph_blocks_on_both_real_aux_evidence_faces"),
             # L2-b's supported-methods guard
             ("tests/orchestration/test_data_world_recipe.py",
              "test_every_granted_prefetch_row_is_within_the_supported_set"),
@@ -1302,16 +1305,22 @@ class TestGate8TheAllowedRedSetIsExecutable:
         }
         assert required <= pins, f"missing from §4: {sorted(required - pins)}"
 
-    def test_the_pv_aux_pins_are_conditional_not_unconditional_flips(self):
-        """The measured classification from the report: the aux pins belong to
-        ``pv.price_action``/``pv.microstructure``, NOT to the D-1 candidates, so
-        they are FLIP-IF. Recording it as an unconditional FLIP would licence a
-        red that nothing in D-1 justifies."""
+    def test_the_pv_evidence_pins_capture_typed_compute_and_critical_block(self):
+        """The later production closure supersedes the old licensed-empty seam.
+
+        Both executable pins are permanent green guards: one proves real typed
+        calculation and the other proves the full graph cannot treat either
+        evidence face as an optional/decorative dependency.
+        """
         verdicts = {anchor: verdict for _n, rel, _l, anchor, verdict
                     in _ledger_pins()
                     if rel == "tests/orchestration/test_pv_aux_nodes.py"}
-        assert verdicts == {"AuxDataUngranted": "FLIP-IF",
-                            "aux_data_ungranted": "FLIP-IF"}
+        assert verdicts == {
+            "test_price_action_computes_the_reviewed_feature_set_from_typed_ohlcv":
+                "GREEN-VERIFY",
+            "test_the_full_graph_blocks_on_both_real_aux_evidence_faces":
+                "GREEN-VERIFY",
+        }
 
     def test_every_section4_cross_reference_resolves(self):
         """Prose elsewhere in the ledger points AT §4 rows by number. Row numbers

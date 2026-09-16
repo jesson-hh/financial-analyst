@@ -318,23 +318,49 @@ def test_production_resolver_keeps_the_pre_v4_registry_for_durable_history():
     assert st._build_pre_v4_phase9_registry().registry_digest == legacy
 
 
+def test_production_resolver_keeps_the_legacy_subject_registry_for_durable_history():
+    """RunSubject@1 rows remain readable without aliasing them to RunSubject@2."""
+    from guanlan_v2.orchestration.pipeline.deep_decide import (
+        RUN_SUBJECT_SCHEMA_REF as DEEP_RUN_SUBJECT_SCHEMA_REF,
+    )
+    from guanlan_v2.orchestration.pipeline.screening import (
+        RUN_SUBJECT_SCHEMA_REF as SCREENING_RUN_SUBJECT_SCHEMA_REF,
+    )
+
+    legacy = st._LEGACY_RUN_SUBJECT_V1_REGISTRY_DIGEST
+    resolver, active_digests = st.build_production_resolver()
+    legacy_registry = resolver.resolve(legacy)
+
+    assert legacy_registry.registry_digest == legacy
+    assert st._build_legacy_run_subject_v1_registry().registry_digest == legacy
+    assert legacy not in active_digests  # compatibility reader, never a new-write target
+    assert legacy_registry.resolve(SCREENING_RUN_SUBJECT_SCHEMA_REF) is not None
+    with pytest.raises(Exception):
+        legacy_registry.resolve(DEEP_RUN_SUBJECT_SCHEMA_REF)
+
+
+def test_legacy_subject_recipe_drift_refuses_instead_of_aliasing(monkeypatch):
+    """A changed @1 recipe cannot be registered under the historical identity."""
+    monkeypatch.setattr(st, "_LEGACY_RUN_SUBJECT_V1_REGISTRY_DIGEST", "0" * 64)
+    with pytest.raises(RuntimeError, match="legacy RunSubject@1 registry recipe drifted"):
+        st._build_legacy_run_subject_v1_registry()
+
+
 # --------------------------------------------------------------------------- #
 # The pipeline side registries — the 2026-07-31 restart wedge                  #
 # --------------------------------------------------------------------------- #
-#: The sealed digests of the two run-time side registries. These are PINNED as
-#: hex literals deliberately: the production store at ``var/orchestration``
-#: ALREADY carries durable payload rows declaring the first digest (payload
-#: ``main/c1d144aa…``, the 2026-07-30 deep run's ``RunSubject@1``), so a recipe
-#: drift that moved either digest would wedge every existing store on its next
-#: restart — exactly the class of failure this section exists to prevent.
-_SUBJECT_SIDE_REGISTRY_DIGEST = (
+#: The sealed digests of the historical @1 reader and the two current run-time
+#: side registries.  These are pinned because durable rows already declare them.
+_LEGACY_SUBJECT_SIDE_REGISTRY_DIGEST = (
     "cae973b48096a0deb51c1d32b8fcaadb6748056a15eed41b9939193e77fa5d3f")
+_DEEP_SUBJECT_SIDE_REGISTRY_DIGEST = (
+    "08eea595214839066670daddbc0f6f602e9ffe4116df2750e34f6065e93bf7ab")
 _PIPELINE_SIDE_REGISTRY_DIGEST = (
     "f3a5cfdd7fae87b39e9c11f24b600a3438adf41d6f8fe194bc9a54a9526eb90d")
 
 
 def test_the_run_time_side_registries_are_sealed_pinned_and_resolvable():
-    """The startup resolver must hold BOTH side registries the run-time commits use.
+    """Startup holds the historical reader and BOTH current side registries.
 
     ``live_decide._commit_run_subject`` and ``api.build_stores_subject_committer``
     / ``api._commit_candidate_slate`` write durable payloads under their own
@@ -346,22 +372,27 @@ def test_the_run_time_side_registries_are_sealed_pinned_and_resolvable():
     from guanlan_v2.orchestration.pipeline.live_decide import _subject_registry
 
     # the recipes still seal to the digests the on-disk rows declare …
-    assert _subject_registry().registry_digest == _SUBJECT_SIDE_REGISTRY_DIGEST
+    assert (st._build_legacy_run_subject_v1_registry().registry_digest
+            == _LEGACY_SUBJECT_SIDE_REGISTRY_DIGEST)
+    assert _subject_registry().registry_digest == _DEEP_SUBJECT_SIDE_REGISTRY_DIGEST
     assert _pipeline_registry().registry_digest == _PIPELINE_SIDE_REGISTRY_DIGEST
-    # … and the production resolver resolves both WITHOUT any run-time help.
+    # … and the production resolver resolves all three WITHOUT run-time help.
     resolver, digests = st.build_production_resolver()
-    for digest in (_SUBJECT_SIDE_REGISTRY_DIGEST, _PIPELINE_SIDE_REGISTRY_DIGEST):
+    for digest in (
+            _LEGACY_SUBJECT_SIDE_REGISTRY_DIGEST,
+            _DEEP_SUBJECT_SIDE_REGISTRY_DIGEST,
+            _PIPELINE_SIDE_REGISTRY_DIGEST):
         assert resolver.resolve(digest).registry_digest == digest
-        assert digest in digests
+    assert _LEGACY_SUBJECT_SIDE_REGISTRY_DIGEST not in digests
+    assert _DEEP_SUBJECT_SIDE_REGISTRY_DIGEST in digests
+    assert _PIPELINE_SIDE_REGISTRY_DIGEST in digests
 
 
 def test_a_store_carrying_run_time_committed_pipeline_payloads_binds_on_restart(tmp_path):
     """The exact 2026-07-31 live failure, end-to-end (RED before the fix).
 
-    Process 1 (yesterday's live server): production-bound, then the deep lane
-    commits its ``RunSubject@1`` through the REAL ``live_decide`` side-registry
-    path and the slate lane commits through the REAL ``api`` committer — both
-    survive because ``stores.resolver.register(...)`` patched the LIVE resolver.
+    Process 1 includes one exact historical ``RunSubject@1`` row plus current
+    ``RunSubject@2`` and slate-side commits.
     Process 2 (the restart): a FRESH production resolver folds the same root.
     Before the fix the fold refused the ENTIRE store as ``DurableStoreCorrupt``
     ("no sealed registry registered for digest 'cae973b4…'") — one 9999 restart
@@ -372,15 +403,37 @@ def test_a_store_carrying_run_time_committed_pipeline_payloads_binds_on_restart(
     from guanlan_v2.orchestration.pipeline import api as pipeline_api
     from guanlan_v2.orchestration.pipeline import live_decide
     from guanlan_v2.orchestration.pipeline.contracts import RunSubject
-    from guanlan_v2.orchestration.pipeline.screening import RUN_SUBJECT_SCHEMA_REF
+    from guanlan_v2.orchestration.pipeline.deep_decide import (
+        DeepRunSubject,
+        RUN_SUBJECT_SCHEMA_REF as DEEP_RUN_SUBJECT_SCHEMA_REF,
+    )
+    from guanlan_v2.orchestration.pipeline.screening import (
+        RUN_SUBJECT_SCHEMA_REF as SCREENING_RUN_SUBJECT_SCHEMA_REF,
+    )
 
     as_of = datetime(2026, 7, 30, 8, 0, tzinfo=timezone.utc)
     assert st.bind_orchestration_stores(root=tmp_path)["state"] == "bound"
     stores = durable_mod.process_durable_stores()
+    legacy_ref = stores.payloads.put(
+        SCREENING_RUN_SUBJECT_SCHEMA_REF,
+        RunSubject(code="300750", as_of=as_of),
+        registry_digest=_LEGACY_SUBJECT_SIDE_REGISTRY_DIGEST,
+        namespace="main",
+        idempotency_key="historical-deep-subject:c1d144aa",
+    )
     deep_ref = live_decide._commit_run_subject(
-        stores, RunSubject(code="300750", as_of=as_of), "deep-restartwedge0001")
+        stores,
+        DeepRunSubject(code="000001", as_of=as_of, evidence_tf="day"),
+        "deep-restartwedge0001",
+    )
     slate_ref = pipeline_api.build_stores_subject_committer(stores)(
         RunSubject(code="600519", as_of=as_of))
+
+    # A restart/fold is read-only over already committed history.
+    before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*") if path.is_file()
+    }
 
     # the restart: fresh process, fresh resolver, same root.
     durable_mod._PROCESS_STORES = None
@@ -389,10 +442,20 @@ def test_a_store_carrying_run_time_committed_pipeline_payloads_binds_on_restart(
     assert status["state"] == "bound", (status["error_type"], status["error"])
     assert status["cell_namespace_count"] == 14
     fresh = durable_mod.process_durable_stores()
-    for ref in (deep_ref, slate_ref):
-        subject = fresh.payloads.get(
-            ref.payload_ref, expected_schema_ref=RUN_SUBJECT_SCHEMA_REF)
-        assert isinstance(subject, RunSubject)
+    historical = fresh.payloads.get(
+        legacy_ref, expected_schema_ref=SCREENING_RUN_SUBJECT_SCHEMA_REF)
+    current = fresh.payloads.get(
+        deep_ref.payload_ref, expected_schema_ref=DEEP_RUN_SUBJECT_SCHEMA_REF)
+    slate = fresh.payloads.get(
+        slate_ref.payload_ref, expected_schema_ref=SCREENING_RUN_SUBJECT_SCHEMA_REF)
+    assert type(historical) is RunSubject
+    assert isinstance(current, DeepRunSubject)
+    assert type(slate) is RunSubject
+    after = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*") if path.is_file()
+    }
+    assert after == before
 
 
 #: Every reviewed ``<bound stores>.resolver.register(<arg>)`` site in the package,

@@ -24,6 +24,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from financial_analyst.agent.base import SubAgent
+from financial_analyst.data.pit import PitUnavailableError, is_historical_asof
 
 
 class GlobalIndexSnapshot(BaseModel):
@@ -123,6 +124,12 @@ class OverseasMarketScanner(SubAgent[OverseasMarketOutput]):
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         asof = inputs.get("asof_date") or pd.Timestamp.today().strftime("%Y-%m-%d")
+        if is_historical_asof(asof):
+            raise PitUnavailableError(
+                "overseas-market-scanner unavailable: realtime indices have no "
+                f"provable point-in-time snapshot for {asof}"
+            )
+
         collector = self._get_collector()
         raw = collector.fetch_default()
 

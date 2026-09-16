@@ -1016,7 +1016,6 @@ function ResearchLoopCard() {
     if (!pr) return null;
     if (pr.status === 'draft') return <span className="mono" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--jin)', color: 'var(--jin)', flexShrink: 0 }}>draft·待人审</span>;
     if (pr.status === 'draft_compose') return <span className="mono" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--jin)', color: 'var(--jin)', flexShrink: 0 }}>组合draft·待人审</span>;
-    if (pr.status === 'draft_structured') return <span className="mono" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--dai)', color: 'var(--dai)', flexShrink: 0 }}>结构化因子draft·可重放</span>;
     if (pr.status === 'draft_model') return <span className="mono" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--jin)', color: 'var(--jin)', flexShrink: 0 }}>模型draft·工坊待审</span>;
     if (pr.status === 'save_failed') return <span className="mono" title={pr.reason || ''} style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--zhu)', color: 'var(--zhu)', flexShrink: 0 }}>入库失败</span>;
     return null;

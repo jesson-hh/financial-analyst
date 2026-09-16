@@ -17,9 +17,12 @@ not re-implemented) — so every existing endpoint (/run, /factor/*, /watch/*,
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
+from collections.abc import Callable, Mapping, MutableMapping
 from pathlib import Path
+from typing import Any
 
 # ui/ lives one level up from this package (guanlan-v2/ui/, guanlan-v2/guanlan_v2/).
 _UI_DIR = Path(__file__).resolve().parent.parent / "ui"
@@ -76,25 +79,168 @@ if str(_REPO_ROOT) not in sys.path:
 # 的状态:连 startup 模块本身都导不进来)与兜底的 "failed",并由只读探针
 # GET /orchestration/store_status 暴露。叶子模块无任何 import,导它不会失败。
 from guanlan_v2 import orch_store_status as _orch_status  # noqa: E402
+from guanlan_v2.runtime_paths import (  # noqa: E402
+    configure_test_output_environment as _configure_test_output_environment,
+)
+from guanlan_v2.runtime_secrets import (  # noqa: E402
+    ALLOWED_CREDENTIAL_KEYS as _SECRETS_ENV_ALLOWED_KEYS,
+    load_credential_file as _load_credential_file,
+)
 
 
-def _load_secrets_env() -> None:
+def _load_secrets_env(
+    path: Path | str | None = None,
+    environ: MutableMapping[str, str] | None = None,
+    *,
+    force_in_tests: bool = False,
+) -> dict:
+    """Load only reviewed credentials and return a value-free status.
+
+    The default production-file call is disabled in explicit test mode.  Unit
+    tests exercise the parser with their own temporary file via ``path`` or
+    ``force_in_tests=True``; importing the shared ASGI app never opens the real
+    fallback file.
+    """
+
+    target = _SECRETS_ENV if path is None else Path(path)
+    return _load_credential_file(
+        target,
+        environ=os.environ if environ is None else environ,
+        skip_when_testing=not force_in_tests and path is None,
+    )
+
+
+# Test isolation must be established before ``create_app()`` imports any store
+# module (many bind module-level default paths).  In production this is a no-op.
+_TEST_OUTPUT_ROOT = _configure_test_output_environment(repo_root=_REPO_ROOT)
+_SECRETS_ENV_STATUS = _load_secrets_env()
+
+
+def _telegram_feature_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Return the deliberately narrow Telegram feature gate.
+
+    Only the exact value ``"1"`` opts in.  Keeping this check above
+    ``create_app()`` makes the disabled path testable without importing any
+    Channel, DPAPI, SQLite, or HTTP implementation.
+    """
+
+    source = os.environ if environ is None else environ
+    return source.get("GUANLAN_TELEGRAM_ENABLED") == "1"
+
+
+def _server_background_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Return whether process-owned background services may start.
+
+    Building/importing the ASGI application must stay side-effect free with
+    respect to schedulers.  Production keeps the historical default (enabled),
+    while tests and one-off inspection processes can set the exact value ``0``
+    to prevent watchdogs, pre-warmers and scheduled writers from starting when
+    they enter the app lifespan.
+    """
+
+    source = os.environ if environ is None else environ
+    return source.get("GUANLAN_SERVER_BACKGROUND", "1") != "0"
+
+
+def _build_telegram_channel_runtime(
+    console_store: Any,
+    *,
+    factories: Mapping[str, Callable[..., Any]] | None = None,
+) -> Any:
+    """Build the optional Channel graph around the shared ConsoleStore."""
+
+    if factories is None:
+        from guanlan_v2.channels.runtime import ChannelRuntime
+        from guanlan_v2.channels.secrets import SecretStore
+        from guanlan_v2.channels.store import ChannelStore
+        from guanlan_v2.channels.telegram import TelegramAdapter
+        from guanlan_v2.channels.trading_calendar import AShareTradingCalendar
+        from guanlan_v2.console.media import MediaStore
+
+        factories = {
+            "channel_store": ChannelStore,
+            "secret_store": SecretStore,
+            "media_store": MediaStore,
+            "telegram_adapter": TelegramAdapter,
+            "trading_calendar": AShareTradingCalendar,
+            "runtime": ChannelRuntime,
+        }
+
+    required = {
+        "channel_store",
+        "secret_store",
+        "media_store",
+        "telegram_adapter",
+        "trading_calendar",
+        "runtime",
+    }
+    if set(factories) != required:
+        raise ValueError("invalid Telegram Channel component factory set")
+
+    console_root = Path(console_store.root)
+    channel_store = factories["channel_store"](console_root / "channels.sqlite3")
+    secret_store = factories["secret_store"](console_root / "channel_secrets")
+    media_store = factories["media_store"](console_store)
+    telegram_adapter = factories["telegram_adapter"]()
+    trading_calendar = factories["trading_calendar"]()
+    return factories["runtime"](
+        console_store=console_store,
+        channel_store=channel_store,
+        secret_store=secret_store,
+        telegram_adapter=telegram_adapter,
+        media_store=media_store,
+        automation_calendar=trading_calendar,
+    )
+
+
+def _configure_telegram_channel(
+    app: Any,
+    console_store: Any,
+    console_kwargs: MutableMapping[str, Any],
+    *,
+    enabled: bool | None = None,
+    runtime_factory: Callable[[Any], Any] | None = None,
+    router_factory: Callable[[Any], Any] | None = None,
+) -> Any | None:
+    """Wire one optional runtime into Channel routes, Console, and app state."""
+
+    selected = _telegram_feature_enabled() if enabled is None else bool(enabled)
+    if not selected:
+        console_kwargs["channel_runtime"] = None
+        app.state.channel_runtime = None
+        return None
+
+    build_runtime = runtime_factory or _build_telegram_channel_runtime
+    runtime = build_runtime(console_store)
+    if router_factory is None:
+        from guanlan_v2.channels.api import build_channel_router
+
+        router_factory = build_channel_router
+    app.include_router(router_factory(runtime))
+    console_kwargs["channel_runtime"] = runtime
+    app.state.channel_runtime = runtime
+    return runtime
+
+
+@contextlib.asynccontextmanager
+async def _telegram_runtime_lifespan(runtime: Any | None):
+    """Own exactly one Channel start/stop pair inside the ASGI lifespan."""
+
+    if runtime is None:
+        yield
+        return
     try:
-        if not _SECRETS_ENV.exists():
-            return
-        for line in _SECRETS_ENV.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            k, v = k.strip(), v.strip()
-            if k and v and not os.environ.get(k):
-                os.environ[k] = v
-    except Exception:  # noqa: BLE001 — 兜底失败不阻断启动;缺 key 的调用会诚实 401
-        pass
-
-
-_load_secrets_env()
+        await runtime.start()
+    except BaseException:
+        try:
+            await runtime.stop()
+        except Exception:
+            pass
+        raise
+    try:
+        yield
+    finally:
+        await runtime.stop()
 
 
 def _ensure_engine_importable() -> str:
@@ -197,6 +343,21 @@ def create_app():
     from guanlan_v2.console.store import ConsoleStore
 
     _console_store = ConsoleStore()
+    # Test/audit visibility only: this carries paths and a value-free loader
+    # receipt, never credential values.  The shared module-level app keeps one
+    # stable store for the entire process.
+    app.state.console_store = _console_store
+    app.state.test_output_root = str(_TEST_OUTPUT_ROOT) if _TEST_OUTPUT_ROOT else None
+    app.state.secrets_env_status = dict(_SECRETS_ENV_STATUS)
+
+    @app.get("/runtime/secrets-env-status")
+    def _runtime_secrets_env_status():  # noqa: ANN202 — read-only operational probe
+        # Nested values are lists of names only; copy them so a caller cannot
+        # mutate the process receipt through app.state in an in-process client.
+        return {
+            key: list(value) if isinstance(value, list) else value
+            for key, value in _SECRETS_ENV_STATUS.items()
+        }
 
     # guanlan 自有 cards 后端(经验卡 /cards/*)。卡是 UI 量化形状(cat/verdict/conf/
     # ic/expr),属 guanlan 应用层,与引擎 wisdom 的定性卡是不同领域,故落在 guanlan_v2/
@@ -211,10 +372,11 @@ def create_app():
     app.include_router(build_archive_router())
 
     # guanlan 自有 seats 后端(落子 /seats/*):日线真 K(读 stock_data 经引擎 loader),
-    # 供「复盘」在真实价格上逐 bar 推演。其余证据层(因子/研报/regime)仍 mock,待上游。
+    # 供「复盘」在真实价格上逐 bar 推演；研判按 PIT 真算因子/市况，并只从对应
+    # ResearchWorkspace 读取有界浓缩历史。旧 out/archive/payload 研报不再进 prompt。
     from guanlan_v2.seats.api import build_seats_router
 
-    app.include_router(build_seats_router())
+    app.include_router(build_seats_router(console_store=_console_store))
 
     # guanlan 自有因子库(factorlib):启动时把 base/ + mined/ 因子(引擎 zoo-DSL 表达式,
     # 由 stocks 的 Qlib-DSL 挖掘产物译写并校验而来)经引擎 primitive 编译→注册进引擎
@@ -269,9 +431,9 @@ def create_app():
     # 经**耐久 replay() 通路**在启动期绑一次(崩溃切口的决策行 → 一次终态 admission 效果),
     # 并桥好 approvals_sink(协调器构造的那一条权威 PlanApproval 存进 admission 自己的
     # approvals 库 → record_approval 载入的权威 == 耐久决策 → 审批真正抵达编排事件面)。
-    # 未接 admission provider 时诚实返回 None → 控制台 plan-approval 端点保持既有 503,
-    # 生产行为逐字不变(Task 12 接上 provider 后重启即自愈)。签名探测:console/api.py 由
-    # 并发 session 持有,kwarg 不在时退回原调用,绝不因此拖垮启动。
+    # Pipeline 的 admission 是 per-run，不能塞进上面那个单例 provider。下方因此
+    # 优先挂稳定的 pipeline approval proxy：console 路由先挂、生产依赖可延后绑定；
+    # 绑定窗口期 proxy.available=False，端点仍诚实 503。
     _p7_coord = None
     try:
         from guanlan_v2.orchestration.adapters.api import (
@@ -285,12 +447,28 @@ def create_app():
               f"({type(_e).__name__}: {_e})", file=sys.stderr)
         plan_approval_console_kwargs = None  # type: ignore[assignment]
 
+    _pipeline_approval_surface = None
+    try:
+        from guanlan_v2.orchestration.pipeline.approval_driver import (
+            process_pipeline_approval_surface,
+        )
+
+        _pipeline_approval_surface = process_pipeline_approval_surface()
+        _p7_coord = _pipeline_approval_surface
+    except Exception as _e:  # noqa: BLE001 — pipeline 缺席时保留上面的旧协调器
+        print(f"[guanlan_v2] pipeline approval surface skipped "
+              f"({type(_e).__name__}: {_e})", file=sys.stderr)
+
     from guanlan_v2.console import build_console_router
 
     _console_kw = {}
     if plan_approval_console_kwargs is not None:
         import inspect as _inspect
         _console_kw = plan_approval_console_kwargs(coordinator=_p7_coord)
+        if _pipeline_approval_surface is not None:
+            # 稳定 proxy 的方法身份在延后绑定前即可传入；真正调用时 console 会先
+            # 检查 available，批准后才委托 run-scoped production runner。
+            _console_kw["plan_admit"] = _pipeline_approval_surface.admit_and_run
         # R21 §11 / R22 §3 carry:没有任何东西生产「操作者凭证材料」,故 console/api.py 的
         # _resolve_actor(None) 一律拒。这里补上唯一诚实的来源 —— identity.declared_operator_actor
         # (读 config/orchestration/operators.json 的那条声明,与 ConfigOperatorVerifier 同源,
@@ -321,6 +499,11 @@ def create_app():
                   f"endpoints will keep returning 503.", file=sys.stderr)
         _console_kw = _kept
     _console_kw["store"] = _console_store
+    _channel_runtime = _configure_telegram_channel(
+        app,
+        _console_store,
+        _console_kw,
+    )
     app.include_router(build_console_router(**_console_kw))
 
     # ── P2:自主研究回路(提案→求值→批判→改进 后台单飞;零开关零定时器,
@@ -338,13 +521,9 @@ def create_app():
     # 仓内 data/market_status.json(guanlan_v2/strategy/market_status.py 原生生成器,
     # 直读引擎 day 二进制现算 regime/涨停/主线,不依赖 qlib/fa-watch-wt)。读仍走引擎
     # GET /watch/market_status(经上面 setdefault 的 MARKET_STATUS_PATH env 读仓内 json)。
-    from guanlan_v2.market import build_market_router, start_market_status_scheduler
+    from guanlan_v2.market import build_market_router
 
     app.include_router(build_market_router())
-    # 收盘后自动刷新调度(进程内后台 daemon 线程, 幂等只起一次):启动期按需刷一次 +
-    # 每日本地 18:00 后(env MARKET_STATUS_REFRESH_HOUR 可调)自动重生成 market_status.json,
-    # 免手动点「数据」按钮 / 跑 CLI。盘中守卫在 generate 内, 早触发也只落上一完整收盘日。
-    start_market_status_scheduler()
 
     # ── AI投研看板(industry):GET /industry/board、/industry/segment/{id}、
     #     /industry/doc/{doc_id}、POST /industry/ingest、GET /industry/ingest_state ──
@@ -376,11 +555,14 @@ def create_app():
     from guanlan_v2.datafeed.api import build_datafeed_router
     app.include_router(build_datafeed_router())
 
+    # ── 全局预警器:耐久规则 + 历史研究 + 确定性盘中执行 ──────────────
+    # LLM 只经帷幄工具起草/管理规则；实际判断由 lifespan 中常驻执行器完成，不依赖
+    # 任一页面保持打开。执行器复用落子的交易日历与报价新鲜度口径，休市不触网。
+    from guanlan_v2.watch_alerts import build_watch_alerts_router
+    app.include_router(build_watch_alerts_router())
+
     # P1:regen 每日 EOD 自动再生(opt-in;GUANLAN_REGEN_DAILY=1 才启;
     # 定时器随本进程存亡,非 24/7 保证——进程死定时即停,health.regen_scheduler 显形)
-    from guanlan_v2.screen.api import start_regen_daily_scheduler
-    start_regen_daily_scheduler()
-
     # ── guanlan 自有 MCP(挂 /gl-mcp,与引擎 /mcp 并存)──────────────
     # build_app() 已挂引擎 MCP 于 /mcp 并为其设了 app lifespan。Starlette 不会自动
     # 跑被挂子应用的 lifespan,故这里把 guanlan MCP 的 session-manager lifespan
@@ -388,19 +570,61 @@ def create_app():
     import contextlib as _ctxlib
     from guanlan_v2.glmcp.http import build_mcp_http_app as _build_gl_mcp
     _gl_mcp_app = _build_gl_mcp(console_store=_console_store)
+    # Codex gets a separate fail-closed transport.  Its short-lived scope
+    # header is registered by Console per turn and pins both the visible tool
+    # set and the target research workspace on the server side.
+    _gl_codex_mcp_app = _build_gl_mcp(
+        console_store=_console_store, scope_required=True,
+    )
     _prev_lifespan = app.router.lifespan_context
+
+    @_ctxlib.asynccontextmanager
+    async def _gl_channel_lifespan(_gl_app):
+        # Starlette does not enter mounted-app lifespans.  Nest the Telegram
+        # runtime beside the existing GL MCP lifetime while leaving every
+        # production watcher/revive task below untouched.
+        async with _gl_mcp_app.router.lifespan_context(_gl_app):
+            async with _gl_codex_mcp_app.router.lifespan_context(
+                    _gl_codex_mcp_app):
+                async with _telegram_runtime_lifespan(_channel_runtime):
+                    yield
 
     @_ctxlib.asynccontextmanager
     async def _composed_lifespan(_app):
         async with _prev_lifespan(_app):
-            async with _gl_mcp_app.router.lifespan_context(_gl_mcp_app):
+            async with _gl_channel_lifespan(_gl_mcp_app):
                 import asyncio as _aio
-                # Production keeps the mutual watchdog on by default.  Isolated
-                # dev/E2E servers must be able to opt out, otherwise merely
-                # starting port 9998 can spawn the production 9999 checker.
-                _revive = (_aio.create_task(_checker_revive_loop())
-                           if os.environ.get("GUANLAN_CHECKER_REVIVE", "1") != "0"
-                           else None)
+                _background_on = _server_background_enabled()
+
+                # Process-owned schedulers start only after the ASGI lifespan
+                # has actually begun.  Merely importing ``guanlan_v2.server``
+                # therefore cannot refresh market files or launch a regen
+                # daemon.  The exact-zero gate is used by the test harness;
+                # production retains the historical enabled-by-default policy.
+                _revive = None
+                _pit_time = None
+                _watch_alerts = None
+                if _background_on:
+                    from guanlan_v2.market import start_market_status_scheduler
+                    from guanlan_v2.pit_time_attestation import (
+                        maintain_process_time_attestation as _maintain_pit_time,
+                    )
+                    from guanlan_v2.screen.api import start_regen_daily_scheduler
+                    from guanlan_v2.watch_alerts import run_loop as _watch_alerts_loop
+
+                    # 收盘后自动刷新调度(进程内后台 daemon 线程,幂等只起一次):
+                    # 启动期按需刷一次 + 每日本地 18:00 后自动重生成。
+                    start_market_status_scheduler()
+                    # opt-in GUANLAN_REGEN_DAILY=1; otherwise this is a no-op.
+                    start_regen_daily_scheduler()
+                    _revive = _aio.create_task(
+                        _checker_revive_loop())  # 互拉守望(见函数 docstring)
+                    # watchdog 后续代际不能修改一个已运行 server 的环境。server
+                    # 自己每 5 分钟重跑同一现场 w32tm 探针，只续四个非秘密 NTP
+                    # 声明；失败立即撤销声明但绝不停止当前/实时研究。探针在线程中
+                    # 跑且只继承最小消毒环境，避免阻塞 event loop 或外泄凭据。
+                    _pit_time = _aio.create_task(_maintain_pit_time())
+                    _watch_alerts = _aio.create_task(_watch_alerts_loop())
                 # 后端定时盯盘(2026-07-11 落子改造 Task 1;opt-in:GUANLAN_SEATS_WATCH=1 才起)。
                 # enabled 开关持久化在 var/seats_watch.json → 重启自恢复;tick 内 LLM/取数全走
                 # to_thread(run_loop 只 await asyncio.to_thread(tick)),绝不堵事件循环。
@@ -430,7 +654,8 @@ def create_app():
                 # T2-c:深研判装配依赖 pipeline 已绑定——非 strict 时绑定链已延后,
                 # 深 watcher 的启动随链一起延后(见下方 _orch_chain_bg),绝不在未绑定
                 # 窗口装配而静默降级 fast-only;浅 watcher / strict 急切路径行为不变。
-                if _watch_on and not (_deep_on and _deferred_orch_bind is not None):
+                if _background_on and _watch_on \
+                        and not (_deep_on and _deferred_orch_bind is not None):
                     from guanlan_v2.seats import watcher as _seats_watcher
                     _seats_deep_fn = _build_deep_fn() if _deep_on else None
                     _seats_watch = _aio.create_task(
@@ -443,7 +668,13 @@ def create_app():
                 # 装配,_closing 旗防关机后排程)。窗口期 /orchestration/* 走既有
                 # not_attempted / *_unwired 503 诚实降级。
                 _closing = {"flag": False}
-                if _deferred_orch_bind is not None:
+                # The deferred chain opens durable stores and launches a daemon
+                # thread.  It belongs to the same process-background boundary as
+                # the schedulers above: test/embedded callers that explicitly set
+                # GUANLAN_SERVER_BACKGROUND=0 get a quiet lifespan and can invoke
+                # app.state.orch_bind["chain"] directly when they need to exercise
+                # the binding contract.
+                if _background_on and _deferred_orch_bind is not None:
                     _loop = _aio.get_running_loop()
 
                     def _orch_chain_thread() -> None:
@@ -455,7 +686,8 @@ def create_app():
                                       f"{type(_ce).__name__}: {_ce}", file=sys.stderr)
                             except Exception:  # noqa: BLE001 — stderr 已死也不许炸
                                 pass
-                        if not (_watch_on and _deep_on) or _closing["flag"]:
+                        if not (_background_on and _watch_on and _deep_on) \
+                                or _closing["flag"]:
                             return
                         try:
                             # 链失败时 _build_deep_fn 自带响亮日志并诚实降级 fast-only,
@@ -483,20 +715,21 @@ def create_app():
                 # maybe_ingest_tick 内三门(env 闸/30min 节奏/EOD 兜底)自吞异常;run_loop
                 # 每拍 to_thread 调它,取数/写盘全在工作线程,绝不堵事件循环。
                 _events_ingest = None
-                if os.environ.get("GUANLAN_EVENTS_INGEST") == "1":
+                if _background_on and os.environ.get("GUANLAN_EVENTS_INGEST") == "1":
                     from guanlan_v2.events import ingest as _events_ingest_mod
                     _events_ingest = _aio.create_task(_events_ingest_mod.run_loop())
                 # 数据面启动预热(2026-07-28 提速):fire-and-forget daemon 线程,把
                 # market_tape/overseas/fundflow/newsradar 从冷拉到就位,切页秒回;
                 # start_prewarm 只起线程绝不阻塞事件循环,GUANLAN_DATAFEED_PREWARM=0 禁用。
-                try:
-                    from guanlan_v2.datafeed import prewarm as _prewarm
-                    _pw_started = _prewarm.start_prewarm()
-                    # 评审:失败路径必须可见——线程起不来/被禁用都要显形一行,不留静默盲区
-                    print(f"[guanlan_v2] datafeed prewarm {'started' if _pw_started else '未启动(禁用/已启动/线程失败)'}",
-                          file=sys.stderr)
-                except Exception as _pw_exc:  # noqa: BLE001 — 预热缺席只降体验,不拦启动
-                    print(f"[guanlan_v2] datafeed prewarm 未启动: {_pw_exc}", file=sys.stderr)
+                if _background_on:
+                    try:
+                        from guanlan_v2.datafeed import prewarm as _prewarm
+                        _pw_started = _prewarm.start_prewarm()
+                        # 评审:失败路径必须可见——线程起不来/被禁用都要显形一行,不留静默盲区
+                        print(f"[guanlan_v2] datafeed prewarm {'started' if _pw_started else '未启动(禁用/已启动/线程失败)'}",
+                              file=sys.stderr)
+                    except Exception as _pw_exc:  # noqa: BLE001 — 预热缺席只降体验,不拦启动
+                        print(f"[guanlan_v2] datafeed prewarm 未启动: {_pw_exc}", file=sys.stderr)
                 try:
                     yield
                 finally:
@@ -507,11 +740,16 @@ def create_app():
                         _seats_watch.cancel()
                     if _events_ingest is not None:
                         _events_ingest.cancel()
+                    if _watch_alerts is not None:
+                        _watch_alerts.cancel()
+                    if _pit_time is not None:
+                        _pit_time.cancel()
                     if _revive is not None:
                         _revive.cancel()
 
     app.router.lifespan_context = _composed_lifespan
     app.mount("/gl-mcp", _gl_mcp_app)
+    app.mount("/gl-mcp-codex", _gl_codex_mcp_app)
 
     # ── orchestration 持久化存储 + 诚实的启动期中断标记(Phase 9 · Task 1b / R23+R24)──
     # 把 Phase 2 store ABI 的 durable jsonl/file 实现绑定一次(root 默认 var/orchestration/,

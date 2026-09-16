@@ -1,42 +1,9 @@
 # -*- coding: utf-8 -*-
-"""L2-b · Task 6 — the two pv aux nodes, past the bridge, to an honest outcome.
+"""The two deterministic price-volume seats after the L3 production grant.
 
-``pv.price_action`` and ``pv.microstructure`` are the deep lane's two
-DETERMINISTIC auxiliary readers.  Their sealed WorkerSpecs
-(``lane_catalog.py``) carry ``inputs=()``, ``tool_calls=OPTIONAL`` and a data
-capability allowlist — and the reviewed Phase-3 prefetch binding grants them
-**no row at all** (grants are L3's scope).  Two seams follow from that, and this
-file owns the second:
-
-1. *the data bridge* — L2-b Task 3/4 settled it: a rowless allowlisted worker
-   freezes the catalog-licensed EMPTY contribution (analyzer bounds 0/0), no
-   refusal, no world resolution.  Pinned in ``test_pm_two_bridges.py`` and
-   ``test_production_data_provider.py``; re-asserted here only as the
-   precondition of what follows.
-2. *the deterministic handler* — before this task ``build_production_catalog_
-   runtime`` bound **no** factory for ``handler.pv.price_action`` /
-   ``handler.pv.microstructure`` (the Task-0 D-E gap), so the node died at the
-   unresolved factory instead of at an outcome anybody could read.
-
-**The ruling this file encodes — honest refusal over plausible empty.**  With
-zero plan-fed inputs and zero granted data rows there is nothing to compute
-over.  A handler that emitted an empty ``PriceActionFeatureReport`` would read
-downstream as *"computed: no patterns found"* — fabrication-adjacent.  So the
-handlers raise a typed refusal that NAMES the L3 grant gap
-(:class:`~guanlan_v2.orchestration.pipeline.pv_aux.AuxDataUngranted`,
-code ``aux_data_ungranted``), the node FAILS with it, the run degrades without
-blocking (both pv nodes are non-trunk), and the inter-node inliner states the
-absence downstream instead of letting a downstream seat imagine the reading.
-
-**Post-L3** the sealed prefetch binding grows rows, the bridge feeds real
-blocks/results, and the same handlers compute for real.  Until then a row that
-DOES arrive is its own typed refusal (``aux_compute_not_wired``) — never a
-report computed over data the L2-b handler has no code to read.  That flip is
-L3's exit gate; it is named at the seam, not silently pre-empted here.
-
-Everything runs against the REAL sealed Phase-9 catalog through the REAL
-production assembly and the REAL ``worker.execute_node``; zero network, zero
-LLM, zero ``var/`` writes.
+The suite pins RunSubject@2, blocking prefetch semantics, typed OHLCV/L1
+computation, honest optional-feed warnings, incomplete-L1 refusal and the full
+ten-seat graph's BLOCK dependencies.  It uses no network, LLM or ``var/`` write.
 
 Run from repo root:
 ``python -m pytest tests/orchestration/test_pv_aux_nodes.py -v``
@@ -44,7 +11,7 @@ Run from repo root:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -55,6 +22,9 @@ import guanlan_v2.orchestration.memory.runtime as MR
 import guanlan_v2.orchestration.worker as W
 from guanlan_v2.orchestration import presets as P
 from guanlan_v2.orchestration.adapters import chain
+from guanlan_v2.orchestration.adapters.live_data import (
+    POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX,
+)
 from guanlan_v2.orchestration.approval import admit_after_approval
 from guanlan_v2.orchestration.admission import (
     ApprovalSubmission,
@@ -70,9 +40,24 @@ from guanlan_v2.orchestration.context import InputSnapshot, RunBudget, RunContex
 from guanlan_v2.orchestration.enums import (
     ApprovalDecision,
     ApprovalPolicy,
+    DataMode,
+    DataStatus,
     DependencyPolicy,
     NodeStatus,
 )
+from guanlan_v2.orchestration.data.result import PitAudit, SourceAttempt
+from guanlan_v2.orchestration.data.source import (
+    IndicatorDataResult,
+    IndicatorRecord,
+    IndicatorRows,
+    OHLCVDataResult,
+    OHLCVRecord,
+    OHLCVRows,
+    VerifiedSnapshotDataResult,
+    VerifiedSnapshotRecord,
+    VerifiedSnapshotRows,
+)
+from guanlan_v2.orchestration.data.symbols import normalize_symbol
 from guanlan_v2.orchestration.eventstore import (
     RuntimeStores,
     SchemaRegistryResolver,
@@ -90,16 +75,18 @@ from guanlan_v2.orchestration.pipeline.assembly import (
     load_phase10_preset_registry,
     production_bridge_view,
 )
-from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 from guanlan_v2.orchestration.pipeline.deep_decide import (
     DEEP_DECIDE_PRESET_ID,
+    RUN_SUBJECT_SCHEMA_REF,
     REDUCED_DEEP_DECIDE_PRESET_ID,
+    DeepRunSubject,
     materialize_deep_decide_draft,
 )
 from guanlan_v2.orchestration.pipeline import pv_aux as PV
 
 UTC = timezone.utc
 NOW = datetime(2026, 7, 24, 7, 0, tzinfo=UTC)
+_SYMBOL = normalize_symbol("600519.SH")
 PHASE8_REGISTRY_DIGEST = (
     "201e7f2cccdf56369e6c8244982eb0647172a7be7d2b8060f8eebb75de6ca650"
 )
@@ -128,6 +115,88 @@ UNRESOLVED_HANDLER_TEXT = "no handler factory bound"
 #: so a future reader knows the guess was checked, not adopted).
 NOT_THESE_REASONS = (
     "executor_exception", "bridge_execution_error", "handler_unresolved")
+
+
+def _pit_audit(row_count: int) -> PitAudit:
+    return PitAudit(
+        mode=DataMode.ONLINE, as_of=NOW, rows_seen=row_count,
+        rows_returned=row_count, future_rows=0,
+        missing_available_at_rows=0, guard_result="passed")
+
+
+def _ok_data_result(result_cls, *, object_id: str, method: str, data, row_count: int):
+    return result_cls.build(
+        id=object_id, method=method, request_digest="a" * 64,
+        status=DataStatus.OK, data=data, resolved_vendor_chain=("fixture",),
+        source_config_digest="b" * 64, fetched_at=NOW,
+        attempts=(SourceAttempt(
+            vendor="fixture", configured=True, outcome="success",
+            started_at=NOW, finished_at=NOW),),
+        pit_audit=_pit_audit(row_count),
+    )
+
+
+def _typed_result(payload, object_id: str) -> TypedPayloadRef:
+    return TypedPayloadRef(
+        payload_ref=PayloadRef(
+            namespace="main", object_id=object_id,
+            content_digest=payload.semantic_digest()),
+        schema_ref=SchemaRef(name=type(payload).__name__, version="1"),
+    )
+
+
+class _PayloadReader:
+    def __init__(self, payloads: dict[str, object]) -> None:
+        self._payloads = dict(payloads)
+
+    def get(self, ref, *, expected_schema_ref=None):
+        payload = self._payloads[ref.object_id]
+        if expected_schema_ref is not None:
+            assert expected_schema_ref.name == type(payload).__name__
+        assert ref.content_digest == payload.semantic_digest()
+        return payload
+
+
+def _ohlcv_result():
+    rows = []
+    for i in range(25):
+        at = NOW - timedelta(days=24 - i)
+        open_price = 100.0 + (i * 0.8)
+        close_price = open_price + (0.5 if i % 2 else -0.2)
+        rows.append(OHLCVRecord.build(
+            symbol=_SYMBOL, open=open_price,
+            high=max(open_price, close_price) + 1.0,
+            low=min(open_price, close_price) - 1.0, close=close_price,
+            volume=1000 + (i * 50), effective_at=at,
+            available_at=at, ingested_at=at))
+    return _ok_data_result(
+        OHLCVDataResult, object_id="ohlcv-result", method="ohlcv",
+        data=OHLCVRows.build(rows), row_count=len(rows))
+
+
+def _micro_results(
+        *, complete_l1: bool = True,
+        revision_ids: tuple[str | None, str | None] = (None, None)):
+    anchor = VerifiedSnapshotRecord.build(
+        symbol=_SYMBOL, last_price=120.0, prev_close=119.0,
+        effective_at=None, available_at=NOW, ingested_at=NOW)
+    anchor_result = _ok_data_result(
+        VerifiedSnapshotDataResult, object_id="snapshot-result",
+        method="verified_snapshot", data=VerifiedSnapshotRows.build([anchor]),
+        row_count=1)
+    indicators = [IndicatorRecord.build(
+        symbol=_SYMBOL, indicator_id="l1_spread_bp", value=2.5,
+        effective_at=NOW, available_at=NOW, ingested_at=NOW,
+        revision_id=revision_ids[0])]
+    if complete_l1:
+        indicators.append(IndicatorRecord.build(
+            symbol=_SYMBOL, indicator_id="bid_ask_imbalance", value=0.25,
+            effective_at=NOW, available_at=NOW, ingested_at=NOW,
+            revision_id=revision_ids[1]))
+    indicator_result = _ok_data_result(
+        IndicatorDataResult, object_id="indicator-result", method="indicators",
+        data=IndicatorRows.build(indicators), row_count=len(indicators))
+    return anchor_result, indicator_result
 
 
 class _FixedClock:
@@ -209,12 +278,12 @@ def view(bundle):
 
 
 def _subject_ref(code: str = "600519") -> TypedPayloadRef:
-    subject = RunSubject(code=code, as_of=NOW)
+    subject = DeepRunSubject(code=code, as_of=NOW, evidence_tf="day")
     return TypedPayloadRef(
         payload_ref=PayloadRef(
             namespace="main", object_id=f"subject-{code}",
             content_digest=subject.semantic_digest()),
-        schema_ref=SchemaRef(name="RunSubject", version="1"))
+        schema_ref=RUN_SUBJECT_SCHEMA_REF)
 
 
 def _materialize(env, preset_id: str, *, draft_id: str, run_id: str):
@@ -464,42 +533,24 @@ def executed(env, wired, admitted):
 
 
 class TestTheAuxNodeOutcome:
-    """The whole point of the task: the node reaches an OUTCOME a reader can
-    act on — a typed, named refusal — instead of dying at an unbound factory
-    or emitting a report computed over nothing."""
+    """Granted rows are blocking: an invalid committed data world stops the
+    node before the deterministic handler can pretend that no evidence exists."""
 
     @pytest.mark.parametrize("worker_id", sorted(PV_AUX))
-    def test_the_aux_node_fails_aux_data_ungranted_through_the_real_executor(
+    def test_the_aux_node_blocks_on_an_unusable_committed_data_context(
             self, executed, worker_id):
         out = executed[worker_id]
         run = out.node_run
         assert run.status is NodeStatus.FAILED
         assert out.artifact is None
-        # the typed refusal identity travels on BOTH channels:
-        assert run.error_type == "AuxDataUngranted"
-        assert run.reason.startswith(f"{PV.AUX_DATA_UNGRANTED_CODE}:")
-        # …and the POSITIVE arm of the reason_code (L2-b Task 8 sweep — Task-6
-        # review F-3). The banned list below pins what the code is NOT; without
-        # this line the executor could start stamping ANY other string and the
-        # suite would stay green. `handler_error` is worker.py's hardcode for a
-        # DETERMINISTIC handler that raised (worker.py: `_terminal_nodrun(
-        # NodeStatus.FAILED, reason_code="handler_error", ...)`), and the typed
-        # identity rides `error_type` + the reason token above — so the code is
-        # deliberately generic. Changing it is a conscious flip, and it reddens
-        # here first.
-        assert run.reason_code == "handler_error"
-        # …and the reason NAMES the worker, its held capability and the L3 gap.
-        assert worker_id in run.reason
-        assert "sealed prefetch binding grants it no row (L3)" in run.reason
-        assert "no data reached this node" in run.reason
-        assert "refusing to emit a report computed over nothing" in run.reason
-        # NOT the other outcomes.
-        for banned in NOT_THESE_REASONS:
-            assert run.reason_code != banned
+        assert run.error_type == "DataRuntimeError"
+        assert run.reason_code == "bridge_execution_error"
+        assert "predates the production data world" in run.reason
+        assert "re-run Lane 0" in run.reason
         assert UNRESOLVED_HANDLER_TEXT not in run.reason
 
     @pytest.mark.parametrize("worker_id", sorted(PV_AUX))
-    def test_the_bridge_layer_still_completes_the_licensed_empty_underneath(
+    def test_the_blocking_bridge_refusal_creates_no_fake_data_or_evidence(
             self, executed, worker_id):
         """The precondition, re-proven at the node seam (not borrowed): the
         data bridge contributed NOTHING — zero tool records, zero data results,
@@ -516,19 +567,17 @@ class TestTheAuxNodeOutcome:
         assert out.refusals.records == []
         assert run.input_tokens == 0 and run.output_tokens == 0
 
-    def test_the_price_action_refusal_names_its_own_capability(self, executed):
-        reason = executed["pv.price_action"].node_run.reason
-        assert "cap.data.ohlcv" in reason
-        # never another seat's capability set.
-        assert "cap.data.signals" not in reason
+    def test_both_rows_are_blocking_not_licensed_empty(self, executed):
+        for worker_id in sorted(PV_AUX):
+            run = executed[worker_id].node_run
+            assert run.status is NodeStatus.FAILED
+            assert run.reason_code == "bridge_execution_error"
 
-    def test_the_microstructure_refusal_names_its_own_capability_set(
-            self, executed):
-        reason = executed["pv.microstructure"].node_run.reason
-        for cap in ("cap.data.indicators", "cap.data.signals",
-                    "cap.data.verified_snapshot"):
-            assert cap in reason
-        assert "cap.data.ohlcv" not in reason
+    def test_neither_failure_can_be_misread_as_a_completed_empty_read(self, executed):
+        for worker_id in sorted(PV_AUX):
+            run = executed[worker_id].node_run
+            assert run.error_type != "AuxDataUngranted"
+            assert "no data reached" not in run.reason
 
 
 class TestTheHandlerUnit:
@@ -537,6 +586,14 @@ class TestTheHandlerUnit:
     def _handler(self, env, bundle, worker_id: str):
         worker = env["by_id"][worker_id]
         factory = bundle.factories.handler_factory(worker.execution.handler_ref)
+        return factory(worker=worker, resolved=None)
+
+    def _typed_handler(self, env, worker_id: str, payloads):
+        worker = env["by_id"][worker_id]
+        reader = _PayloadReader({object_id: payload
+                                 for object_id, payload in payloads})
+        factory = PV.build_pv_aux_handler_factory(
+            worker_id, payload_reader=reader)
         return factory(worker=worker, resolved=None)
 
     @pytest.mark.parametrize("worker_id", sorted(PV_AUX))
@@ -560,11 +617,116 @@ class TestTheHandlerUnit:
             handler(node=None, input_snapshot=None, contributions=(),
                     data_result_refs=(SimpleNamespace(),))
         assert exc.value.reason_code == PV.AUX_COMPUTE_NOT_WIRED_CODE
-        assert "L3" in str(exc.value)
+        assert "payload reader" in str(exc.value)
 
     def test_both_refusals_share_one_typed_base(self):
         assert issubclass(PV.AuxDataUngranted, PV.PvAuxHandlerError)
         assert issubclass(PV.AuxComputeNotWired, PV.PvAuxHandlerError)
+
+    def test_price_action_computes_the_reviewed_feature_set_from_typed_ohlcv(
+            self, env):
+        result = _ohlcv_result()
+        handler = self._typed_handler(
+            env, "pv.price_action", (("ohlcv-result", result),))
+        model_result = handler(
+            node=None, input_snapshot=None, contributions=(),
+            data_result_refs=(_typed_result(result, "ohlcv-result"),))
+
+        report = model_result.payload
+        assert report.feature_set_version == "pa-15key-v1"
+        assert set(report.features) == {
+            "body", "close_pos", "ema20_rel", "inside_streak",
+            "lower_wick", "range_atr", "upper_wick", "vol_ratio",
+        }
+        assert all(isinstance(value, float) for value in report.features.values())
+        assert model_result.model == "compute_pa_features"
+
+    def test_microstructure_computes_real_l1_and_keeps_optional_warnings(
+            self, env):
+        anchor, indicators = _micro_results()
+        handler = self._typed_handler(
+            env, "pv.microstructure",
+            (("snapshot-result", anchor), ("indicator-result", indicators)))
+        model_result = handler(
+            node=None, input_snapshot=None, contributions=(),
+            data_result_refs=(
+                _typed_result(anchor, "snapshot-result"),
+                _typed_result(indicators, "indicator-result"),
+            ))
+
+        report = model_result.payload
+        assert report.l1_spread_bp == pytest.approx(2.5)
+        assert report.bid_ask_imbalance == pytest.approx(0.25)
+        assert report.break_ratio is None and report.whale_net_inflow is None
+        assert report.degradation == (
+            "tick_tape_unavailable", "fundflow_unavailable")
+        assert "盘后保留快照" not in report.narrative
+        assert model_result.model == "tdx_orderbook_projection"
+
+    def test_microstructure_marks_a_consistent_retained_book_as_non_live(self, env):
+        revision = (
+            POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX
+            + "2026-08-28T15:26:50.406000+08:00"
+        )
+        anchor, indicators = _micro_results(revision_ids=(revision, revision))
+        handler = self._typed_handler(
+            env, "pv.microstructure",
+            (("snapshot-result", anchor), ("indicator-result", indicators)))
+
+        model_result = handler(
+            node=None, input_snapshot=None, contributions=(),
+            data_result_refs=(
+                _typed_result(anchor, "snapshot-result"),
+                _typed_result(indicators, "indicator-result"),
+            ))
+
+        assert model_result.payload.degradation == (
+            "tick_tape_unavailable", "fundflow_unavailable",
+            "post_close_retained_book")
+        assert "盘后保留快照" in model_result.payload.narrative
+        assert "不可用于下单" in model_result.payload.narrative
+        assert "not live, not for orders" in model_result.rendered_text
+
+    @pytest.mark.parametrize("revision_ids", [
+        (
+            POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX
+            + "2026-08-28T15:26:50+08:00",
+            None,
+        ),
+        (
+            POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX
+            + "2026-08-28T15:26:50+08:00",
+            POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX
+            + "2026-08-28T15:26:51+08:00",
+        ),
+    ])
+    def test_microstructure_refuses_inconsistent_l1_observation_revisions(
+            self, env, revision_ids):
+        anchor, indicators = _micro_results(revision_ids=revision_ids)
+        handler = self._typed_handler(
+            env, "pv.microstructure",
+            (("snapshot-result", anchor), ("indicator-result", indicators)))
+
+        with pytest.raises(PV.AuxEvidenceInsufficient, match="inconsistent"):
+            handler(
+                node=None, input_snapshot=None, contributions=(),
+                data_result_refs=(
+                    _typed_result(anchor, "snapshot-result"),
+                    _typed_result(indicators, "indicator-result"),
+                ))
+
+    def test_microstructure_refuses_an_incomplete_l1_pair(self, env):
+        anchor, indicators = _micro_results(complete_l1=False)
+        handler = self._typed_handler(
+            env, "pv.microstructure",
+            (("snapshot-result", anchor), ("indicator-result", indicators)))
+        with pytest.raises(PV.AuxEvidenceInsufficient, match="bid_ask_imbalance"):
+            handler(
+                node=None, input_snapshot=None, contributions=(),
+                data_result_refs=(
+                    _typed_result(anchor, "snapshot-result"),
+                    _typed_result(indicators, "indicator-result"),
+                ))
 
     def test_the_wrapper_never_fabricates_a_capability_list(self, bundle, env):
         """A factory handed no worker cannot name what the seat holds, so it
@@ -574,12 +736,9 @@ class TestTheHandlerUnit:
         with pytest.raises(PV.PvAuxHandlerError):
             factory(worker=None, resolved=None)
 
-    def test_the_wrapper_binds_no_compute_spine_yet(self):
-        """L2-b's handler computes nothing, so it IMPORTS nothing that would
-        compute: the ``compute_pa_features`` binding the material bytes name is
-        L3's flip, documented in the module rather than half-wired into it.
-        Pinned as an AST fact, not a substring scan — the docstring names the
-        spine on purpose."""
+    def test_the_wrapper_binds_the_reviewed_compute_spines(self):
+        """The production wrapper now consumes typed rows and binds the shared
+        price-action implementation; sealed material is still never executed."""
         import ast
         from pathlib import Path
 
@@ -590,7 +749,9 @@ class TestTheHandlerUnit:
                 modules.update(a.name for a in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 modules.add(node.module)
-        assert modules == {"__future__", "typing"}, sorted(modules)
+        assert "guanlan_v2.seats.price_action" in modules
+        assert "guanlan_v2.orchestration.data.source" in modules
+        assert "guanlan_v2.orchestration.lane_payloads" in modules
         # the material bytes are a sealed CONTRACT artifact, never a loader —
         # asserted on CALLS, so the docstring may keep naming what it forbids.
         called: set[str] = set()
@@ -605,11 +766,10 @@ class TestTheHandlerUnit:
 
 
 # =========================================================================== #
-# (c) the trunk is unharmed — the aux failure degrades, never blocks            #
+# (c) the reduced graph keeps every retained evidence face on the verdict path  #
 # =========================================================================== #
 class TestTheTrunkIsUnharmed:
-    """The decision spine ``sentiment → research-mgr → pm → trader`` is the
-    reduced preset's trunk, and neither aux node is on it."""
+    """Reduced is full-minus technical/news, not an evidence-bypassing graph."""
 
     TRUNK = ("sentiment", "research-mgr", "pm", "trader")
 
@@ -620,20 +780,26 @@ class TestTheTrunkIsUnharmed:
         }
         assert edges == {
             "sentiment": (),
-            "research-mgr": ("sentiment",),
+            "research-mgr": (
+                "price-action", "microstructure", "sentiment", "bull-r1", "bear-r1"),
             "pm": ("research-mgr", "sentiment"),
             "trader": ("pm",),
         }
 
-    def test_no_trunk_node_depends_on_either_aux_node(self, reduced, env):
+    def test_research_manager_blocks_on_both_retained_aux_nodes(self, reduced, env):
         aux_ids = {n.id for n in reduced.draft.nodes
                    if n.worker_id in PV_AUX}
         assert len(aux_ids) == 2
-        for node in reduced.draft.nodes:
-            if node.id in aux_ids:
-                continue
-            upstreams = {d.upstream_node_id for d in node.dependencies}
-            assert not (upstreams & aux_ids), (node.id, upstreams)
+        manager = next(n for n in reduced.draft.nodes if n.id == "research-mgr")
+        aux_dependencies = {
+            dependency.upstream_node_id: dependency.policy
+            for dependency in manager.dependencies
+            if dependency.upstream_node_id in aux_ids
+        }
+        assert aux_dependencies == {
+            "price-action": DependencyPolicy.BLOCK,
+            "microstructure": DependencyPolicy.BLOCK,
+        }
 
     def test_the_aux_nodes_are_not_sinks_so_their_failure_cannot_fail_the_run(
             self, reduced):
@@ -641,19 +807,20 @@ class TestTheTrunkIsUnharmed:
         assert not (set(reduced.draft.sink_node_ids) & aux_ids)
         assert "trader" in reduced.draft.sink_node_ids
 
-    def test_in_the_sealed_full_graph_the_only_consumer_edge_is_weakening(
+    def test_the_full_graph_blocks_on_both_real_aux_evidence_faces(
             self, full_draft):
-        """The ten-node preset DOES wire ``price-action`` onward — to
-        ``technical`` — and that edge is DEGRADE, so even there a FAILED aux
-        node weakens its consumer instead of blocking it.  (``microstructure``
-        has no consumer in either preset.)"""
+        """The full ten-seat verdict cannot survive either critical aux face."""
         aux_ids = {n.id for n in full_draft.nodes if n.worker_id in PV_AUX}
         consuming = [
             (n.id, d.upstream_node_id, d.policy)
             for n in full_draft.nodes for d in n.dependencies
             if d.upstream_node_id in aux_ids
         ]
-        assert consuming == [("technical", "price-action", DependencyPolicy.DEGRADE)]
+        assert consuming == [
+            ("technical", "price-action", DependencyPolicy.BLOCK),
+            ("research-mgr", "price-action", DependencyPolicy.BLOCK),
+            ("research-mgr", "microstructure", DependencyPolicy.BLOCK),
+        ]
 
     def test_the_admitted_plan_keeps_the_trunk_order(self, admitted):
         """Through the REAL admission of the same draft: the layering the

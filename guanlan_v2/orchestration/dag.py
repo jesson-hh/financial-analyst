@@ -93,11 +93,14 @@ from guanlan_v2.orchestration.runtime_contracts import RunResult
 from guanlan_v2.orchestration.schemas import ArtifactRef, NodeRun
 from guanlan_v2.orchestration.worker import (
     CapabilityGateway,
+    DEFAULT_LLM_ATTEMPT_TOKEN_RESERVATION,
     ExecutionRuntime,
     PreflightError,
     WorkerExecutionError,
     execute_node,
     execute_with_bounded_retry,
+    llm_invocation_evidence_warnings,
+    node_run_llm_invocations,
     prepare_input,
 )
 
@@ -107,11 +110,6 @@ __all__ = [
     "GateMetricError", "parse_gate_metric_material", "project_gate_metric",
     "evaluate_gate", "gate_downstream_disposition",
 ]
-
-#: The per-node token reservation ceiling (settlement clamps to actual usage, which
-#: never exceeds it). Kept small so a wide layer's simultaneous child holds stay well
-#: within the plan reservation; a static-v1 LLM node uses only a handful of tokens.
-_NODE_TOKEN_RESERVATION = 4096
 
 _CONTEXT_SCHEMA_REF = SchemaRef(name="ContextSnapshot", version="1")
 _RUN_RESULT_SCHEMA_REF = SchemaRef(name="RunResult", version="1")
@@ -127,6 +125,14 @@ _SUCCESS_STATUSES = frozenset({NodeStatus.COMPLETED, NodeStatus.DEGRADED})
 
 class DagRunError(Exception):
     """A defense-in-depth dispatch/topology failure raised before/at execution."""
+
+
+def _attempt_token_reservation(node, *, is_llm: bool) -> int:
+    """Resolve the semantic per-attempt hold, with one runtime-owned LLM default."""
+    requested = int(node.token_reservation)
+    if requested > 0:
+        return requested
+    return DEFAULT_LLM_ATTEMPT_TOKEN_RESERVATION if is_llm else 0
 
 
 # --------------------------------------------------------------------------- #
@@ -442,7 +448,8 @@ def _terminal_node_run(*, run_id, plan, node, worker, status, snapshot, clock,
         reason_code=reason_code, reason=reason, attempt_id=f"att-{run_id}-{node.id}-1", attempt=1,
         input_snapshot_digest=snapshot.content_digest, started_at=now, finished_at=now,
         output_keys=(), output_artifact_ids=(), tool_call_records=(), data_result_refs=(),
-        execution_evidence_refs=(), input_tokens=0, output_tokens=0)
+        execution_evidence_refs=(), input_tokens=0, output_tokens=0,
+        warnings=llm_invocation_evidence_warnings(0))
 
 
 def _upgrade_to_degraded(node_run: NodeRun) -> NodeRun:
@@ -661,11 +668,17 @@ async def run_plan(
 
             # ---- (8) reserve the candidate-bound child budget -------------- #
             is_llm = worker.execution.kind is ExecutionKind.LLM
+            token_reservation = _attempt_token_reservation(node, is_llm=is_llm)
             try:
                 node_res = budget.reserve_node(
                     plan_reservation_id=plan_reservation.reservation_id, node_id=node.id, attempt=1,
-                    tokens=_NODE_TOKEN_RESERVATION, llm_invocations=(1 if is_llm else 0),
-                    concurrency=1, idempotency_key=f"noderes:{run_id}:{node.id}:1")
+                    tokens=token_reservation, llm_invocations=(1 if is_llm else 0),
+                    concurrency=1, idempotency_key=f"noderes:{run_id}:{node.id}:1",
+                    # An existing LLM attempt after restart is ambiguous external
+                    # spend.  Never replay the provider merely because the budget
+                    # command itself is idempotent.  Deterministic nodes remain
+                    # safely replayable.
+                    reject_replay=is_llm)
             except BudgetExceeded as exc:
                 node_run = _terminal_node_run(
                     run_id=run_id, plan=plan, node=node, worker=worker,
@@ -711,9 +724,14 @@ async def run_plan(
         if v2_retry:
             # ---- v2: sequential bounded retry/repair per node (Task-8 seam) --- #
             # execute_with_bounded_retry owns each attempt's reserve/execute/settle,
-            # so run_plan neither pre-reserves nor post-settles a v2 node.
+            # so run_plan neither pre-reserves nor post-settles a v2 node.  The
+            # bounded worker path is deliberately synchronous (including sync
+            # provider gateways that may bridge to an async client).  Keep it off
+            # this coroutine's active event loop, while awaiting each node in order
+            # so the v2 layer remains sequential and deterministic.
             for prep in v2_preps:  # node-id order preserved (layer_nodes sorted)
-                node_run, artifact = _run_bounded_node(
+                node_run, artifact = await asyncio.to_thread(
+                    _run_bounded_node,
                     prep, plan=plan, runtime=runtime, ctx=ctx, stores=stores, registry=registry,
                     ctx_ref=ctx_ref, clock=clock, pool=pool, layer_index=layer_index,
                     budget=budget, run_id=run_id, plan_reservation=plan_reservation,
@@ -795,9 +813,8 @@ async def run_plan(
 
         # ---- settle actuals (reservations released to the plan pool) ------- #
         for pctx, node_run in to_settle:
-            actual_tokens = min(node_run.input_tokens + node_run.output_tokens,
-                                _NODE_TOKEN_RESERVATION)
-            actual_llm = 1 if (pctx.is_llm and node_run.output_tokens > 0) else 0
+            actual_tokens = node_run.input_tokens + node_run.output_tokens
+            actual_llm = node_run_llm_invocations(node_run) if pctx.is_llm else 0
             budget.settle(pctx.node_res.reservation_id, actual_tokens=actual_tokens,
                           actual_llm_invocations=actual_llm,
                           idempotency_key=f"settle:{run_id}:{pctx.node.id}:1")
@@ -929,7 +946,10 @@ _RESERVE_BY_ROLE = {"primary": "reserve_node", "retry": "reserve_retry",
                     "schema_repair": "reserve_schema_repair"}
 
 
-def _reserve_attempt(budget, role, run_id, node_id, ordinal, plan_reservation_id, is_llm):
+def _reserve_attempt(
+    budget, role, run_id, node_id, ordinal, plan_reservation_id, is_llm,
+    token_reservation,
+):
     """Idempotently (re-)mint the per-attempt child reservation the bounded-retry loop
     already minted under the same deterministic key, returning the reservation object
     so ``execute_node`` can preflight against it. Role selects the first-class ledger
@@ -939,7 +959,7 @@ def _reserve_attempt(budget, role, run_id, node_id, ordinal, plan_reservation_id
     op = getattr(budget, _RESERVE_BY_ROLE[role])
     return op(
         plan_reservation_id=plan_reservation_id, node_id=node_id, attempt=ordinal,
-        tokens=_NODE_TOKEN_RESERVATION, llm_invocations=(1 if is_llm else 0),
+        tokens=token_reservation, llm_invocations=(1 if is_llm else 0),
         concurrency=1, idempotency_key=key)
 
 
@@ -953,6 +973,7 @@ def _run_bounded_node(prep, *, plan, runtime, ctx, stores, registry, ctx_ref, cl
     gateways + ``execute_node``). Returns ``(final_node_run, final_artifact | None)``.
     """
     node, worker, gate, is_llm = prep.node, prep.worker, prep.gate, prep.is_llm
+    token_reservation = _attempt_token_reservation(node, is_llm=is_llm)
 
     def attempt_fn(ordinal, *, is_repair):
         role = "schema_repair" if is_repair else ("primary" if ordinal == 1 else "retry")
@@ -982,7 +1003,8 @@ def _run_bounded_node(prep, *, plan, runtime, ctx, stores, registry, ctx_ref, cl
         # the loop already minted this attempt's reservation; re-mint idempotently to
         # obtain the reservation object execute_node preflights against.
         node_res = _reserve_attempt(
-            budget, role, run_id, node.id, ordinal, plan_reservation.reservation_id, is_llm)
+            budget, role, run_id, node.id, ordinal, plan_reservation.reservation_id,
+            is_llm, token_reservation)
         try:
             gw = CapabilityGateway(
                 plan_digest=plan.plan_digest, worker=worker,
@@ -1018,7 +1040,7 @@ def _run_bounded_node(prep, *, plan, runtime, ctx, stores, registry, ctx_ref, cl
         max_attempts=node.max_attempts,
         schema_repairs_per_attempt=(schema_repairs if is_llm else 0),
         budget=budget, plan_reservation_id=plan_reservation.reservation_id,
-        node_token_reservation=_NODE_TOKEN_RESERVATION, attempt_fn=attempt_fn)
+        node_token_reservation=token_reservation, attempt_fn=attempt_fn)
     return outcome.node_run, outcome.artifact
 
 
@@ -1174,8 +1196,9 @@ def _reconcile_node_reservation(budget: BudgetLedger, plan_reservation, record: 
     A crash between the layer barrier and settlement leaves the executed node's child
     reservation ``reserved``; settle it from the durable record's actual token usage
     under the SAME idempotency key as the normal path (resumed settled totals equal a
-    clean run's). If the record cannot settle, release with ``crash-resume-reconcile``
-    so plan-level settle/release is never wedged by residue.
+    clean run's). A record whose true usage exceeds its reservation is an accounting
+    invariant violation: keep the hold active and fail loudly. Releasing it would erase
+    provider spend from the ledger.
     """
     state = budget.replay()
     for res_id, parent_id in state.parent_of.items():
@@ -1184,14 +1207,26 @@ def _reconcile_node_reservation(budget: BudgetLedger, plan_reservation, record: 
         res = state.reservations[res_id]
         if res.scope_id != record.node_id or res.status != "reserved":
             continue
-        actual_tokens = min(record.input_tokens + record.output_tokens, res.reserved_tokens)
-        actual_llm = 1 if (res.reserved_llm_invocations > 0 and record.output_tokens > 0) else 0
+        actual_tokens = record.input_tokens + record.output_tokens
+        try:
+            actual_llm = (
+                node_run_llm_invocations(record)
+                if res.reserved_llm_invocations > 0 else 0
+            )
+        except WorkerExecutionError as exc:
+            raise DagRunError(
+                "crash-resume reconciliation found no exact durable LLM-invocation "
+                f"evidence for reservation {res_id!r}; the hold remains active"
+            ) from exc
         try:
             budget.settle(res_id, actual_tokens=actual_tokens, actual_llm_invocations=actual_llm,
                           idempotency_key=f"settle:{run_id}:{record.node_id}:{record.attempt}")
-        except BudgetError:
-            budget.release(res_id, reason="crash-resume-reconcile",
-                           idempotency_key=f"release:{run_id}:{record.node_id}:reconcile")
+        except BudgetError as exc:
+            raise DagRunError(
+                "crash-resume reconciliation refused the durable NodeRun's exact "
+                f"usage ({actual_tokens} tokens) against reservation {res_id!r}; "
+                "the reservation remains active so spent tokens are not erased"
+            ) from exc
 
 
 def _settled_totals(budget: BudgetLedger, plan_reservation) -> tuple[int, int]:

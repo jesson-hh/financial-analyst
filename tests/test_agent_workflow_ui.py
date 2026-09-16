@@ -28,16 +28,16 @@ def test_workflow_artifact_replay_only_adds_clickable_card_never_drives_bench():
     output = node("const window={GUANLAN_BACKEND:''};\n" + DATA + """
 const payload={workspace_id:'rw_stock',session_id:'cs_123456789abc',workflow_id:'w123456789abc',name:'真实图',graph:{nodes:[{id:'f'}],edges:[]}};
 const ev={type:'tool_result',id:1,ok:true,tool:'ww_workflow_generate',artifact:{kind:'workflow',page:'factor',channel:'guanlan.workflow.import',payload}};
-const state=window.WW.apply({...window.WW.initState(),benchClosed:true},ev);
+const state=window.WW.apply(window.WW.initState(),ev);
 const items=window.WW.deriveItems([ev],false);
-console.log(JSON.stringify({activated:state.activated,artifacts:state.artifacts,closed:state.benchClosed,card:items.find(x=>x.kind==='workflow'),bad:window.WW.normalizeWorkflowArtifact({...payload,workspace_id:'../../other'})}));
+const legacyBenchState=['activated','artifacts','benchClosed'].filter(key=>Object.prototype.hasOwnProperty.call(state,key));
+console.log(JSON.stringify({legacyBenchState,card:items.find(x=>x.kind==='workflow'),bad:window.WW.normalizeWorkflowArtifact({...payload,workspace_id:'../../other'})}));
 """)
-    assert output["activated"] == output["artifacts"] == []
-    assert output["closed"] is True
+    assert output["legacyBenchState"] == []
     assert output["card"]["workflowId"] == "w123456789abc"
     assert output["bad"] is None
-    bench = (ROOT / "ui/console/console-bench.jsx").read_text(encoding="utf-8")
-    assert "if (art.kind === 'workflow') return" in bench
+    app = (ROOT / "ui/console/console-app.jsx").read_text(encoding="utf-8")
+    assert "<WwBench" not in app
 
 
 def test_import_message_requires_parent_origin_nonce_workspace_and_session():

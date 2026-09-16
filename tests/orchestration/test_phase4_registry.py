@@ -50,13 +50,13 @@ UPSTREAM_GOLDEN_SHA256 = {
     "schema_manifest_v1.json":
         "5de22e4727f874c4b1c53d1da6a82bb8666a2a85ae97a5b551280c687cae92d8",
     "data_schema_manifest_v1.json":
-        "08228c7401ef39ede2ddc61284d51b4d042a943bed6af6895ce99e263f63e3ee",
+        "df9391f1545e287616e3cbe296b0fc489806eb8de2ba0c759252a084a41988a2",
     "phase3_full_schema_manifest_v1.json":
-        "115f9dd2df76324a878211bb0f4609e9721fa062b0a100e4cecad99612837534",
+        "81b176300515a9067fa2174d6285454d3c89f0e5bf58676b5de0a7cedbb03793",
     "phase3_full_catalog_manifest_v1.json":
-        "a83d057f0657732d51dc14fd83c684796fad7ac2e5252365d3281f130aeb68ba",
+        "41209069bb32245993f6bb25ae5dedb7118ebabeead4775c7c300272ec16d9f5",
     "data_catalog_manifest_v1.json":
-        "9fb4ec5b1b37b03af9bac3a0507a39c5bf84b22c7a133dbc0503b15823ab511a",
+        "2afda0e62427dc2b1fa7cc5ab842edf2f234c66a7050fc06fb6c21cc95c17553",
 }
 
 #: the six Phase-4 contract modules the completeness firewall governs.

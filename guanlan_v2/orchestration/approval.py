@@ -611,6 +611,17 @@ class PlanApprovalCoordinator:
         """The durable terminal decision for a candidate, or ``None`` if undecided."""
         return self._decisions.get((request_id, candidate_plan_digest))
 
+    def load_approval_event(
+        self, request_id: NonEmptyStr, candidate_plan_digest: DigestHex
+    ) -> "RunEvent | None":
+        """Return the admission event already published for a durable decision.
+
+        This is a read-only recovery seam for downstream drivers.  It never
+        records or re-verifies a decision; :meth:`replay` has already healed the
+        persist-before-publish crash cut before exposing the coordinator.
+        """
+        return self._events.get((request_id, candidate_plan_digest))
+
     # ------------------------------------------------------------------ #
     # lease channel (Task 7b) — bounded standing approvals               #
     # ------------------------------------------------------------------ #

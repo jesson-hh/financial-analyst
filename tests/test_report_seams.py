@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -42,16 +44,22 @@ def test_console_call_buddy_report_injects_evidence_pack_env(tmp_path, monkeypat
     captured = {}
 
     def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
         captured["env"] = kwargs.get("env")
         return _FakeProc(returncode=0)
 
     monkeypatch.setattr("subprocess.run", fake_run)
-    monkeypatch.setattr(capi, "_freshest_report_md",
-                        lambda out_dir, code, t0: tmp_path / f"{code}_x.md")
+    def fake_freshest(out_dir, code, t0, *, asof=None):
+        captured["asof"] = asof
+        return tmp_path / f"{code}_x.md"
 
-    result = capi._call_buddy_report("SZ300750", None)
+    monkeypatch.setattr(capi, "_freshest_report_md", fake_freshest)
+
+    result = capi._call_buddy_report("SZ300750", "2026-06-15")
 
     assert calls == ["SZ300750"]
+    assert captured["cmd"][-2:] == ["--asof", "2026-06-15"]
+    assert captured["asof"] == "2026-06-15"
     assert captured["env"]["FA_EVIDENCE_PACK"] == str(tmp_path / "pack.json")
     assert result["ok"] is True
 
@@ -70,7 +78,8 @@ def test_console_call_buddy_report_no_pack_omits_env_key_spawn_proceeds(tmp_path
 
     monkeypatch.setattr("subprocess.run", fake_run)
     monkeypatch.setattr(capi, "_freshest_report_md",
-                        lambda out_dir, code, t0: tmp_path / f"{code}_x.md")
+                        lambda out_dir, code, t0, *, asof=None:
+                        tmp_path / f"{code}_x.md")
 
     result = capi._call_buddy_report("SZ000001", None)
 
@@ -93,7 +102,8 @@ def test_console_call_buddy_report_pack_not_ok_omits_env_key(tmp_path, monkeypat
 
     monkeypatch.setattr("subprocess.run", fake_run)
     monkeypatch.setattr(capi, "_freshest_report_md",
-                        lambda out_dir, code, t0: tmp_path / f"{code}_x.md")
+                        lambda out_dir, code, t0, *, asof=None:
+                        tmp_path / f"{code}_x.md")
 
     result = capi._call_buddy_report("SZ000001", None)
     assert "FA_EVIDENCE_PACK" not in captured["env"]
@@ -239,6 +249,55 @@ def test_server_fa_mainline_panel_setdefault_applied():
     assert os.environ.get("FA_MAINLINE_PANEL") == str(s._MAINLINE_PANEL_PATH)
 
 
+def test_server_import_keeps_events_gate_off_and_db_under_test_tmp(tmp_path):
+    """全局 Events fixture 先于 server secrets fallback，导入不得扩大写权限。"""
+    import guanlan_v2.server  # noqa: F401
+
+    assert os.environ.get("GUANLAN_EVENTS_INGEST") == "0"
+    configured = Path(os.environ["GUANLAN_EVENTS_DB"])
+    assert configured == tmp_path / "_isolated_events" / "events.db"
+    assert configured.is_relative_to(tmp_path)
+
+
+def test_server_secrets_loader_rejects_runtime_events_gate(
+    tmp_path, monkeypatch,
+):
+    """secrets.env 只补精确白名单凭据，任何运行/写门或未知项均拒绝。"""
+    import guanlan_v2.server as s
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text(
+        "GUANLAN_EVENTS_INGEST=1\n"
+        "GUANLAN_MCP_WRITE=1\n"
+        "GUANLAN_TELEGRAM_ENABLED=1\n"
+        "GUANLAN_EVENTS_DB=C:/must-not-use/events.db\n"
+        "GUANLAN_TEST_ONLY_API_KEY=fake-test-key\n"
+        "DEEPSEEK_API_KEY=fake-reviewed-key\n",
+        encoding="utf-8",
+    )
+    target = {}
+
+    status = s._load_secrets_env(path=secrets, environ=target)
+
+    assert target == {"DEEPSEEK_API_KEY": "fake-reviewed-key"}
+    assert status["loaded_keys"] == ["DEEPSEEK_API_KEY"]
+    assert status["blocked_keys"] == [
+        "GUANLAN_EVENTS_DB",
+        "GUANLAN_EVENTS_INGEST",
+        "GUANLAN_MCP_WRITE",
+        "GUANLAN_TELEGRAM_ENABLED",
+        "GUANLAN_TEST_ONLY_API_KEY",
+    ]
+    assert status["values_exposed"] is False
+    assert "fake-reviewed-key" not in json.dumps(status)
+
+    # Production launcher owns this opt-in explicitly; the denylist blocks only
+    # file injection and must not rewrite a real process environment choice.
+    target["GUANLAN_EVENTS_INGEST"] = "1"
+    s._load_secrets_env(path=secrets, environ=target)
+    assert target["GUANLAN_EVENTS_INGEST"] == "1"
+
+
 # ── ④ engine market_scanner.py 证据包捷径 ───────────────────────────────────
 
 def _write_pack(tmp_path, sections):
@@ -265,7 +324,9 @@ def test_scanner_evidence_pack_shortcut_returns_note_and_skips_loader(tmp_path):
     pack_path = _write_pack(tmp_path, {"board_eco": board})
 
     scanner = MarketScanner(memory_root=tmp_path, loader=_BoomLoader(), pack_path=str(pack_path))
-    result = asyncio.run(scanner._execute({"asof_date": "2026-07-12", "universe": "all"}))
+    result = asyncio.run(scanner._execute({
+        "asof_date": date.today().isoformat(), "universe": "all",
+    }))
 
     assert "平台证据" in result["note"]
     assert result["n_scanned"] == 0
@@ -287,7 +348,9 @@ def test_scanner_pack_without_board_eco_falls_back(tmp_path, monkeypatch):
                             pack_path=str(pack_path), universe_file=str(missing_universe))
 
     with pytest.raises(FileNotFoundError, match="No universe instruments found"):
-        asyncio.run(scanner._execute({"asof_date": "2026-07-12", "universe": "all"}))
+        asyncio.run(scanner._execute({
+            "asof_date": date.today().isoformat(), "universe": "all",
+        }))
 
 
 def test_scanner_no_pack_falls_back_and_max_scan_default_is_1500(tmp_path, monkeypatch):
@@ -300,7 +363,9 @@ def test_scanner_no_pack_falls_back_and_max_scan_default_is_1500(tmp_path, monke
     assert scanner._max_scan == 1500
 
     with pytest.raises(FileNotFoundError, match="No universe instruments found"):
-        asyncio.run(scanner._execute({"asof_date": "2026-07-12", "universe": "all"}))
+        asyncio.run(scanner._execute({
+            "asof_date": date.today().isoformat(), "universe": "all",
+        }))
 
 
 def test_scanner_read_evidence_pack_missing_file_returns_none(tmp_path):
@@ -330,5 +395,7 @@ def test_scanner_ctor_pack_path_wins_over_env(tmp_path, monkeypatch):
     monkeypatch.setenv("FA_EVIDENCE_PACK", str(env_pack))
 
     scanner = MarketScanner(memory_root=tmp_path, pack_path=str(ctor_pack_path))
-    result = asyncio.run(scanner._execute({"asof_date": "2026-07-12", "universe": "all"}))
+    result = asyncio.run(scanner._execute({
+        "asof_date": date.today().isoformat(), "universe": "all",
+    }))
     assert result["n_flagged"] == 100   # 来自 ctor pack(99+1),非 env pack(1+0)

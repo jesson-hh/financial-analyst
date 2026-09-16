@@ -2,7 +2,7 @@
 """Deterministic single-security quant chart for a research workspace.
 
 The module deliberately has no free-form HTTP client and no console/API
-dependency.  It reads the configured formal daily loader and canonical local
+dependency.  It reads the canonical local Qlib binary daily store and local
 CSI 300/XDXR stores.  Bounded calls through the existing trusted
 ``PytdxClient`` may verify/extend the latest stock day, CSI 300 day, and XDXR
 history; every resulting ``current_ready`` badge is gated by overlap identity,
@@ -111,9 +111,14 @@ def _normalise_close(raw: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
 
 def _load_stock_daily(code: str, start: str, end: str) -> pd.DataFrame:
-    from financial_analyst.data.loader_factory import get_default_loader
+    from financial_analyst.data.loaders.qlib_binary import QlibBinaryLoader
+    from financial_analyst.data.paths import get_data_paths
 
-    return get_default_loader().fetch_quote(code, start, end, "day")
+    # This chart is auto-callable by the scoped Codex bridge.  Pinning the
+    # loader to the configured local Qlib URI prevents a future default-loader
+    # switch from silently introducing a network request or cache write.
+    loader = QlibBinaryLoader(get_data_paths().qlib_uri)
+    return loader.fetch_quote(code, start, end, "day")
 
 
 def _load_tdx_stock(code: str, count: int) -> pd.DataFrame:

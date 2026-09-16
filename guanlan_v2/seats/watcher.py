@@ -24,30 +24,33 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import threading
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 _log = logging.getLogger("guanlan.seats.watcher")
 
-VAR = Path(__file__).resolve().parents[2] / "var"
-ARCHIVE_DIR = VAR / "archive"
+VAR = Path(os.environ.get("GUANLAN_SEATS_VAR_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var"
+))
+ARCHIVE_DIR = Path(os.environ.get("GUANLAN_ARCHIVE_DIR") or (VAR / "archive"))
 ASSIGNMENTS_PATH = VAR / "seats_watch_assignments.json"
 DECISIONS_LOG = VAR / "seats_decisions.jsonl"     # 与 api._DEC_LOG 同一文件(读侧)
 STATE_PATH = VAR / "seats_watch.json"   # {"enabled": bool, "daily_budget": int, "counts": {"2026-07-10": 2}}
 
 DEFAULT_BUDGET = 24                     # 日预算(次/日),烧钱保险
 _FLOOR_SECONDS = 10 * 60                # per-code 10min 硬地板(与前端旧口径一致)
-_SESSIONS = ((dtime(9, 30), dtime(11, 30)), (dtime(13, 0), dtime(15, 0)))
+_MARKET_TZ = timezone(timedelta(hours=8))
 _COUNTS_KEEP_DAYS = 14                  # counts 只留最近 N 个日键(防状态文件无限长)
+_STATE_LOCK = threading.RLock()         # 同进程 fast 预算的读改写事务锁
 
 
 # ───────────────────────── 状态文件 ─────────────────────────
 
-def load_state() -> dict:
-    """读状态;缺文件/坏 json → 默认 ``{"enabled": False, "daily_budget": 24, "counts": {}}``。"""
+def _load_state_unlocked() -> dict:
     try:
         st = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         if not isinstance(st, dict):
@@ -61,25 +64,48 @@ def load_state() -> dict:
     return st
 
 
-def save_state(st: dict) -> None:
-    """落盘状态(计划 schema 原样)。失败抛出——预算护栏丢失必须显形,不静默。"""
+def load_state() -> dict:
+    """Thread-safe state snapshot; a missing/bad file keeps the cold default."""
+    with _STATE_LOCK:
+        return _load_state_unlocked()
+
+
+def _save_state_unlocked(st: dict) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    tmp = STATE_PATH.with_name(
+        f"{STATE_PATH.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, STATE_PATH)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def save_state(st: dict) -> None:
+    """Atomic replacement.  Multi-step mutations use the helpers below."""
+    with _STATE_LOCK:
+        _save_state_unlocked(st)
 
 
 def set_enabled(on: bool) -> dict:
     """改 enabled 落盘,返回 get_status()(/seats/watch/toggle 用)。"""
-    st = load_state()
-    st["enabled"] = bool(on)
-    save_state(st)
+    with _STATE_LOCK:
+        st = _load_state_unlocked()
+        st["enabled"] = bool(on)
+        _save_state_unlocked(st)
     return get_status()
 
 
 # ─────────────── 编排层协作缝(Phase 9 Task 4 加法·只增)───────────────
-# 观澜编排回放/live 运行与本 watcher 共用同一个 24/日 LLM 预算池。两条缝均为纯加法:
-# note_external_llm_use 把编排消耗记进 tick 同一份 counts(gating 见得到);
-# orchestrated_codes 报出正被某编排运行接管的票,tick 对其记 skipped='orchestrated'
-# 避免双判。非编排票的既有 tick 门序逐位不变。
+# ``note_external_llm_use`` remains a compatibility seam for legacy callers of
+# this fast pool.  The unattended ten-seat lane no longer belongs here: it uses
+# ``WatchDeepAuthorizationStore``'s separate per-grant/global budget.  The other
+# seam, ``orchestrated_codes``, still prevents a separately-running orchestration
+# from duplicating the fast judgment for the same stock.
 
 _ORCHESTRATED_CODES: set[str] = set()
 
@@ -91,21 +117,73 @@ def orchestrated_codes() -> set[str]:
 
 
 def note_external_llm_use(n: int, now: Optional[datetime] = None) -> None:
-    """把 n 次外部(编排层)LLM 调用记进今日**同一份** counts —— tick 读的正是这份 —
-    使 watcher gating 看得见编排消耗的 24/日池。加法缝:tick 自身计数逻辑不变;n<=0 空操作。
-    落盘失败必抛(预算护栏丢失不静默,与 tick 同口径)。"""
+    """Charge a legacy external caller to the fast pool, atomically.
+
+    The ten-seat watch lane must not call this compatibility function; its
+    reserve/settle accounting is intentionally separate.  ``n<=0`` is a no-op;
+    a failed durable write remains loud.
+    """
     n = int(n)
     if n <= 0:
         return
     now = now or datetime.now()
     today = now.date().isoformat()
-    st = load_state()
-    counts = st.get("counts") or {}
-    counts[today] = int(counts.get(today) or 0) + n
-    for k in sorted(counts)[:-_COUNTS_KEEP_DAYS]:      # 只留最近 N 个日键(与 tick 同)
-        counts.pop(k, None)
-    st["counts"] = counts
-    save_state(st)
+    with _STATE_LOCK:
+        st = _load_state_unlocked()
+        counts = st.get("counts") or {}
+        counts[today] = int(counts.get(today) or 0) + n
+        for k in sorted(counts)[:-_COUNTS_KEEP_DAYS]:  # 只留最近 N 个日键(与 tick 同)
+            counts.pop(k, None)
+        st["counts"] = counts
+        _save_state_unlocked(st)
+
+
+def _try_reserve_fast_judgment(now: datetime, n: int = 1) -> bool:
+    """Atomically reserve ``n`` units from the fast watcher's daily pool.
+
+    The ten-seat lane has its own ``WatchDeepAuthorizationStore`` budget and
+    must not call this function.  A crash after this durable reservation remains
+    charged (fail-closed); a known pre-result refusal releases it below.
+    """
+    n = int(n)
+    if n < 1:
+        raise ValueError("fast budget reservation must be positive")
+    today = now.date().isoformat()
+    with _STATE_LOCK:
+        st = _load_state_unlocked()
+        counts = st.get("counts") or {}
+        used = int(counts.get(today) or 0)
+        budget = int(st.get("daily_budget") or DEFAULT_BUDGET)
+        if used + n > budget:
+            return False
+        counts[today] = used + n
+        for k in sorted(counts)[:-_COUNTS_KEEP_DAYS]:
+            counts.pop(k, None)
+        st["counts"] = counts
+        _save_state_unlocked(st)
+        return True
+
+
+def _release_fast_judgment(now: datetime, n: int = 1) -> None:
+    """Return a known-unused fast reservation without touching deep usage."""
+    n = int(n)
+    if n < 1:
+        raise ValueError("fast budget release must be positive")
+    today = now.date().isoformat()
+    with _STATE_LOCK:
+        st = _load_state_unlocked()
+        counts = st.get("counts") or {}
+        counts[today] = max(0, int(counts.get(today) or 0) - n)
+        st["counts"] = counts
+        _save_state_unlocked(st)
+
+
+def _record_last_tick(now: datetime) -> None:
+    """Update only the timestamp while preserving every concurrent budget write."""
+    with _STATE_LOCK:
+        st = _load_state_unlocked()
+        st["last_tick"] = now.isoformat(timespec="seconds")
+        _save_state_unlocked(st)
 
 
 # ────────── 编排接管登记(R17·注册半边,纯加法)──────────
@@ -312,7 +390,7 @@ def watching_codes() -> list[dict]:
 def get_status() -> dict:
     """Status with the legacy fields plus visible assignment control-plane rows."""
     st = load_state()
-    now = datetime.now()
+    now = _market_now()
     codes: list[str] = []
     for cw in watching_codes():
         if cw["code"] not in codes:
@@ -323,6 +401,7 @@ def get_status() -> dict:
     except Exception as exc:  # noqa: BLE001 — 状态仍可读,assignment 明确报错且不运行
         items = []
         assignment_error = f"{type(exc).__name__}: {exc}"
+    session = market_session_state(now)
     return {
         "enabled": bool(st.get("enabled")),
         "watching": codes,
@@ -332,6 +411,9 @@ def get_status() -> dict:
         "daily_budget": int(st.get("daily_budget") or DEFAULT_BUDGET),
         "last_tick": st.get("last_tick"),
         "market_open": _is_market_open(now),
+        "market_phase": session["market_phase"],
+        "calendar_status": session["calendar_status"],
+        "server_now": session["server_now"],
     }
 
 
@@ -355,20 +437,102 @@ def _calendar_dates():
     return _CAL_CACHE["dates"]
 
 
-def _is_market_open(now: datetime) -> bool:
-    """交易日(引擎日历,日历不覆盖该日/加载失败回退周一~五)+ 09:30-11:30 / 13:00-15:00。"""
-    d = now.date()
+def _market_now() -> datetime:
+    """Authoritative Shanghai/Hong-Kong market clock (injectable in tests)."""
+    return datetime.now(_MARKET_TZ)
+
+
+def _market_local(now: Optional[datetime] = None) -> datetime:
+    instant = now or _market_now()
+    if instant.tzinfo is None:
+        return instant.replace(tzinfo=_MARKET_TZ)
+    return instant.astimezone(_MARKET_TZ)
+
+
+def market_session_state(now: Optional[datetime] = None) -> dict[str, Any]:
+    """Return one session truth for watcher, quote APIs and the browser UI.
+
+    Intervals are half-open: 11:30 starts the lunch pause and 15:00 is closed.
+    The exchange calendar is authoritative while it covers the requested day;
+    beyond its range we retain the watcher's documented weekday fallback.
+    """
+    local = _market_local(now)
+    d = local.date()
     try:
         cal = _calendar_dates()
     except Exception:  # noqa: BLE001
         cal = None
+    calendar_status = "confirmed" if cal and d <= max(cal) else "weekday_fallback"
     if cal and d <= max(cal):
-        if d not in cal:
-            return False
-    elif d.weekday() >= 5:       # 日历缺失/不覆盖 → 周一~五兜底
-        return False
-    t = now.time()
-    return any(a <= t <= b for a, b in _SESSIONS)
+        trading_day = d in cal
+    else:
+        trading_day = d.weekday() < 5
+    if not trading_day:
+        phase = "non_trading_day"
+    else:
+        t = local.time().replace(tzinfo=None)
+        if t < dtime(9, 30):
+            phase = "preopen"
+        elif t < dtime(11, 30):
+            phase = "open"
+        elif t < dtime(13, 0):
+            phase = "lunch_break"
+        elif t < dtime(15, 0):
+            phase = "open"
+        else:
+            phase = "closed"
+    return {
+        "market_open": phase == "open",
+        "market_phase": phase,
+        "calendar_status": calendar_status,
+        "session_date": d.isoformat(),
+        "server_now": local.isoformat(timespec="seconds"),
+    }
+
+
+def quote_session_state(asof_raw: Any, now: Optional[datetime] = None,
+                        *, stale_after_seconds: int = 180) -> dict[str, Any]:
+    """Classify a provider quote; transport success alone never means live.
+
+    Tencent's ``asof`` is ``YYYYMMDDHHMMSS``.  A quote is live only inside an
+    open exchange session, on the same Shanghai date, and within the age bound.
+    """
+    local = _market_local(now)
+    session = market_session_state(local)
+    raw = str(asof_raw or "").strip()
+    observed = None
+    if len(raw) >= 12 and raw[:12].isdigit():
+        stamp = raw[:14] if len(raw) >= 14 and raw[:14].isdigit() else raw[:12] + "00"
+        try:
+            observed = datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(tzinfo=_MARKET_TZ)
+        except ValueError:
+            observed = None
+    age = (local - observed).total_seconds() if observed is not None else None
+    same_session = bool(observed and observed.date() == local.date())
+    live = bool(session["market_open"] and same_session and age is not None
+                and -60 <= age <= max(1, int(stale_after_seconds)))
+    if live:
+        quote_state = "live"
+    elif session["market_phase"] == "lunch_break":
+        quote_state = "paused"
+    elif session["market_phase"] in {"closed", "non_trading_day", "preopen"}:
+        quote_state = "closed"
+    elif observed is None:
+        quote_state = "unverifiable"
+    else:
+        quote_state = "stale"
+    return {
+        **session,
+        "fresh": live,
+        "quote_state": quote_state,
+        "observed_at": observed.isoformat(timespec="seconds") if observed else None,
+        "quote_age_seconds": round(age, 1) if age is not None else None,
+    }
+
+
+def _is_market_open(now: datetime) -> bool:
+    """Compatibility boolean over :func:`market_session_state`."""
+    return bool(market_session_state(now)["market_open"])
 
 
 def _throttle_ok(code: str, freq: str, last_ts, now: datetime) -> bool:
@@ -394,37 +558,72 @@ def _throttle_ok(code: str, freq: str, last_ts, now: datetime) -> bool:
 # ───────────────────────── refs best-effort 服务端解析 ─────────────────────────
 
 def _lookup_card(rid: str) -> Optional[dict]:
-    """卡 id → dict(guanlan_v2.cards 后端 store,状态即目录);查不到/异常 → None。"""
+    """卡 id → dict(guanlan_v2.cards 后端 store,状态即目录)。
+
+    ``KeyError`` 是正常的「未找到」;store 损坏/不可读等故障必须向上抛,
+    由 :func:`_resolve_refs` 记入可观测 diagnostics,不再与「没有这张卡」
+    静默混为同一个 ``None``。
+    """
     try:
         from guanlan_v2.cards.store import CardStore
         return CardStore().load(str(rid)).to_dict()
-    except Exception:  # noqa: BLE001 — KeyError(无此卡)/store 故障一律 None(跳过)
+    except KeyError:
         return None
 
 
 def _lookup_factor(rid: str) -> Optional[dict]:
-    """因子 id → dict(factorlib 注册表 base/+mined/,按 name 命中);查不到 → None。"""
-    try:
-        from guanlan_v2.factorlib.store import LibraryFactorStore
-        for e in LibraryFactorStore().list_factors(validate=False):
-            if str(e.get("name")) == str(rid):
-                return e
-    except Exception:  # noqa: BLE001
-        pass
+    """因子 id → dict(factorlib 注册表 base/+mined/,按 name 命中);查不到 → None。
+
+    库不可读时向上抛,让 :func:`_resolve_refs` 能区分「不存在」与
+    「解析服务故障」。
+    """
+    from guanlan_v2.factorlib.store import LibraryFactorStore
+    for e in LibraryFactorStore().list_factors(validate=False):
+        if str(e.get("name")) == str(rid):
+            return e
     return None
 
 
-def _resolve_refs(refs) -> tuple:
+def _ref_error(rid: str, stage: str, exc: Exception) -> dict:
+    """引用解析异常的有界诊断形状(不带 traceback,不污染 decide payload)。"""
+    return {
+        "ref": rid,
+        "stage": stage,
+        "error_type": type(exc).__name__,
+        "message": str(exc)[:240],
+    }
+
+
+def _resolve_refs(refs, *, include_diagnostics: bool = False) -> tuple:
     """策略 refs(卡/因子 id)→ (cards, recipe_factors),按 decide payload 既有字段名
     (与前端 recipeForStrategy 同形):卡 ``{name,insight,verdict,conf,ic}``、因子
-    ``{id,name,ic,expr}``。查不到(前端专有 GL 实体等)跳过,绝不编造。"""
+    ``{id,name,ic,expr}``。查不到(前端专有 GL 实体等)跳过,绝不编造。
+
+    默认仍返回旧的二元组,保留现有调用兼容。``include_diagnostics=True``
+    时追加第三项 ``ref_resolution``:
+    ``{requested,resolved,unresolved,errors,status}``。它区分「未找到」与「store
+    故障」,且在宣言过 refs 但全部未解析时显式标为 ``unresolved_all``。
+    """
     cards: list = []
     factors: list = []
-    for rid in (refs or []):
-        rid = str(rid or "").strip()
+    diagnostics = {
+        "requested": [],
+        "resolved": [],
+        "unresolved": [],
+        "errors": [],
+        "status": "no_refs",
+    }
+    raw_refs = [refs] if isinstance(refs, str) else (refs or [])
+    for raw_rid in raw_refs:
+        rid = str(raw_rid or "").strip()
         if not rid:
             continue
-        c = _lookup_card(rid)
+        diagnostics["requested"].append(rid)
+        c = None
+        try:
+            c = _lookup_card(rid)
+        except Exception as exc:  # noqa: BLE001 — 单个 store 故障记账,继续尝试因子库
+            diagnostics["errors"].append(_ref_error(rid, "card", exc))
         if c:
             cards.append({
                 "name": c.get("title") or rid,
@@ -433,8 +632,13 @@ def _resolve_refs(refs) -> tuple:
                 "conf": c.get("conf") if c.get("conf") is not None else None,
                 "ic": c.get("ic") or None,
             })
+            diagnostics["resolved"].append({"ref": rid, "kind": "card"})
             continue
-        f = _lookup_factor(rid)
+        f = None
+        try:
+            f = _lookup_factor(rid)
+        except Exception as exc:  # noqa: BLE001 — 本 ref 未解析,但不拖垮其他 refs
+            diagnostics["errors"].append(_ref_error(rid, "factor", exc))
         if f:
             _ic = f.get("ic")
             factors.append({
@@ -443,6 +647,20 @@ def _resolve_refs(refs) -> tuple:
                 "ic": "" if _ic is None else str(_ic),
                 "expr": str(f.get("expr") or ""),
             })
+            diagnostics["resolved"].append({"ref": rid, "kind": "factor"})
+            continue
+        diagnostics["unresolved"].append(rid)
+
+    requested_n = len(diagnostics["requested"])
+    resolved_n = len(diagnostics["resolved"])
+    if requested_n:
+        diagnostics["status"] = (
+            "resolved_all" if resolved_n == requested_n
+            else "resolved_partial" if resolved_n
+            else "unresolved_all"
+        )
+    if include_diagnostics:
+        return cards, factors, diagnostics
     return cards, factors
 
 
@@ -485,9 +703,48 @@ def _decide_production(payload: dict) -> dict:
     return asyncio.run(_api._decide_impl(payload))
 
 
+_QUOTE_PAYLOAD_KEYS = (
+    "price", "open", "high", "low", "asof", "volume", "amount",
+    "turnover", "vol_ratio", "source", "fresh",
+)
+
+
+def _quote_for_payload(quote: Any) -> Optional[dict]:
+    """Return the freshness-gated, allow-listed quote evidence for ``decide``.
+
+    ``tick`` remains the authority that rejects stale quotes before building a
+    payload.  This second check prevents a direct/helper call from accidentally
+    leaking a stale provider object into an LLM prompt.  Unknown provider fields
+    (account ids, transport diagnostics, etc.) are deliberately not forwarded.
+    ``turnover_rate`` is Tencent's source spelling; the payload contract exposes
+    the provider-neutral ``turnover`` name.  Source remains empty when the
+    upstream quote did not declare one -- it is never guessed here.
+    """
+    if not isinstance(quote, dict) or not quote.get("fresh"):
+        return None
+    turnover = (quote.get("turnover") if "turnover" in quote
+                else quote.get("turnover_rate"))
+    out = {
+        "price": quote.get("price"),
+        "open": quote.get("open"),
+        "high": quote.get("high"),
+        "low": quote.get("low"),
+        "asof": quote.get("asof"),
+        "volume": quote.get("volume"),
+        "amount": quote.get("amount"),
+        "turnover": turnover,
+        "vol_ratio": quote.get("vol_ratio"),
+        "source": quote.get("source") if quote.get("source") is not None else "",
+        "fresh": True,
+    }
+    # Contract pin: adding a field to the provider response must never silently
+    # expand the evidence surface consumed downstream.
+    assert tuple(out) == _QUOTE_PAYLOAD_KEYS
+    return out
+
+
 def _quote_production(code: str) -> dict:
-    """实时报价 fresh 门(腾讯,与 /seats/quote 同源采集器):盘中报价日==今日 → fresh。
-    停牌/断流 → 报价日停在旧日 → fresh=False(tick 只在盘中跑,口径与端点等价)。"""
+    """Session- and age-aware quote gate shared with ``/seats/quote``."""
     from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
     c = _norm_code(code)
     data = TencentQuoteCollector().fetch([c])
@@ -495,10 +752,34 @@ def _quote_production(code: str) -> dict:
     if not q:
         return {"fresh": False}
     asof_raw = str(q.get("asof") or "")
-    asof_date = (f"{asof_raw[0:4]}-{asof_raw[4:6]}-{asof_raw[6:8]}"
-                 if len(asof_raw) >= 8 and asof_raw[:8].isdigit() else None)
-    fresh = bool(asof_date) and asof_date == datetime.now().date().isoformat()
-    return {"fresh": fresh, "name": q.get("name"), "price": q.get("price"), "asof": asof_raw}
+    session = quote_session_state(asof_raw)
+    return {"fresh": session["fresh"], "name": q.get("name"),
+            "price": q.get("price"), "open": q.get("open"),
+            "high": q.get("high"), "low": q.get("low"),
+            "asof": asof_raw, "volume": q.get("volume"),
+            "amount": q.get("amount"),
+            "turnover": (q.get("turnover") if "turnover" in q
+                         else q.get("turnover_rate")),
+            "vol_ratio": q.get("vol_ratio"),
+            # This production adapter itself selects Tencent, so the provider
+            # is known even though the collector's row schema predates a
+            # ``source`` field.  Generic/injected quotes remain unguessed in
+            # ``_quote_for_payload`` above.
+            "source": q.get("source") or "tencent_realtime_quote",
+            "market_open": session["market_open"],
+            "market_phase": session["market_phase"],
+            "quote_state": session["quote_state"],
+            "quote_age_seconds": session["quote_age_seconds"]}
+
+
+def _server_now() -> datetime:
+    """Return the local wall-clock used for a production decision anchor.
+
+    Kept as a tiny seam so a production tick can take its anchor *after* the
+    quote request, while deterministic tests/replays continue to pass an
+    explicit ``now`` to :func:`tick`.
+    """
+    return datetime.now()
 
 
 _CODE6_RE = re.compile(r"(\d{6})")
@@ -600,7 +881,15 @@ def _build_payload(cw: dict, now: datetime, quote: dict) -> dict:
     持仓语境(2026-08-03):台账已持有本票 → 带真入场价 hold_entry,后端据此把问题
     从「是否进场」换成「这笔持仓怎么处置」;未持有 → 不落该键,payload 逐字节同旧。
     """
-    cards, factors = _resolve_refs(cw.get("refs"))
+    cards, factors, ref_resolution = _resolve_refs(
+        cw.get("refs"), include_diagnostics=True)
+    quote_evidence = _quote_for_payload(quote)
+    if ref_resolution["status"] == "unresolved_all":
+        _log.warning(
+            "watcher strategy refs 全部未解析 code=%s strategy=%s refs=%s errors=%s",
+            cw.get("code"), cw.get("strategy_id"),
+            ref_resolution["unresolved"], ref_resolution["errors"],
+        )
     name = str((quote or {}).get("name") or "") or cw["code"]
     _hold = _hold_entry_for(cw["code"])
     # Compatibility seam for existing unit/orchestration fakes that monkeypatch
@@ -619,16 +908,18 @@ def _build_payload(cw: dict, now: datetime, quote: dict) -> dict:
     mode = str(cw.get("thinking_mode") or "fast").strip().lower()
     return {
         **({"hold_entry": _hold} if _hold is not None else {}),
+        **({"quote": quote_evidence} if quote_evidence is not None else {}),
         "code": cw["code"],
         "name": name,
         "date": (now.date().isoformat() if effective_tf == "day"
-                 else now.isoformat(timespec="minutes")),
+                 else now.isoformat(timespec="seconds")),
         "seat_cn": cw.get("name") or "盯盘",
         "creed": cw.get("creed") or "",
         "strategy_id": cw.get("strategy_id") or "",
         "strategy_name": cw.get("name") or "",
         "cards": cards,
         "recipe_factors": factors,
+        "ref_resolution": ref_resolution,
         "w": cw.get("w") or 0,
         "pa": bool(cw.get("pa")),
         "pa_method": cw.get("pa_method") or "",
@@ -653,7 +944,15 @@ def tick(now: Optional[datetime] = None,
 
     返回 ``{"judged": [codes], "skipped": {code: reason}}``。全可注入(测试用桩);
     生产缺省 = _decide_production / _quote_production / _decisions_tail_production。"""
-    now = now or datetime.now()
+    # ``now`` has two deliberately different roles.  The first value is the
+    # tick/session/budget/throttle clock and must remain stable for the whole
+    # tick.  In production (no explicit ``now``), the evidence payload gets a
+    # second, post-quote local clock reading below.  This closes the small
+    # provider-latency race where quote.asof can be a second newer than the
+    # clock captured before the network request.  Never derive that anchor
+    # from quote.asof itself: provider timestamps are evidence, not authority.
+    explicit_now = now is not None
+    now = now if explicit_now else _server_now()
     st = load_state()
     if not st.get("enabled"):
         return {"judged": [], "skipped": {"_": "disabled"}}
@@ -684,9 +983,6 @@ def tick(now: Optional[datetime] = None,
         if code in orchestrated:               # 被某编排运行接管 → 不双判
             skipped[code] = "orchestrated"
             continue
-        if used + len(judged) >= budget:
-            skipped[code] = "budget_exhausted"
-            continue
         try:
             q = quote_fn(code) or {}
         except Exception as e:  # noqa: BLE001 — 单票报价故障不拖垮整拍
@@ -713,31 +1009,46 @@ def tick(now: Optional[datetime] = None,
             skipped[code] = "throttled"
             continue
         try:
-            payload = _build_payload(cw, now, q)
+            decision_anchor = now if explicit_now else _server_now()
+            payload = _build_payload(cw, decision_anchor, q)
         except Exception as e:  # malformed/non-runnable assignment must fail closed per code
             skipped[code] = f"assignment_invalid:{type(e).__name__}"
+            continue
+        try:
+            reserved = _try_reserve_fast_judgment(now)
+        except Exception as e:  # the guardrail itself being unwritable is a hard per-code stop
+            _log.error("watcher fast 预算预留失败 code=%s: %s", code, e)
+            skipped[code] = f"budget_state_error:{type(e).__name__}"
+            continue
+        if not reserved:
+            skipped[code] = "budget_exhausted"
             continue
         try:
             res = decide_fn(payload) or {}
         except Exception as e:  # noqa: BLE001 — 单票 decide 故障不拖垮整拍
             _log.warning("watcher decide 异常 code=%s: %s", code, e)
+            try:
+                _release_fast_judgment(now)
+            except Exception as release_exc:  # fail-closed: leaked reservation stays charged
+                _log.error("watcher fast 预算归还失败 code=%s: %s", code, release_exc)
             skipped[code] = f"decide_error:{type(e).__name__}"
             continue
         if isinstance(res, dict) and res.get("ok") is False:
+            try:
+                _release_fast_judgment(now)
+            except Exception as release_exc:
+                _log.error("watcher fast 预算归还失败 code=%s: %s", code, release_exc)
             skipped[code] = str(res.get("reason") or "decide_failed")[:120]
             continue
         judged.append(code)
 
-    # 计数/last_tick 落盘(判 0 票也记 last_tick,状态端点可见「最近一拍」)
-    counts[today] = used + len(judged)
-    for k in sorted(counts)[:-_COUNTS_KEEP_DAYS]:      # 只留最近 N 个日键
-        counts.pop(k, None)
-    st["counts"] = counts
-    st["last_tick"] = now.isoformat(timespec="seconds")
+    # Each success was durably reserved before its call.  Only update last_tick
+    # from a fresh state snapshot, so no concurrent budget write can be replaced
+    # by the stale ``st`` captured at the beginning of this (possibly long) tick.
     try:
-        save_state(st)
+        _record_last_tick(now)
     except Exception as e:  # noqa: BLE001 — 预算护栏写失败必须留痕(下拍重读仍以盘上为准)
-        _log.error("watcher 状态落盘失败(预算计数可能丢失): %s", e)
+        _log.error("watcher last_tick 状态落盘失败: %s", e)
     return {"judged": judged, "skipped": skipped}
 
 

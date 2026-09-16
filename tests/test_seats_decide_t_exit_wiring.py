@@ -4,6 +4,7 @@
 # 红线:空仓路径 prompt/落盘/响应形状逐字节不变;30min 频不注入(参数为日线口径)。
 import sys
 import json as _json
+from datetime import datetime
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -40,7 +41,7 @@ class _CapLLM:
 
 class _DayLoader:
     def fetch_quote(self, code, start, end, freq):
-        ts = pd.date_range("2026-02-01", periods=60, freq="D")
+        ts = pd.date_range(end=end, periods=60, freq="D")
         return pd.DataFrame({"trade_date": ts,
                              "open": [50 + i * 0.1 for i in range(60)],
                              "high": [50 + i * 0.1 + 0.5 for i in range(60)],
@@ -104,15 +105,58 @@ def test_flat_path_unchanged(tmp_path, monkeypatch):
     assert "exit_engine" not in rec and "t_ref" not in rec
 
 
-def test_quote_enables_daytype_tendency(tmp_path, monkeypatch):
+def _stub_external_evidence(monkeypatch):
+    from guanlan_v2.seats import decision_evidence
+
+    monkeypatch.setattr(decision_evidence, "build_decision_evidence", lambda code, anchor, **kw: {
+        "status": "empty", "source": "test", "asof": str(anchor),
+        "coverage": {"included_count": 0}, "news": {}, "microstructure": {},
+        "items": [], "errors": [], "prompt": "", "mode": "pit" if kw.get("replay") else "live",
+    })
+
+
+def test_accepted_live_quote_enables_daytype_tendency(tmp_path, monkeypatch):
     _CAP.clear()
     _REPLY["v"] = _HELD_REPLY
+    _stub_external_evidence(monkeypatch)
+    from guanlan_v2.seats import intraday, watcher
+    monkeypatch.setattr(intraday, "build_intraday_context", lambda code, df: None)
+    monkeypatch.setattr(
+        watcher, "market_session_state",
+        lambda _now=None: {"market_open": True, "market_phase": "open"},
+    )
     client = _client(monkeypatch, tmp_path)
-    r = _post(client, hold_entry=52.0,
-              quote={"open": 55.0, "price": 55.05})   # 方向占振幅比极小 → 暂偏震荡
+    now = datetime.now().replace(microsecond=0)
+    r = _post(client, date=now.strftime("%Y-%m-%d"), hold_entry=52.0,
+              quote={"open": 55.0, "price": 55.05,
+                     "asof": now.isoformat(timespec="seconds"),
+                     "source": "tencent_realtime_quote"})   # 方向占振幅比极小 → 暂偏震荡
     assert r["ok"]
+    assert r["quote_diagnostic"]["status"] == "accepted"
     assert "日型倾向" in _CAP["user"]
     assert "日型倾向" in r["t_ref"]["text"]
+
+
+def test_replay_raw_quote_cannot_enable_daytype_tendency(tmp_path, monkeypatch):
+    _CAP.clear()
+    _REPLY["v"] = _HELD_REPLY
+    _stub_external_evidence(monkeypatch)
+    client = _client(monkeypatch, tmp_path)
+    now = datetime.now().replace(microsecond=0)
+    r = _post(
+        client,
+        date=now.strftime("%Y-%m-%d"),
+        history_replay=True,
+        hold_entry=52.0,
+        price=55.05,
+        quote={"open": 55.0, "price": 55.05,
+               "asof": now.isoformat(timespec="seconds"),
+               "source": "tencent_realtime_quote"},
+    )
+    assert r["ok"]
+    assert r["quote_diagnostic"] == {"status": "ignored", "reason": "history_replay"}
+    assert "日型倾向" not in _CAP["user"]
+    assert "日型倾向" not in r["t_ref"]["text"]
 
 
 def test_30min_freq_not_injected(tmp_path, monkeypatch):

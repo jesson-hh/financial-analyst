@@ -658,17 +658,92 @@ async def handle_memory_cmd(args: List[str]) -> None:
 # One-shot report runner (called by CLI + TUI)
 # ---------------------------------------------------------------------------
 
+
+def _normalize_report_asof(asof) -> str:
+    if asof in (None, ""):
+        return date.today().isoformat()
+    if not isinstance(asof, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", asof):
+        raise ValueError("asof must be YYYY-MM-DD")
+    try:
+        parsed = date.fromisoformat(asof)
+    except ValueError as exc:
+        raise ValueError(f"invalid asof date: {asof}") from exc
+    if parsed > date.today():
+        raise ValueError(f"asof cannot be in the future: {asof}")
+    return asof
+
+
+def _is_historical_report_asof(asof: str) -> bool:
+    return asof < date.today().isoformat()
+
+
+def _report_progress_path(out_dir: Path, code: str, asof: str) -> Path:
+    if _is_historical_report_asof(asof):
+        return out_dir / f"{code}_{asof}_progress.json"
+    return out_dir / f"{code}_progress.json"
+
+
+def _is_company_research_report_output(writer_output) -> bool:
+    """Recognise new typed outputs and pre-migration company sidecars."""
+    if getattr(writer_output, "report_kind", None) == "company_research":
+        return True
+    output_json_path = getattr(writer_output, "output_json_path", None)
+    if not output_json_path:
+        return False
+    try:
+        sidecar = json.loads(Path(output_json_path).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    # ReportWriter deliberately writes this key (including an explicit null)
+    # only for company_research mode.  Such reports are immutable workspace
+    # research artifacts, not trading recommendations for the stock timeline.
+    return isinstance(sidecar, dict) and "company_risk_input" in sidecar
+
+
+def _append_report_timeline_if_current(
+    code: str, asof: str, writer_output, md_path: Path,
+) -> bool:
+    if _is_company_research_report_output(writer_output):
+        console.print(f"[dim]company research report: timeline append skipped ({code} · {asof})[/dim]")
+        return False
+    if _is_historical_report_asof(asof):
+        console.print(f"[dim]historical report: timeline append skipped ({code} · {asof})[/dim]")
+        return False
+    try:
+        from financial_analyst.data.loaders.stock_timeline import StockTimelineLoader
+
+        def _v(x):
+            return "—" if x in (None, "") else x
+
+        line = (f"- {asof} 觀瀾深度研报:评级 {_v(getattr(writer_output, 'rating_overall', None))}/10"
+                f" · 行动 {_v(getattr(writer_output, 'action', None))}"
+                f" · 目标价 {_v(getattr(writer_output, 'target_price', None))}"
+                f" · 止损 {_v(getattr(writer_output, 'stop_loss', None))}"
+                f" · 仓位 {_v(getattr(writer_output, 'position_pct', None))}%"
+                f" · 全文 out/{md_path.name}")
+        StockTimelineLoader().append_entry(code, line)
+        console.print(f"[dim]timeline updated: {code}[/dim]")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[yellow]timeline append skipped: {exc}[/yellow]")
+        return False
+
+
 async def run_report_oneshot(code: str, asof, out_dir: Path, trace: bool = False) -> bool:
     """跑一份单股研报。返回 True=report-writer 成功产出;False=失败/取消。
     调用方(CLI)据此决定退出码,避免失败时进程仍 exit 0 被下游误判成功。"""
+    try:
+        asof = _normalize_report_asof(asof)
+    except ValueError as exc:
+        console.print(f"[bold red]Invalid report asof:[/bold red] {exc}")
+        return False
+
     _ensure_registered()
 
     from financial_analyst.agent.memory_index import MemoryIndex
     from financial_analyst.agent.orchestrator import Orchestrator
     from financial_analyst.settings import Settings
     from financial_analyst.swarm import load_preset
-
-    asof = asof or date.today().isoformat()
 
     # Build shared FTS5 index (incremental — cheap if already up-to-date)
     settings = Settings()
@@ -705,7 +780,7 @@ async def run_report_oneshot(code: str, asof, out_dir: Path, trace: bool = False
 
     # Progress state file — GuanLan UI polls this via /report-progress?code=X
     import time as _t
-    progress_path = out_dir / f"{code}_progress.json"
+    progress_path = _report_progress_path(out_dir, code, asof)
 
     def _write_progress(extra: dict = None) -> None:
         snapshot = {
@@ -789,27 +864,7 @@ async def run_report_oneshot(code: str, asof, out_dir: Path, trace: bool = False
                 f"\n[bold green]Report saved:[/bold green] {md_path}\n"
                 f"[yellow]inline render failed: {exc}[/yellow]"
             )
-        # 互通审计 P1⑦:研报结论回写个股时间线(最新在底,下次研报「上次回顾」即可见)。
-        # 尽力而为:回写失败只打日志,绝不影响报告主流程。
-        try:
-            from financial_analyst.data.loaders.stock_timeline import StockTimelineLoader
-
-            _o = writer_result.output
-            _d = md_path.stem.split("_")[-1]
-
-            def _v(x):
-                return "—" if x in (None, "") else x
-
-            _line = (f"- {_d} 觀瀾深度研报:评级 {_v(getattr(_o, 'rating_overall', None))}/10"
-                     f" · 行动 {_v(getattr(_o, 'action', None))}"
-                     f" · 目标价 {_v(getattr(_o, 'target_price', None))}"
-                     f" · 止损 {_v(getattr(_o, 'stop_loss', None))}"
-                     f" · 仓位 {_v(getattr(_o, 'position_pct', None))}%"
-                     f" · 全文 out/{md_path.name}")
-            StockTimelineLoader().append_entry(code, _line)
-            console.print(f"[dim]timeline updated: {code}[/dim]")
-        except Exception as exc:  # noqa: BLE001
-            console.print(f"[yellow]timeline append skipped: {exc}[/yellow]")
+        _append_report_timeline_if_current(code, asof, writer_result.output, md_path)
         return True
     else:
         console.print("\n[bold red]Failed.[/bold red]")

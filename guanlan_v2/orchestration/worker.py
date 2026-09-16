@@ -110,6 +110,7 @@ from guanlan_v2.orchestration.digest import (
     content_digest,
 )
 from guanlan_v2.orchestration.enums import ExecutionKind, NodeStatus, ToolCallRequirement
+from guanlan_v2.orchestration.model_tiers import ModelTierUnconfigured
 from guanlan_v2.orchestration.eventstore import (
     EventStoreError,
     EventAppendCommand,
@@ -156,7 +157,11 @@ __all__ = [
     "PreflightError",
     "CapabilityGatewayError",
     "PromptBindingError",
+    "ModelInvocationEvidenceError",
+    "llm_invocation_evidence_warnings",
+    "node_run_llm_invocations",
     "EvidenceTokenError",
+    "DEFAULT_LLM_ATTEMPT_TOKEN_RESERVATION",
     # DTOs
     "ExecutionRuntime",
     "EvidenceIssuanceToken",
@@ -209,12 +214,30 @@ CODE_VERSION = "worker-executor-v1"
 ASSEMBLER_ID = "static-prompt-assembler"
 ASSEMBLER_VERSION = "1"
 PROMPT_BRIDGE_ID = "runtime.prompt"
+#: Runtime-owned fallback for an LLM PlanNode whose semantic
+#: ``token_reservation`` is zero.  The production gateway treats this as a hard
+#: per-provider-call ceiling over prompt + completion tokens.
+DEFAULT_LLM_ATTEMPT_TOKEN_RESERVATION = 32_768
+#: Versioned contract binding the gateway's deterministic expansion of exact
+#: content-addressed untrusted-block refs into the provider's user-data channel.
+#: It is persisted inside canonical request bytes before PromptAssemblyRecord
+#: creation, so audit/replay can name the expansion algorithm the model saw.
+UNTRUSTED_DATA_HYDRATION_SECTION = "untrusted_data_hydration"
+UNTRUSTED_DATA_HYDRATOR_ID = "worker-seat.untrusted-data-hydrator"
+UNTRUSTED_DATA_HYDRATOR_VERSION = "1"
+UNTRUSTED_DATA_MAX_TOTAL_BYTES = 65_536
 #: sentinel priority for the executor-owned prompt token (excluded from bridge
 #: min/max counts and never eligible for the CapabilityGateway).
 PROMPT_BRIDGE_PRIORITY = 2_147_483_647
 REVIEW_NAMESPACE = "review"
 PROMPT_CELL_NAMESPACE = "runtime.prompt.v1"
 _PRIMARY_OUTPUT_KEY = "primary"
+#: Schema-stable, machine-owned NodeRun audit marker. ``NodeRun@1`` already
+#: exposes a durable warnings tuple; using that extension channel avoids
+#: silently mutating the frozen cross-phase schema contract solely for a 0/1
+#: accounting fact.  The parser below accepts exactly one closed marker and
+#: never falls back to token-count inference.
+_LLM_INVOCATION_EVIDENCE_PREFIX = "runtime.accounting.llm_invocations@1="
 #: the canonical-channel key carrying the DERIVED output contract (裁决 2).
 OUTPUT_SCHEMA_SECTION = "output_schema"
 
@@ -245,6 +268,79 @@ class CapabilityGatewayError(WorkerExecutionError):
 
 class PromptBindingError(WorkerExecutionError):
     """A model request/prompt-record binding did not verify."""
+
+
+class ModelInvocationEvidenceError(WorkerExecutionError):
+    """A model-path failure carrying exact provider-attempt evidence.
+
+    ``provider_attempted`` flips only at the gateway's provider-dispatch
+    boundary.  Binding, configuration and budget refusals therefore carry
+    ``False``; a transport/provider failure after dispatch carries ``True``
+    even when no completion or token-usage object came back.  Token counters
+    are exact observations only: zero means unavailable/zero, never estimated.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_attempted: bool,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+    ) -> None:
+        if type(provider_attempted) is not bool:
+            raise TypeError("provider_attempted must be a bool")
+        for name, value in (
+            ("input_tokens", input_tokens),
+            ("output_tokens", output_tokens),
+        ):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if not provider_attempted and (input_tokens or output_tokens):
+            raise ValueError(
+                "a provider-not-attempted refusal cannot carry provider token usage"
+            )
+        super().__init__(message)
+        self.provider_attempted = provider_attempted
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+    @property
+    def llm_invocations(self) -> int:
+        return 1 if self.provider_attempted else 0
+
+
+def llm_invocation_evidence_warnings(
+    llm_invocations: int,
+) -> tuple[str, ...]:
+    """Encode one exact per-attempt invocation count in NodeRun's audit channel."""
+    if type(llm_invocations) is not int or llm_invocations not in (0, 1):
+        raise ValueError("one worker attempt must record exactly 0 or 1 LLM invocation")
+    return (f"{_LLM_INVOCATION_EVIDENCE_PREFIX}{llm_invocations}",)
+
+
+def node_run_llm_invocations(node_run: NodeRun) -> int:
+    """Read exact durable invocation evidence; never infer it from token usage.
+
+    A missing marker is ambiguous (not zero): it identifies a legacy or
+    externally-constructed NodeRun that cannot safely settle an active LLM
+    reservation.  Callers fail closed and keep the hold rather than erase
+    possible provider spend.
+    """
+    markers = tuple(
+        warning for warning in node_run.warnings
+        if warning.startswith(_LLM_INVOCATION_EVIDENCE_PREFIX)
+    )
+    if len(markers) != 1:
+        raise WorkerExecutionError(
+            "NodeRun carries no unique runtime LLM-invocation accounting marker"
+        )
+    value = markers[0][len(_LLM_INVOCATION_EVIDENCE_PREFIX):]
+    if value not in ("0", "1"):
+        raise WorkerExecutionError(
+            "NodeRun LLM-invocation accounting marker is outside the closed 0/1 set"
+        )
+    return int(value)
 
 
 class EvidenceTokenError(WorkerExecutionError):
@@ -1124,6 +1220,12 @@ class ModelResult:
 
     payload: Any
     rendered_text: str
+    # A returned ModelResult is evidence that the model gateway completed one
+    # invocation, even when its completion is empty.  Deterministic handlers use
+    # the same DTO, but execute_node explicitly records zero for their execution
+    # kind.  Provider-not-attempted paths return no ModelResult at all and use the
+    # typed ModelInvocationEvidenceError channel instead.
+    provider_attempted: bool = True
     number_anchors: tuple[NumberAnchor, ...] = ()
     input_tokens: int = 0
     output_tokens: int = 0
@@ -1133,6 +1235,18 @@ class ModelResult:
     degraded: bool = False
     degradation_reasons: tuple[str, ...] = ()
     decode_refusal: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.provider_attempted) is not bool:
+            raise TypeError("provider_attempted must be a bool")
+        if not self.provider_attempted and (self.input_tokens or self.output_tokens):
+            raise ValueError(
+                "a provider-not-attempted result cannot carry provider token usage"
+            )
+
+    @property
+    def llm_invocations(self) -> int:
+        return 1 if self.provider_attempted else 0
 
 
 def output_schema_section(
@@ -1398,6 +1512,12 @@ class StaticPromptAssembler:
     assembler_id: ClassVar[str] = ASSEMBLER_ID
     assembler_version: ClassVar[str] = ASSEMBLER_VERSION
 
+    def __init__(self, *, hydrate_untrusted_data: bool = True) -> None:
+        # Planner generation uses this assembler too but has a distinct gateway
+        # and context contract; its composition opts out explicitly. Worker-seat
+        # execution keeps the safe default on.
+        self._hydrate_untrusted_data = bool(hydrate_untrusted_data)
+
     def assemble(
         self,
         *,
@@ -1437,6 +1557,12 @@ class StaticPromptAssembler:
                 for b in blocks
             ],
         }
+        if blocks and self._hydrate_untrusted_data:
+            channel[UNTRUSTED_DATA_HYDRATION_SECTION] = {
+                "hydrator_id": UNTRUSTED_DATA_HYDRATOR_ID,
+                "hydrator_version": UNTRUSTED_DATA_HYDRATOR_VERSION,
+                "max_total_bytes": UNTRUSTED_DATA_MAX_TOTAL_BYTES,
+            }
         upstream = trusted_upstream_channel_section(tuple(trusted_artifacts))
         if upstream is not None:
             channel[TRUSTED_UPSTREAM_SECTION] = upstream
@@ -1458,6 +1584,67 @@ class StaticPromptAssembler:
         return AssembledModelRequest(
             canonical_request_bytes=canonical_bytes, request_digest=digest, prompt_record=record)
 
+    def assemble_with_trusted_values(
+        self,
+        *,
+        trusted_input_values: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> AssembledModelRequest:
+        """Assemble while inlining service-owned trusted values under digest binding.
+
+        The ordinary worker path deliberately exposes only named input digests.  A
+        service such as the dynamic Planner, however, cannot choose from a roster
+        whose contents it never sees.  This opt-in surface keeps the generic path
+        byte-identical and accepts values only when their exact names and canonical
+        content digests equal ``trusted_input_digests``.  The resulting bytes remain
+        bound by ``model_request_digest`` and the rebuilt ``PromptAssemblyRecord``;
+        callers cannot attach an unrecorded value after assembly.
+        """
+        base = self.assemble(**kwargs)
+        expected = {
+            item.name: item.digest for item in kwargs.get("trusted_input_digests", ())
+        }
+        supplied = dict(trusted_input_values)
+        if set(supplied) != set(expected):
+            raise ValueError(
+                "trusted_input_values names must exactly equal trusted_input_digests"
+            )
+        normalized: dict[str, Any] = {}
+        for name, value in supplied.items():
+            normalized[name] = json.loads(canonical_json(value))
+            if content_digest(value) != expected[name]:
+                raise ValueError(
+                    f"trusted input value {name!r} does not match its declared digest"
+                )
+
+        channel = json.loads(base.canonical_request_bytes.decode("utf-8"))
+        channel["trusted_input_values"] = [
+            {"name": name, "value": normalized[name]} for name in sorted(normalized)
+        ]
+        canonical_bytes = json.dumps(
+            channel, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        digest = _model_request_digest(canonical_bytes)
+        prior = base.prompt_record
+        record = PromptAssemblyRecord.build(
+            plan_digest=prior.plan_digest,
+            node_id=prior.node_id,
+            worker_id=prior.worker_id,
+            assembler_id=prior.assembler_id,
+            assembler_version=prior.assembler_version,
+            system_prompt_ref=prior.system_prompt_ref,
+            skill_refs=prior.skill_refs,
+            guardrail_refs=prior.guardrail_refs,
+            trusted_input_digests=prior.trusted_input_digests,
+            untrusted_blocks=prior.untrusted_blocks,
+            model_request_digest=digest,
+        )
+        return AssembledModelRequest(
+            canonical_request_bytes=canonical_bytes,
+            request_digest=digest,
+            prompt_record=record,
+        )
+
 
 @runtime_checkable
 class ModelGateway(Protocol):
@@ -1471,6 +1658,26 @@ class ModelGateway(Protocol):
 
     def invoke(
         self, request: AssembledModelRequest, *, prompt_assembly_ref: TypedPayloadRef,
+    ) -> ModelResult:
+        ...
+
+
+@runtime_checkable
+class BudgetedModelGateway(Protocol):
+    """Optional production extension that enforces one attempt's token ceiling.
+
+    Scripted/test gateways may continue to implement :class:`ModelGateway` only.
+    Provider-facing gateways implement this stronger port so the executor can
+    pass the already-reserved child amount without weakening the historical
+    single-shot protocol.
+    """
+
+    def invoke_budgeted(
+        self,
+        request: AssembledModelRequest,
+        *,
+        prompt_assembly_ref: TypedPayloadRef,
+        token_reservation: int,
     ) -> ModelResult:
         ...
 
@@ -1829,6 +2036,7 @@ class WorkerExecutionResult:
     prompt_assembly_ref: TypedPayloadRef | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    llm_invocations: int = 0
     degradation_reasons: tuple[str, ...] = ()
     reason_code: str | None = None
     reason: str | None = None
@@ -1959,14 +2167,15 @@ def execute_node(
 
     def _terminal_nodrun(status, *, reason_code=None, reason=None, error_type=None,
                          data_refs=(), evid_refs=(), tool_records=(),
-                         itok=0, otok=0):
+                         itok=0, otok=0, llm_invocations=0):
         return _build_node_run(
             plan=plan, node=node, worker=worker, ctx=ctx, status=status,
             node_run_id=node_run_id, attempt_id=attempt_id, attempt=attempt,
             input_snapshot=input_snapshot, started_at=started_at, finished_at=clock_now(clock),
             reason_code=reason_code, reason=reason, error_type=error_type,
             tool_call_records=tool_records, data_result_refs=data_refs,
-            execution_evidence_refs=evid_refs, input_tokens=itok, output_tokens=otok)
+            execution_evidence_refs=evid_refs, input_tokens=itok, output_tokens=otok,
+            llm_invocations=llm_invocations)
 
     # ---- (3) RUNNING + timeout/cancellation scope -------------------------- #
     if observer is not None:
@@ -2073,19 +2282,52 @@ def execute_node(
             request.prompt_record, writer=writer, stores=stores, ctx=ctx, plan=plan, node=node,
             runtime=runtime, prompt_token=prompt_token, clock=clock)
         try:
-            model_result = model_gateway.invoke(request, prompt_assembly_ref=prompt_ref)
-        except PromptBindingError:
+            if isinstance(model_gateway, BudgetedModelGateway):
+                model_result = model_gateway.invoke_budgeted(
+                    request,
+                    prompt_assembly_ref=prompt_ref,
+                    token_reservation=node_reservation.reserved_tokens,
+                )
+            else:
+                # Non-provider scripted gateways retain the original protocol.
+                # Every production worker-seat gateway implements the stronger
+                # budgeted port above.
+                model_result = model_gateway.invoke(
+                    request, prompt_assembly_ref=prompt_ref)
+        except (PromptBindingError, ModelTierUnconfigured):
             raise
-        except _TimeoutSignal as exc:
-            return _drain_terminal(NodeStatus.TIMED_OUT, "model_timeout", str(exc), None,
-                                   capability_gateway, stores, ctx, plan, node, _terminal_nodrun,
-                                   extra_prompt_ref=prompt_ref, merged=merged), None
-        except Exception as exc:
+        except ModelInvocationEvidenceError as exc:
             return _terminal_nodrun(
                 NodeStatus.FAILED, reason_code="model_error", reason=str(exc),
                 error_type=type(exc).__name__, data_refs=data_refs,
                 tool_records=merged.tool_call_records,
-                evid_refs=_finalize_direct_evidence(merged, prompt_ref)), None
+                evid_refs=_finalize_direct_evidence(merged, prompt_ref),
+                itok=exc.input_tokens, otok=exc.output_tokens,
+                llm_invocations=exc.llm_invocations), None
+        except _TimeoutSignal as exc:
+            return _drain_terminal(NodeStatus.TIMED_OUT, "model_timeout", str(exc), None,
+                                   capability_gateway, stores, ctx, plan, node, _terminal_nodrun,
+                                   extra_prompt_ref=prompt_ref, merged=merged,
+                                   llm_invocations=1), None
+        except Exception as exc:
+            # An untyped gateway exception is ambiguous once invoke() was
+            # entered.  Count the one reserved logical call conservatively;
+            # production gateways use ModelInvocationEvidenceError above to
+            # distinguish a proven pre-dispatch zero and to retain token usage.
+            return _terminal_nodrun(
+                NodeStatus.FAILED, reason_code="model_error", reason=str(exc),
+                error_type=type(exc).__name__, data_refs=data_refs,
+                tool_records=merged.tool_call_records,
+                evid_refs=_finalize_direct_evidence(merged, prompt_ref),
+                llm_invocations=1), None
+        if not isinstance(model_result, ModelResult):
+            return _terminal_nodrun(
+                NodeStatus.FAILED, reason_code="model_error",
+                reason="model gateway returned a non-ModelResult value",
+                error_type=type(model_result).__name__, data_refs=data_refs,
+                tool_records=merged.tool_call_records,
+                evid_refs=_finalize_direct_evidence(merged, prompt_ref),
+                llm_invocations=1), None
         payload = model_result.payload
     else:  # DETERMINISTIC
         if merged.untrusted_blocks:
@@ -2111,6 +2353,9 @@ def execute_node(
 
     if model_result.degraded:
         degradation.extend(model_result.degradation_reasons)
+    recorded_llm_invocations = (
+        model_result.llm_invocations if kind is ExecutionKind.LLM else 0
+    )
 
     # ---- (7) number-anchor / unsourced-number policy ----------------------- #
     anchor_ok, anchor_why = _check_number_anchors(worker, model_result.number_anchors)
@@ -2119,7 +2364,8 @@ def execute_node(
             NodeStatus.INCOMPLETE, reason_code="number_anchor_policy", reason=anchor_why,
             data_refs=data_refs, tool_records=merged.tool_call_records,
             evid_refs=_finalize_direct_evidence(merged, prompt_ref),
-            itok=model_result.input_tokens, otok=model_result.output_tokens), None
+            itok=model_result.input_tokens, otok=model_result.output_tokens,
+            llm_invocations=recorded_llm_invocations), None
 
     # ---- (9) validate the primary payload through its OutputBinding SchemaRef  #
     out_binding = _primary_output_binding(worker)
@@ -2135,7 +2381,8 @@ def execute_node(
             reason=model_result.decode_refusal,
             data_refs=data_refs, tool_records=merged.tool_call_records,
             evid_refs=_finalize_direct_evidence(merged, prompt_ref),
-            itok=model_result.input_tokens, otok=model_result.output_tokens), None
+            itok=model_result.input_tokens, otok=model_result.output_tokens,
+            llm_invocations=recorded_llm_invocations), None
     try:
         validated_payload = _validate_primary_output(
             registry, out_binding.schema_ref, payload)
@@ -2144,43 +2391,65 @@ def execute_node(
             NodeStatus.INCOMPLETE, reason_code="output_schema_invalid", reason=str(exc),
             data_refs=data_refs, tool_records=merged.tool_call_records,
             evid_refs=_finalize_direct_evidence(merged, prompt_ref),
-            itok=model_result.input_tokens, otok=model_result.output_tokens), None
+            itok=model_result.input_tokens, otok=model_result.output_tokens,
+            llm_invocations=recorded_llm_invocations), None
 
     # ---- (11/12) COMPLETED or DEGRADED: seal NodeRun + one Artifact -------- #
     status = NodeStatus.DEGRADED if degradation else NodeStatus.COMPLETED
     direct_evidence = _finalize_direct_evidence(merged, prompt_ref)
 
-    artifact = _build_artifact(
-        plan=plan, node=node, worker=worker, ctx=ctx, out_binding=out_binding,
-        payload=validated_payload, rendered_text=model_result.rendered_text,
-        number_anchors=model_result.number_anchors, input_snapshot=input_snapshot,
-        tool_call_records=merged.tool_call_records, data_result_refs=data_refs,
-        execution_evidence_refs=direct_evidence, prompt_ref=prompt_ref, kind=kind,
-        model_result=model_result, clock=clock,
-        model_tier_map_digest=runtime.model_tier_map_digest)
+    try:
+        artifact = _build_artifact(
+            plan=plan, node=node, worker=worker, ctx=ctx, out_binding=out_binding,
+            payload=validated_payload, rendered_text=model_result.rendered_text,
+            number_anchors=model_result.number_anchors, input_snapshot=input_snapshot,
+            tool_call_records=merged.tool_call_records, data_result_refs=data_refs,
+            execution_evidence_refs=direct_evidence, prompt_ref=prompt_ref, kind=kind,
+            model_result=model_result, clock=clock,
+            model_tier_map_digest=runtime.model_tier_map_digest)
 
-    node_run = _build_node_run(
-        plan=plan, node=node, worker=worker, ctx=ctx, status=status,
-        node_run_id=node_run_id, attempt_id=attempt_id, attempt=attempt,
-        input_snapshot=input_snapshot, started_at=started_at, finished_at=clock_now(clock),
-        reason_code=("degraded_input_or_result" if status is NodeStatus.DEGRADED else None),
-        reason=("; ".join(degradation) if degradation else None), error_type=None,
-        tool_call_records=merged.tool_call_records, data_result_refs=data_refs,
-        execution_evidence_refs=direct_evidence, input_tokens=model_result.input_tokens,
-        output_tokens=model_result.output_tokens, output_keys=(_PRIMARY_OUTPUT_KEY,),
-        output_artifact_ids=(artifact.artifact_id,))
+        node_run = _build_node_run(
+            plan=plan, node=node, worker=worker, ctx=ctx, status=status,
+            node_run_id=node_run_id, attempt_id=attempt_id, attempt=attempt,
+            input_snapshot=input_snapshot, started_at=started_at,
+            finished_at=clock_now(clock),
+            reason_code=(
+                "degraded_input_or_result"
+                if status is NodeStatus.DEGRADED else None),
+            reason=("; ".join(degradation) if degradation else None),
+            error_type=None, tool_call_records=merged.tool_call_records,
+            data_result_refs=data_refs,
+            execution_evidence_refs=direct_evidence,
+            input_tokens=model_result.input_tokens,
+            output_tokens=model_result.output_tokens,
+            llm_invocations=recorded_llm_invocations,
+            output_keys=(_PRIMARY_OUTPUT_KEY,),
+            output_artifact_ids=(artifact.artifact_id,))
 
-    # cross-object equality: Artifact provenance tuples == NodeRun tuples.
-    prov = artifact.provenance
-    if (
-        prov.tool_call_records != node_run.tool_call_records
-        or prov.data_result_refs != node_run.data_result_refs
-        or prov.execution_evidence_refs != node_run.execution_evidence_refs
-    ):
-        raise WorkerExecutionError(
-            "Artifact provenance evidence tuples drifted from the NodeRun tuples "
-            "(internal invariant; the record must not be sealed)"
-        )
+        # cross-object equality: Artifact provenance tuples == NodeRun tuples.
+        prov = artifact.provenance
+        if (
+            prov.tool_call_records != node_run.tool_call_records
+            or prov.data_result_refs != node_run.data_result_refs
+            or prov.execution_evidence_refs != node_run.execution_evidence_refs
+        ):
+            raise WorkerExecutionError(
+                "Artifact provenance evidence tuples drifted from the NodeRun "
+                "tuples (internal invariant; the record must not be sealed)"
+            )
+    except Exception as exc:
+        # The provider/handler result already exists.  Persist a terminal audit
+        # record with its exact invocation/token evidence rather than letting a
+        # caller release the reservation and erase spend.
+        return _terminal_nodrun(
+            NodeStatus.FAILED,
+            reason_code="post_model_processing_error",
+            reason=str(exc), error_type=type(exc).__name__,
+            data_refs=data_refs, tool_records=merged.tool_call_records,
+            evid_refs=direct_evidence,
+            itok=model_result.input_tokens,
+            otok=model_result.output_tokens,
+            llm_invocations=recorded_llm_invocations), None
     return node_run, artifact
 
 
@@ -2239,7 +2508,10 @@ class AttemptReservation:
 
 @dataclass(frozen=True)
 class BoundedRetryOutcome:
-    """The terminal outcome of the bounded retry + schema-repair loop for one node."""
+    """Terminal bounded-retry outcome; ``invocations`` is exact LLM attempts.
+
+    Deterministic executions and provider-not-attempted refusals contribute zero.
+    """
 
     node_run: NodeRun
     artifact: Artifact | None
@@ -2288,9 +2560,11 @@ def execute_with_bounded_retry(
       Artifact.
 
     Every reservation / ``settle`` uses a deterministic idempotency key
-    (``role``/``ordinal``), so a crash between a repair and its settle replays
-    idempotently (no duplicate reservation, no duplicated invocation billed). The
-    per-attempt op is selected by role (``reserve_node`` / ``reserve_retry`` /
+    (``role``/``ordinal``).  The DAG requests fresh-only reservations for LLM
+    attempts: after a crash, an existing key is ambiguous evidence that the
+    external provider may already have been called, so recovery fails closed
+    instead of replaying a possibly billed invocation.  The per-attempt op is
+    selected by role (``reserve_node`` / ``reserve_retry`` /
     ``reserve_schema_repair``) so the ledger carries the attempt role first-class.
     """
     reservations: list[AttemptReservation] = []
@@ -2316,14 +2590,22 @@ def execute_with_bounded_retry(
         res = _RESERVE_BY_ROLE[role](
             plan_reservation_id=plan_reservation_id, node_id=node_id, attempt=ordinal,
             tokens=node_token_reservation, llm_invocations=llm_per, concurrency=1,
-            idempotency_key=key)
+            idempotency_key=key,
+            # A replayed LLM reservation is ambiguous evidence that the old
+            # process may already have dispatched the provider call.  Reserve
+            # fresh or fail closed; deterministic attempts remain replayable.
+            reject_replay=is_llm)
         reservations.append(AttemptReservation(
             reservation_id=res.reservation_id, role=role, attempt=ordinal, idempotency_key=key))
         return res.reservation_id
 
     def _settle(reservation_id: str, role: str, ordinal: int, node_run: NodeRun) -> None:
-        actual_tokens = min(node_run.input_tokens + node_run.output_tokens, node_token_reservation)
-        actual_llm = 1 if (is_llm and node_run.output_tokens > 0) else 0
+        # Never make an over-budget provider call look cheaper than it was.  The
+        # production gateway enforces the reservation before invocation; an
+        # overage from any other gateway is therefore an invariant failure that
+        # the ledger must reject, not a value to clamp.
+        actual_tokens = node_run.input_tokens + node_run.output_tokens
+        actual_llm = node_run_llm_invocations(node_run) if is_llm else 0
         budget.settle(
             reservation_id, actual_tokens=actual_tokens, actual_llm_invocations=actual_llm,
             idempotency_key=f"settle:{run_id}:{node_id}:{role}:{ordinal}")
@@ -2331,10 +2613,10 @@ def execute_with_bounded_retry(
     for primary in range(1, int(max_attempts) + 1):
         role = "primary" if primary == 1 else "retry"
         ordinal += 1
-        invocations += 1
         reservation_id = _reserve(role, ordinal)
         node_run, artifact = attempt_fn(ordinal, is_repair=False)
         _settle(reservation_id, role, ordinal, node_run)
+        invocations += node_run_llm_invocations(node_run) if is_llm else 0
         last_run, last_artifact = node_run, artifact
         if node_run.status in _RETRY_SUCCESS_STATUSES:
             return BoundedRetryOutcome(node_run, artifact, tuple(reservations), True, invocations)
@@ -2347,10 +2629,10 @@ def execute_with_bounded_retry(
         ):
             for _ in range(int(schema_repairs_per_attempt)):
                 ordinal += 1
-                invocations += 1
                 reservation_id = _reserve("schema_repair", ordinal)
                 rn2, art2 = attempt_fn(ordinal, is_repair=True)
                 _settle(reservation_id, "schema_repair", ordinal, rn2)
+                invocations += node_run_llm_invocations(rn2)
                 last_run, last_artifact = rn2, art2
                 if rn2.status in _RETRY_SUCCESS_STATUSES:
                     return BoundedRetryOutcome(rn2, art2, tuple(reservations), True, invocations)
@@ -2383,6 +2665,7 @@ CancelSignal = _CancelSignal
 def _drain_terminal(
     status, reason_code, reason, error_type, capability_gateway, stores, ctx, plan, node,
     build_terminal, *, extra_prompt_ref=None, merged=None,
+    input_tokens=0, output_tokens=0, llm_invocations=0,
 ):
     """Drain the persisted evidence journal into a terminal NodeRun (no Artifact).
 
@@ -2423,7 +2706,9 @@ def _drain_terminal(
     data_final = _sorted_typed(_dedup_typed(data_refs))
     return build_terminal(
         status, reason_code=reason_code, reason=reason, error_type=error_type,
-        data_refs=data_final, evid_refs=evid_final, tool_records=tool_records)
+        data_refs=data_final, evid_refs=evid_final, tool_records=tool_records,
+        itok=input_tokens, otok=output_tokens,
+        llm_invocations=llm_invocations)
 
 
 # --------------------------------------------------------------------------- #
@@ -2768,7 +3053,8 @@ def _primary_output_binding(worker):
 def _build_node_run(
     *, plan, node, worker, ctx, status, node_run_id, attempt_id, attempt, input_snapshot,
     started_at, finished_at, reason_code, reason, error_type, tool_call_records, data_result_refs,
-    execution_evidence_refs, input_tokens, output_tokens, output_keys=(), output_artifact_ids=(),
+    execution_evidence_refs, input_tokens, output_tokens, llm_invocations=0,
+    output_keys=(), output_artifact_ids=(),
 ) -> NodeRun:
     return NodeRun(
         node_run_id=node_run_id, run_id=ctx.run_id, plan_id=plan.plan_id,
@@ -2778,7 +3064,9 @@ def _build_node_run(
         finished_at=finished_at, output_keys=tuple(output_keys),
         output_artifact_ids=tuple(output_artifact_ids), tool_call_records=tuple(tool_call_records),
         data_result_refs=tuple(data_result_refs), execution_evidence_refs=tuple(execution_evidence_refs),
-        input_tokens=input_tokens, output_tokens=output_tokens, error_type=error_type)
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        warnings=llm_invocation_evidence_warnings(llm_invocations),
+        error_type=error_type)
 
 
 def _build_artifact(

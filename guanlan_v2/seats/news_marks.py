@@ -169,7 +169,8 @@ def _assemble_live(code: str, provider=None, *, stock_news_fn=None,
         flash = kfn(limit=200) or []
     except Exception:  # noqa: BLE001
         flash = []
-        notes.append("快讯源不可用")
+    if not flash:
+        notes.append("快讯源不可用或无条目")
     name = _stock_name(norm)
     for it in flash:
         ts = _t16(it.get("time"))
@@ -234,7 +235,9 @@ def _assemble_live(code: str, provider=None, *, stock_news_fn=None,
         picked += broad_items[:lim - len(picked)]
     picked.sort(key=lambda x: x["ts"], reverse=True)
     return {"ok": True, "code": norm, "mode": "live", "asof": "", "items": picked,
-            "coverage": {"partial": False, "note": ";".join(notes)},
+            # Any missing leg means the merged surface is usable but incomplete;
+            # never label news-only output as full announcement/policy coverage.
+            "coverage": {"partial": bool(notes), "note": ";".join(notes)},
             "freshness": {"pulled_at": pulled_at, "rich_asof": rich_asof,
                           "rich_available": rich_available},
             "provenance": {"source": "stock_news+kuaixun+staging_parquet", "rows": len(picked)}}

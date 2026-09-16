@@ -14,6 +14,7 @@ id 经正则白名单,杜绝路径穿越。诚实失败 ok:False + reason(HTTP 2
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -24,8 +25,10 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-# 报告落盘目录(仓内,随模块走)。
-_STORE = Path(__file__).resolve().parent / "store"
+# 报告落盘目录；服务/测试可用同一显式覆盖，默认保持仓内旧位置。
+_STORE = Path(os.environ.get("GUANLAN_REPORTS_DIR") or (
+    Path(__file__).resolve().parent / "store"
+))
 # id 白名单:仅字母数字/下划线/连字符,长度 1-64 → 拼路径前必过,防 ../ 穿越。
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _WORKSPACE_ID_RE = re.compile(r"^rw_(?:general|[0-9a-f]{12})$")

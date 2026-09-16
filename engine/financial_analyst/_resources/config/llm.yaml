@@ -13,17 +13,17 @@ providers:
     models: [qwen3.5-plus, qwen3-coder-plus]
   anthropic:
     api_key_env: ANTHROPIC_API_KEY
-    network_profile: intl_clash   # 走 litellm fallback, 这字段仅占位
+    network_profile: intl_system  # 走 litellm fallback, 这字段仅占位
     models: [claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5]
   openai:
     api_key_env: OPENAI_API_KEY
     base_url: https://api.openai.com/v1
-    network_profile: intl_clash
+    network_profile: intl_system
     models: [gpt-4o, gpt-4-turbo]
   deepseek:
     api_key_env: DEEPSEEK_API_KEY
     base_url: https://api.deepseek.com
-    network_profile: intl_clash   # Clash fake-ip + MITM, 必经 proxy + verify=False
+    network_profile: intl_system  # 默认遵循系统网络与证书校验；需要 Clash 时由部署方显式改为 intl_clash
     models: [deepseek-v4-flash, deepseek-v4-pro]
 
 agent_overrides:

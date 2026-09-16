@@ -8,7 +8,7 @@
 const TICKET_TF_CN = { day: '日线', '30min': '30分', '5min': '5分', '1min': '1分' };
 const TICKET_CADENCE_CN = { daily: '每日', '60min': '60分钟', hourly: '60分钟', '30min': '30分钟', '10min': '10分钟' };
 
-function TicketList({ code, onSelect, poolTick, assignments, assignmentMode, onConfigureWatch }) {
+function TicketList({ code, onSelect, poolTick, assignments, assignmentMode, onConfigureWatch, marketOpen }) {
   const metas = (window.LZ_SYMBOL_META || []).slice();
   const [quotes, setQuotes] = useState({});      // {code: quote}
   const [lastDecs, setLastDecs] = useState({});  // {digitCore: {direction, ts, kind, source}}
@@ -23,9 +23,10 @@ function TicketList({ code, onSelect, poolTick, assignments, assignmentMode, onC
       });
     };
     pull();
+    if (marketOpen !== true) return () => { alive = false; };
     const iv = setInterval(pull, 7000);
     return () => { alive = false; clearInterval(iv); };
-  }, [poolTick]);
+  }, [poolTick, marketOpen]);
   // 最新真研判:一次拉全量落盘决策,按数字核归组取每票最新(60s 刷新;含 watcher/手动/条件单)
   useEffect(() => {
     let alive = true;

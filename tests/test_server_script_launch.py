@@ -24,6 +24,7 @@ server.py 里其余所有 ``guanlan_v2.*`` 导入都躲在 ``create_app()`` 函�
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -84,4 +85,140 @@ print("PROLOGUE-OK")
         "多半是有人在模块层加了 `import guanlan_v2.<...>`;挪进 create_app() 函数体,\n"
         "或者确认文件顶部那段仓根引导仍在该导入之前。\n"
         f"--- returncode {proc.returncode} ---\n{proc.stderr[-3000:]}"
+    )
+
+
+def test_production_bootstrap_prefers_vendored_engine_and_keeps_llm_abi(
+        tmp_path: Path) -> None:
+    """生产启动必须压过 venv 里的同名 editable install,并提供编排所需 ABI。
+
+    临时同名包放在子进程的初始 ``sys.path[0]``,比真实 editable
+    install 更强地模拟“外部旧包本应抢先命中”。随后按生产脚本形态执行
+    server 前导代码,由 ``_ensure_engine_importable`` 翻转优先级。LLM 调用
+    用本地 async stub 截断,不导入 provider SDK,也不发网络请求。
+    """
+    external = tmp_path / "external-editable"
+    (external / "financial_analyst" / "llm").mkdir(parents=True)
+    (external / "financial_analyst" / "__init__.py").write_text(
+        "ORIGIN = 'external-editable'\n", encoding="utf-8")
+    (external / "financial_analyst" / "llm" / "__init__.py").write_text(
+        "", encoding="utf-8")
+    (external / "financial_analyst" / "llm" / "client.py").write_text(
+        "class LLMClient:\n    pass\n", encoding="utf-8")
+
+    engine = _REPO / "engine"
+    driver = f"""
+import asyncio
+import importlib.util
+import inspect
+import os
+import sys
+from pathlib import Path
+
+repo = Path({str(_REPO)!r}).resolve()
+engine = Path({str(engine)!r}).resolve()
+external = Path({str(external)!r}).resolve()
+
+def norm(value):
+    try:
+        return Path(value).resolve()
+    except (OSError, TypeError, ValueError):
+        return None
+
+# 模拟 venv editable install 已经在搜索路径最前;排除 pytest 继承的仓内 engine。
+sys.path[:] = [str(external), str(repo)] + [
+    p for p in sys.path
+    if norm(p) not in {{repo, engine, external}}
+]
+os.environ.pop("GUANLAN_FA_SRC", None)
+for name in tuple(sys.modules):
+    if name == "financial_analyst" or name.startswith("financial_analyst."):
+        del sys.modules[name]
+
+before = importlib.util.find_spec("financial_analyst")
+assert before is not None and Path(before.origin).resolve().is_relative_to(external), before
+
+source = Path({str(_SERVER_PY)!r}).read_text(encoding="utf-8")
+namespace = {{"__name__": "guanlan_v2.server", "__file__": {str(_SERVER_PY)!r}}}
+exec(compile(source.split({_SENTINEL!r})[0], {str(_SERVER_PY)!r}, "exec"), namespace)
+resolved = Path(namespace["_ensure_engine_importable"]()).resolve()
+assert resolved.is_relative_to(engine), resolved
+
+import financial_analyst.llm.client as client_module
+LLMClient = client_module.LLMClient
+assert Path(client_module.__file__).resolve().is_relative_to(engine), client_module.__file__
+
+client = LLMClient(
+    provider="deepseek",
+    model="deepseek-v4-flash",
+    config={{"max_retries": 0}},
+    max_tokens=4096,
+    timeout=90,
+    thinking=True,
+    reasoning_effort="high",
+)
+assert client.default_max_tokens == 4096
+assert client.default_timeout == 90.0
+assert client.default_thinking is True
+assert client.default_reasoning_effort == "high"
+
+required = {{
+    "max_tokens", "timeout", "thinking", "reasoning_effort",
+    "max_retries", "on_dispatch",
+}}
+assert required <= set(inspect.signature(LLMClient.chat).parameters)
+captured = {{}}
+
+async def no_network(messages, tools, response_format, temperature, *,
+                     max_tokens, timeout, thinking, reasoning_effort,
+                     transport_max_retries, on_dispatch):
+    captured.update(
+        max_tokens=max_tokens,
+        timeout=timeout,
+        thinking=thinking,
+        reasoning_effort=reasoning_effort,
+        transport_max_retries=transport_max_retries,
+        on_dispatch=on_dispatch,
+    )
+    return "ABI-OK"
+
+client._chat_openai_compat = no_network
+result = asyncio.run(client.chat(
+    [{{"role": "user", "content": "offline ABI probe"}}],
+    max_tokens=1024,
+    timeout=12.5,
+    thinking=True,
+    reasoning_effort="max",
+    max_retries=0,
+))
+assert result == "ABI-OK"
+assert captured == {{
+    "max_tokens": 1024,
+    "timeout": 12.5,
+    "thinking": True,
+    "reasoning_effort": "max",
+    "transport_max_retries": 0,
+    "on_dispatch": None,
+}}
+print("ENGINE-ABI-OK")
+"""
+
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    proc = subprocess.run(
+        [sys.executable, "-c", driver],
+        cwd=str(_REPO),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=110,
+    )
+
+    assert proc.returncode == 0 and "ENGINE-ABI-OK" in proc.stdout, (
+        "生产启动未能稳定选中仓内 engine,或 LLMClient ABI 与编排层失配。\n"
+        f"--- returncode {proc.returncode} ---\n"
+        f"--- stdout ---\n{proc.stdout[-3000:]}\n"
+        f"--- stderr ---\n{proc.stderr[-3000:]}"
     )

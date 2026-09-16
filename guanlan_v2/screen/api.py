@@ -657,7 +657,8 @@ def _run_validate_subprocess(spec: Dict[str, Any]) -> None:
                 "phase": "done", "step": 15})
 
 
-def _panel_enrich(codes, freq: str = "day", factors=None):
+def _panel_enrich(codes, freq: str = "day", factors=None, *,
+                  query_only: bool = False):
     """引擎面板取 codes:最新截面 + 每股 L3 vol_regime + L4 位置指标(ret/RSI/位置)。
 
     只读数据(经 get_data_paths),非跨界面交互。窗口 ~130 自然日(够 60 日换手均值 + 20 日动量)。
@@ -669,7 +670,6 @@ def _panel_enrich(codes, freq: str = "day", factors=None):
     from datetime import date, timedelta
 
     try:
-        from financial_analyst.data.loader_factory import get_default_loader
         from financial_analyst.factors.zoo.expr import compile_factor
         from financial_analyst.factors.zoo.panel_cache import load_panel_cached
     except Exception:  # noqa: BLE001
@@ -691,14 +691,26 @@ def _panel_enrich(codes, freq: str = "day", factors=None):
             _lookback = max(130, min(470, int(max(_nums) * 1.6) + 40))
     start = (date.today() - timedelta(days=_lookback)).isoformat()
     try:
+        if query_only:
+            # The default loader is configuration-selectable and may be a
+            # Tushare loader that fetches/writes caches.  Scoped Codex preview
+            # is pinned to the local Qlib binary reader instead.
+            from guanlan_v2.console.codex_query_tools import _read_only_loaders
+            panel_loader, _benchmark_loader, trusted_industry_loader = _read_only_loaders()
+        else:
+            panel_loader = _screen_loader()
+            trusted_industry_loader = None
         ind_loader = None
         if any("indmean(" in ex or "industry" in ex for ex in _sel_exprs):
-            try:
-                from financial_analyst.data.loaders.industry import IndustryLoader, industry_map_path
-                ind_loader = IndustryLoader() if industry_map_path().exists() else None
-            except Exception:  # noqa: BLE001
-                ind_loader = None
-        panel = load_panel_cached(_screen_loader(), list(codes), start, end, freq=freq,
+            if query_only:
+                ind_loader = trusted_industry_loader
+            else:
+                try:
+                    from financial_analyst.data.loaders.industry import IndustryLoader, industry_map_path
+                    ind_loader = IndustryLoader() if industry_map_path().exists() else None
+                except Exception:  # noqa: BLE001
+                    ind_loader = None
+        panel = load_panel_cached(panel_loader, list(codes), start, end, freq=freq,
                                   industry_loader=ind_loader)
     except Exception:  # noqa: BLE001
         return {}, {}, {}
@@ -851,7 +863,7 @@ def _panel_enrich(codes, freq: str = "day", factors=None):
     #   财务索引在 loader 实例上缓存(首次 build,后续 O(1));缺财务则该股不带 cat_* → V7 回退。
     try:
         from datetime import date as _date
-        _loader = _screen_loader()
+        _loader = panel_loader
         _today = pd.Timestamp(_date.today())
         for c in list(metrics.keys()):
             try:
@@ -1021,7 +1033,7 @@ def _record_picks(body: "ScreenIn", resp: Dict[str, Any], model_id: str, rdate: 
         return False
 
 
-def _screen_via_v4(body: "ScreenIn"):
+def _screen_via_v4(body: "ScreenIn", *, query_only: bool = False):
     """L1 = vendored v4 真排名(消费产物)。缺产物 → None(调用方回退玩具因子路径)。
 
     score=lgb_pct(全市场分位),顶200 带 v4_total/v4_layer;名称/行业来自 vendored
@@ -1090,7 +1102,17 @@ def _screen_via_v4(body: "ScreenIn"):
         except Exception as _e:  # noqa: BLE001
             _rw_badge = {"applied": False, "fallback_reason": f"{type(_e).__name__}: {_e}",
                          "regime_asof": None, "per_factor": []}
-    disp, regime, metrics = _panel_enrich(codes, body.freq, _factors_eff)
+    if query_only:
+        # The production preview contract is the already-built v4 ranking.
+        # Even a local-only panel enrichment over ~200 names can occupy the
+        # shared 9999 process for minutes.  Do not make a Codex query silently
+        # turn into that heavy calculation; expose missing live price/L3/L4
+        # enrichment honestly instead.
+        disp, regime, metrics = {}, {}, {}
+    else:
+        disp, regime, metrics = _panel_enrich(
+            codes, body.freq, _factors_eff,
+        )
 
     scored_rows = []
     for r, _pctv in zip(pool_df.itertuples(index=False), _pct):
@@ -1261,10 +1283,11 @@ def _screen_via_v4(body: "ScreenIn"):
 
     # —— L5 决策层:≤5 收敛(护盾后 ★★★★+ → 行业去重 → ≤5)+ 市场节奏(V1)——
     from guanlan_v2.strategy.decision import converge
-    # 市场温度上下文(护盾 v4.4):全读缓存/快照,零网络阻塞;组装失败 → None(护盾休眠,绝不挡选股)
+    # 市场温度上下文(护盾 v4.4)。普通 UI 保持 SWR 预热语义；Codex
+    # query_only 只能读已经存在的缓存，绝不启动后台刷新或写缓存。
     try:
         from guanlan_v2.screen.market_temp import build_market_temp
-        _mt = build_market_temp()
+        _mt = build_market_temp(allow_refresh=not query_only)
     except Exception:  # noqa: BLE001
         _mt = None
     decision = converge(chosen, metrics, max_n=5, base_by_code=base_by_code, market_temp=_mt)
@@ -1330,7 +1353,15 @@ def _screen_via_v4(body: "ScreenIn"):
         **({"regime_weights": _rw_badge} if _rw_badge is not None else {}),
         "note": "L1=v4 排名 · L2 主线 · L3 量能 · L4 九视角(逐行 views)· L5 评级/护盾/≤5 收敛(decision)",
     }
-    resp["picks_recorded"] = _record_picks(body, resp, _mid, rdate)   # P0:落档显形,失败不阻断
+    if query_only:
+        resp["query_only"] = True
+        resp["picks_persistence"] = "disabled_query_only"
+        resp["cache_refresh_started"] = False
+        resp["panel_enrichment"] = "disabled_query_only"
+        resp["note"] += " · Codex 预览未运行重型面板补全"
+    else:
+        # P0: ordinary UI/Console calls retain the historical archive contract.
+        resp["picks_recorded"] = _record_picks(body, resp, _mid, rdate)
     return JSONResponse(resp)
 
 
@@ -1429,6 +1460,20 @@ def build_screen_router() -> APIRouter:
     def screen_health():
         """vendored v4 排名产物新鲜度(date/rows/stale_days),供前端判是否需重跑 v4 刷新。"""
         from datetime import date as _date
+        import os as _os
+
+        scheduler_status = {
+            "regen_scheduler": {"enabled": bool(_REGEN_SCHED.get("enabled")),
+                                "last_auto_ts": _REGEN_SCHED.get("last_auto_ts"),
+                                "data_date": _REGEN_SCHED.get("data_date"),
+                                "attempts": _REGEN_SCHED.get("attempts"),
+                                "default_retrain": _REGEN_SCHED.get("default_retrain"),
+                                "dl_daily": _os.environ.get("GUANLAN_DL_DAILY") == "1"},
+            "rerank_scheduler": {"enabled": _os.environ.get("GUANLAN_RERANK_DAILY") == "1",
+                                 "requires": "GUANLAN_REGEN_DAILY=1(随 regen 顺跑)"},
+            "review_scheduler": {"enabled": _os.environ.get("GUANLAN_REVIEW_DAILY") == "1",
+                                 "requires": "GUANLAN_RERANK_DAILY=1(随重排落定后排队)"},
+        }
 
         try:
             from guanlan_v2 import strategy as S
@@ -1436,7 +1481,7 @@ def build_screen_router() -> APIRouter:
             n = int(len(S.load_v4_ranking()))
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}",
-                                 "v4_ranking": None})
+                                 "v4_ranking": None, **scheduler_status})
         stale_days = None
         try:
             y, m, d = (int(x) for x in rd.split("-"))
@@ -1457,29 +1502,38 @@ def build_screen_router() -> APIRouter:
             _mh = load_health_summary()
         except Exception:  # noqa: BLE001
             _mh = None
-        import os as _os
         return JSONResponse({"ok": bool(rd), "source": "vendored",
                              "v4_ranking": {"date": rd, "rows": n, "stale_days": stale_days},
                              "market_breadth": mb, "model_health": _mh,
-                             "regen_scheduler": {"enabled": bool(_REGEN_SCHED.get("enabled")),
-                                                 "last_auto_ts": _REGEN_SCHED.get("last_auto_ts"),
-                                                 "data_date": _REGEN_SCHED.get("data_date"),
-                                                 "attempts": _REGEN_SCHED.get("attempts"),
-                                                 "default_retrain": _REGEN_SCHED.get("default_retrain"),
-                                                 "dl_daily": _os.environ.get("GUANLAN_DL_DAILY") == "1"},
-                             "rerank_scheduler": {"enabled": _os.environ.get("GUANLAN_RERANK_DAILY") == "1",
-                                                  "requires": "GUANLAN_REGEN_DAILY=1(随 regen 顺跑)"},
-                             "review_scheduler": {"enabled": _os.environ.get("GUANLAN_REVIEW_DAILY") == "1",
-                                                  "requires": "GUANLAN_RERANK_DAILY=1(随重排落定后排队)"}})
+                             **scheduler_status})
 
     @router.post("/run")
-    def screen_run(body: ScreenIn):
+    def screen_run(body: ScreenIn, query_only: bool = False):
         import pandas as pd
 
+        if query_only:
+            updates = {
+                "model": "prod", "snapshot": False, "note": None,
+                "regimeWeights": False,
+            }
+            body = (body.model_copy(update=updates)
+                    if hasattr(body, "model_copy") else body.copy(update=updates))
+
         # L1 优先用 vendored v4 真排名(消费产物);缺产物 → 回退下方玩具因子路径。
-        _v4 = _screen_via_v4(body)
+        _v4 = _screen_via_v4(body, query_only=query_only)
         if _v4 is not None:
             return _v4
+
+        # Scoped Codex preview is deliberately pinned to the existing v4
+        # artifact.  Falling through would invoke the configurable legacy
+        # loader and would not carry the same no-write/no-network guarantee.
+        if query_only:
+            return JSONResponse({
+                "ok": False, "status": "unavailable", "query_only": True,
+                "picks_persistence": "disabled_query_only",
+                "cache_refresh_started": False,
+                "reason": "v4 排名产物不可用；只读预览未回退旧选股链",
+            })
 
         universe = (body.universe or "csi_fast").strip() or "csi_fast"
 

@@ -120,16 +120,16 @@ FROZEN_EVIDENCE = {
     "phase8_registry_digest":
         "201e7f2cccdf56369e6c8244982eb0647172a7be7d2b8060f8eebb75de6ca650",
     "phase8_catalog_digest":
-        "17f0fed4df3c8bdb018641df4973155d0e1d95538043cbfbb08b7506aa6375fd",
+        "b5f197082e43835e28d2490970746d85161251c10e98ea6d97007295d2a14142",
     "phase9_registry_digest":
         "553a6ee558b839f57d0e372ce02cf2bffb7e564f925969da56e98e247a5760b4",
     "phase9_catalog_digest":
-        "6176e1155e3c997f07f16e63ea6cf136d24f6cb3b2976abc82ab06c99b6045f6",
+        "00acdc15d1cdaeb96f9073ab9383303ef9f8978238fbc207025bc808d6d80cd0",
     # -- item 9: byte seals of the two chain-sealing goldens (sha256 of bytes).
     "phase9_schema_golden_sha256":
-        "e7f198ce80a90581cfdfe818e6d62c0d366e1d98bc319ec42ef3d49369e40765",
+        "adb34e54e7b4a97aa66841c749b06579f8cf21aa823bdf8c49d1b28aa6c66509",
     "phase9_catalog_golden_sha256":
-        "60130c07b9064b281557d5939a2a6c67a0d2e1a159e5195c537466fc0d9a4cb5",
+        "45c5462ea9a91d8da1f07222bb09ea89c40776e98f89a6562c0c58eea620f642",
     # -- item 7 / D5: the reviewed screen ranking read surface for
     #    cand.v4 (model_id None/"prod") and cand.model (variant model_id).
     "ranking_reader": "guanlan_v2.strategy.ranking:load_v4_ranking",

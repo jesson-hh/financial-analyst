@@ -71,6 +71,24 @@ def test_ingest_newsradar_no_sector_falls_back(tmp_path):
     assert _all(conn)[0]["event_type"] == "newsradar"           # 无 sector → 裸 newsradar
 
 
+def test_ingest_newsradar_ignores_separate_and_misplaced_future_rows(tmp_path):
+    conn = _db(tmp_path)
+    recent = {"title": "recent", "url": "u1", "sector": "ai", "ts": 1,
+              "time_bucket": "recent"}
+    future = {"title": "future", "url": "u2", "sector": "ai", "ts": 9_999_999_999,
+              "time_bucket": "future_source_time"}
+    future_without_bucket = {"title": "future legacy", "url": "u3", "sector": "ai",
+                             "ts": 9_999_999_998}
+    out = ingest.ingest_newsradar(
+        conn,
+        read=lambda **kw: {"items": [recent, future, future_without_bucket],
+                           "future_items": [future]},
+        now=datetime(2026, 7, 18, 12, 0, 0),
+    )
+    assert out["inserted"] == 1
+    assert [row["title"] for row in _all(conn)] == ["recent"]
+
+
 # ───────────────────────── Task 2: 单事务不半写 ─────────────────────────
 
 def test_ingest_source_error_propagates_no_write(tmp_path):
@@ -343,6 +361,7 @@ def test_guard_search_requires_asof_regression(tmp_path):
 
 def test_guard_db_default_under_var_and_injectable(tmp_path, monkeypatch):
     """全测 tmp 注入,真 var/ 零触碰:默认路径在 repo var/events,参数/env 皆可改到 tmp。"""
+    monkeypatch.delenv("GUANLAN_EVENTS_DB", raising=False)
     d = store.db_path()
     assert d.parent.parent.name == "var" and d.parent.name == "events"
     assert store.db_path(path=tmp_path / "x.db") == tmp_path / "x.db"      # 参数注入

@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -22,7 +24,10 @@ from guanlan_v2.autonomy.runtime import JobCtx
 from guanlan_v2.autonomy.subagent import run_section_agent  # noqa: F401 — 打桩靶点(模块级引入)
 from guanlan_v2.screen.llm import _call_llm_json             # noqa: F401 — 打桩靶点
 
-REPORTS_DIR = Path(__file__).resolve().parents[2] / "var" / "reports" / "daily"
+_AUTONOMY_ROOT = Path(os.environ.get("GUANLAN_AUTONOMY_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var"
+))
+REPORTS_DIR = _AUTONOMY_ROOT / "reports" / "daily"
 
 _SECTION_SEAT = "review_section"      # fast 档(config/llm.yaml)
 _OFFICER_SEAT = "review_officer"      # deep 档
@@ -338,7 +343,20 @@ def read_report(date: str = "") -> Dict[str, Any]:
         if not names:
             return {"ok": False, "reason": "暂无日报"}
         d = names[-1]
-    md_path = REPORTS_DIR / f"{d}.md"
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+        return {"ok": False, "reason": "日报日期必须是 YYYY-MM-DD"}
+    try:
+        dt.date.fromisoformat(d)
+    except ValueError:
+        return {"ok": False, "reason": "日报日期无效"}
+    root = REPORTS_DIR.resolve()
+    md_path = (root / f"{d}.md").resolve()
+    json_path = (root / f"{d}.json").resolve()
+    try:
+        md_path.relative_to(root)
+        json_path.relative_to(root)
+    except ValueError:
+        return {"ok": False, "reason": "日报路径越界"}
     if not md_path.exists():
         return {"ok": False, "reason": f"日报不存在:{d}"}
     try:
@@ -346,7 +364,6 @@ def read_report(date: str = "") -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"读取失败:{type(exc).__name__}: {exc}"}
     json_data = None
-    json_path = REPORTS_DIR / f"{d}.json"
     if json_path.exists():
         try:
             json_data = json.loads(json_path.read_text(encoding="utf-8"))

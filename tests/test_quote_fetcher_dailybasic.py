@@ -9,20 +9,24 @@ from financial_analyst.agent.tier1 import quote_fetcher as qf
 
 class FakeLoader:
     def fetch_quote(self, code, start, end):
-        idx = pd.date_range("2026-03-20", periods=80, freq="D")
-        return pd.DataFrame({"close": [6.25] * 80, "vol": [1e6] * 80}, index=idx)
+        idx = pd.date_range(end=pd.Timestamp(end), periods=80, freq="D")
+        frame = pd.DataFrame({"close": [6.25] * 80, "vol": [1e6] * 80}, index=idx)
+        frame.attrs["pulled_at"] = f"{end}T15:00:00"
+        return frame
 
     def fetch_daily_basic(self, code, start, end):
         s = pd.Timestamp(start)
         e = pd.Timestamp(end)
         if s <= pd.Timestamp("2026-06-09") <= e:
-            return pd.DataFrame(
+            frame = pd.DataFrame(
                 [{
                     "pe_ttm": 31.87, "pb": 2.28, "ps_ttm": None, "dv_ttm": None,
                     "total_mv": 8380900.0, "circ_mv": 6964400.0, "turnover_rate": 3.99,
                 }],
                 index=[pd.Timestamp("2026-06-09")],
             )
+            frame.attrs["pulled_at"] = f"{end}T15:00:00"
+            return frame
         return pd.DataFrame()
 
 

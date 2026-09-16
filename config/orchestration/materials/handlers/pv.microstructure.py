@@ -40,15 +40,20 @@ def project(*, l1_book=None, ticks=None, tape=None) -> dict:
     if l1_book is None:
         degradation.append("l1 order book unavailable")
     else:
-        bid = _finite(l1_book.get("bid"))
-        ask = _finite(l1_book.get("ask"))
+        bid = _finite(l1_book.get("bid1"))
+        ask = _finite(l1_book.get("ask1"))
         if bid is not None and ask is not None:
             mid = (bid + ask) / 2.0
             l1_spread_bp = ((ask - bid) / mid * 10000.0) if mid > 0 else None
-        bid_vol = _finite(l1_book.get("bid_vol"))
-        ask_vol = _finite(l1_book.get("ask_vol"))
-        if bid_vol is not None and ask_vol is not None and (bid_vol + ask_vol) > 0:
-            bid_ask_imbalance = (bid_vol - ask_vol) / (bid_vol + ask_vol)
+        bid_vols = tuple(_finite(l1_book.get(f"bid_vol{i}")) for i in range(1, 6))
+        ask_vols = tuple(_finite(l1_book.get(f"ask_vol{i}")) for i in range(1, 6))
+        if all(v is not None and v >= 0 for v in (*bid_vols, *ask_vols)):
+            bid_vol = sum(bid_vols)
+            ask_vol = sum(ask_vols)
+            if (bid_vol + ask_vol) > 0:
+                # The reviewed metric is displayed five-level depth imbalance,
+                # not a best-level-only proxy.
+                bid_ask_imbalance = (bid_vol - ask_vol) / (bid_vol + ask_vol)
 
     if ticks is None:
         degradation.append("tick tape unavailable")

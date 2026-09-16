@@ -25,7 +25,9 @@ const sect = (k) => SMAP[k] || { n: k, c: "#998C6F", z: "·" };
 const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch (e) { return ""; } };
 
 /* ── 报头 nameplate:朱砂印 + 双线 + 报眉 ── */
-function Masthead({ n, pulledAt, warming, onRefresh, refreshing }) {
+function Masthead({ n, pulledAt, warming, onRefresh, refreshing, sourceStats }) {
+  const tried = sourceStats && (sourceStats.sources_tried ?? sourceStats.configured_sources);
+  const ok = sourceStats && sourceStats.sources_ok;
   return (
     <div style={{ marginBottom: 6 }}>
       <div style={{ display: "flex", alignItems: "flex-end", gap: 14 }}>
@@ -50,7 +52,7 @@ function Masthead({ n, pulledAt, warming, onRefresh, refreshing }) {
                     padding: "5px 1px", display: "flex", alignItems: "center", gap: 14,
                     fontFamily: "var(--font-mono)", fontSize: 10.5, color: "var(--ink-3)", letterSpacing: ".04em" }}>
         <span style={{ color: "var(--zhu-deep)", fontWeight: 600 }}>第 {n} 条</span>
-        <span>12 赛道 · 108 个公开一手 RSS/Atom 源</span>
+        <span>12 赛道 · {tried ?? "—"} 个策展 RSS/Atom 源{ok == null ? "" : ` · 成功 ${ok}/${tried}`}</span>
         <span style={{ marginLeft: "auto" }}>
           {warming ? "◷ 预热中…" : `現拉 ${String(pulledAt || "").slice(0, 16).replace("T", " ")}`}
         </span>
@@ -149,12 +151,12 @@ function App() {
   const [refreshing, setRefreshing] = useState(false);
   const pollRef = useRef(null);
 
-  const load = useCallback(async (dys) => {
+  const load = useCallback(async (dys, force = false) => {
     try {
-      const r = await fetch(`${GB}/data/newsradar?days=${dys}&limit=500`);
+      const r = await fetch(`${GB}/data/newsradar?days=${dys}&limit=500&refresh=${force ? "true" : "false"}`);
       const j = await r.json();
-      setData(j); setRefreshing(false);
-      if (j.warming && !pollRef.current) {
+      setData(j); setRefreshing(Boolean(j.refreshing));
+      if ((j.warming || j.refreshing) && !pollRef.current) {
         pollRef.current = setTimeout(() => { pollRef.current = null; load(dys); }, 15000);
       }
     } catch (e) { setData({ warming: false, items: [], error: String(e) }); setRefreshing(false); }
@@ -174,12 +176,12 @@ function App() {
   const warming = data && data.warming;
   const toggle = (k) => setSel((c) => c.includes(k) ? c.filter((x) => x !== k) : [...c, k]);
   const openSector = (k) => { setView("river"); setSel([k]); window.scrollTo({ top: 0, behavior: "smooth" }); };
-  const refresh = () => { setRefreshing(true); load(days); };
+  const refresh = () => { setRefreshing(true); load(days, true); };
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "20px 24px 48px" }}>
       <Masthead n={items.length} pulledAt={data && data.pulled_at} warming={warming}
-                onRefresh={refresh} refreshing={refreshing} />
+                onRefresh={refresh} refreshing={refreshing} sourceStats={data} />
 
       {/* 控制条 */}
       <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", margin: "16px 0 4px" }}>
@@ -195,6 +197,17 @@ function App() {
         <span style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-3)" }}>
           {filtered.length} 条</span>
       </div>
+
+      {data && (data.future_count > 0 || data.sources_failed > 0 ||
+                data.source_quality === "unknown" || data.refresh_backoff) && (
+        <div style={{ marginTop: 8, fontFamily: "var(--font-mono)", fontSize: 10.5,
+                      color: "var(--ink-3)", lineHeight: 1.65 }}>
+          {data.future_count > 0 && <span>已将 {data.future_count} 条源声明未来时间从近期新闻流剥离（可能是日程或源时钟异常）。 </span>}
+          {data.sources_failed > 0 && <span>本轮 {data.sources_failed} 个源失败，其余源继续可用。 </span>}
+          {data.source_quality === "unknown" && <span>旧缓存缺逐源健康账，后台正在补齐。</span>}
+          {data.refresh_backoff && <span>最近刷新失败，约 {data.refresh_retry_after_s || 0} 秒后再试。 </span>}
+        </div>
+      )}
 
       {/* 赛道筛选带 */}
       <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 10, paddingBottom: 14,
@@ -217,7 +230,7 @@ function App() {
       {warming && items.length === 0 ? (
         <div style={{ marginTop: 40, textAlign: "center", fontFamily: "var(--font-serif)", fontSize: 14, color: "var(--ink-3)" }}>
           ◷ 情报雷达预热中<br />
-          <span style={{ fontSize: 12, color: "var(--ink-4)" }}>后台首次扫描 108 个源(约 20~40 秒),抓完自动上报…</span>
+          <span style={{ fontSize: 12, color: "var(--ink-4)" }}>后台首次扫描 {data?.configured_sources || "配置"} 个源(约 20~40 秒),抓完自动上报…</span>
         </div>
       ) : filtered.length === 0 ? (
         <div style={{ marginTop: 40, textAlign: "center", fontSize: 13, color: "var(--ink-3)" }}>
@@ -234,7 +247,7 @@ function App() {
 
       <div style={{ marginTop: 28, paddingTop: 12, borderTop: "1px solid var(--line-1)",
                     fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--ink-4)", lineHeight: 1.7 }}>
-        源表 vendored 自 simonlin1212/Vibe-Research(MIT);抓取 / 解析为观澜自写,不含 redline 过滤。
+        106 源表对齐 simonlin1212/Vibe-Research v1.0.1(MIT);抓取 / 解析为观澜自写,不含 redline 过滤。
         RSS 为不可信外部文本 —— 本页纯展示、绝不进信号,亦不喂 LLM。红涨绿跌与情绪/信号层严格隔离。</div>
     </div>
   );

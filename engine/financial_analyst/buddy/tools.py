@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from financial_analyst.data.code_norm import etf_exchange
+from financial_analyst.data.code_norm import etf_exchange, is_bj_code
 
 
 def _disp_w(s: Any) -> int:
@@ -62,7 +62,7 @@ def normalize_code(code: Any) -> str:
             return "SH" + c
         if c[0] in "03":
             return "SZ" + c
-        if c[0] in "84":
+        if is_bj_code(c):
             return "BJ" + c
     return c
 
@@ -992,10 +992,11 @@ def _daily_cached_swarm(slug: str, cmd: list, cn: str, timeout: int = 300) -> To
         pass
 
     t0 = _time.time()
+    root = _project_root()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=timeout,
-                              cwd=str(_project_root()))
+                              cwd=str(root), env=_daily_swarm_env(root))
     except subprocess.TimeoutExpired:
         return ToolResult(_swarm_fail_msg(slug, cache_dir, today,
                                           f"{cn}超时(上限 {timeout}s)。可稍后重试。"),
@@ -1029,10 +1030,76 @@ def _swarm_fail_msg(slug: str, cache_dir, today, head: str) -> str:
     return head
 
 
+def _daily_swarm_env(root: Path) -> Dict[str, str]:
+    """Pin daily-swarm subprocesses to this repository's engine and config."""
+    env = dict(os.environ)
+    prefixes = [str(root / "engine"), str(root)]
+    existing = [part for part in env.get("PYTHONPATH", "").split(os.pathsep) if part]
+    seen: set[str] = set()
+    pythonpath: list[str] = []
+    for part in [*prefixes, *existing]:
+        key = os.path.normcase(os.path.abspath(part))
+        if key in seen:
+            continue
+        seen.add(key)
+        pythonpath.append(part)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+    env["FA_CONFIG_DIR"] = str(root / "config")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
+
+
 def _tool_mainline() -> ToolResult:
     """Run monthly industry-chain mainline radar (5-state per chain)."""
-    return _daily_cached_swarm("mainline", ["financial-analyst", "mainline"],
-                               "主线雷达", timeout=180)
+    result = _daily_cached_swarm(
+        "mainline_research_v2", ["financial-analyst", "mainline"],
+        "主线雷达", timeout=180,
+    )
+    if result.is_error:
+        return result
+    evidence = _mainline_evidence_from_output(result.content)
+    if not evidence:
+        return result
+    text = result.content
+    for item in evidence:
+        for alias in item.get("aliases") or []:
+            text = text.replace(f"[{alias}]", f"[{item['evidence_id']}]")
+        ref = str(item.get("source_ref") or "").strip()
+        if ref:
+            text = text.replace(ref, f"[{item['evidence_id']}]")
+    scrubbed = []
+    for line in text.splitlines():
+        matched_id = next(
+            (item["evidence_id"] for item in evidence if f"[{item['evidence_id']}]" in line),
+            "",
+        )
+        if matched_id and "|" in line and ("http" in line or "research://" in line):
+            line = line.rsplit("|", 1)[0] + f"| source=ledger [{matched_id}]"
+        scrubbed.append(line)
+    text = "\n".join(scrubbed)
+    return ToolResult(text, side_effect={"evidence": evidence})
+
+
+def _mainline_evidence_from_output(content: str) -> List[Dict[str, Any]]:
+    """Load exact report refs from the writer JSON named by bounded CLI output."""
+    import re
+    match = re.search(r"(?m)^Brief:\s*(.+?\.md)\s*$", str(content or ""))
+    if not match:
+        return []
+    md_path = Path(match.group(1).strip())
+    if not md_path.is_absolute():
+        md_path = _project_root() / md_path
+    json_path = md_path.with_suffix(".json")
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        context = payload.get("report_context") if isinstance(payload, dict) else None
+        rows = context.get("items") if isinstance(context, dict) else None
+        if not isinstance(rows, list):
+            return []
+        from guanlan_v2.research.evidence import normalise_report_evidence_many
+        return normalise_report_evidence_many(rows, limit=12)
+    except Exception:
+        return []
 
 
 def _tool_brief() -> ToolResult:
@@ -1077,8 +1144,28 @@ def _tool_ask_quote(code: str) -> ToolResult:
     return ToolResult(line)
 
 
+def _a_share_quote_time_context() -> tuple[str, str, str]:
+    """Return conservative A-share wall-clock context; never prove quote time."""
+    import datetime as _dt
+    from financial_analyst.buddy.alerts import market_session
+
+    session = market_session()
+    fetched_at = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    label = {
+        "open": "交易时钟窗口内(不含节假日校验)",
+        "lunch": "午休",
+        "closed": "已收盘",
+        "weekend": "周末休市",
+    }.get(session, "时段未知")
+    note = (
+        f"时间口径：当前A股时段={label}；抓取时间={fetched_at}；"
+        "上游未逐行提供成交时间，只能称最新可得报价，不得称实时成交价或盘中行情。"
+    )
+    return session, fetched_at, note
+
+
 def _tool_realtime_quote(code: str) -> ToolResult:
-    """Realtime quote. Goes through ``data/quote_fallback`` multi-source chain
+    """Latest available quote. Goes through ``data/quote_fallback`` multi-source chain
     (tencent → xueqiu), returning the first source that succeeds. Unlike
     quote_lookup (daily/EOD), this is the intraday realtime price."""
     from financial_analyst.data.quote_fallback import fetch_realtime_quote
@@ -1086,23 +1173,28 @@ def _tool_realtime_quote(code: str) -> ToolResult:
         src, q = fetch_realtime_quote(code)
     except RuntimeError as exc:
         return ToolResult(f"实时行情抓取失败: {exc}", is_error=True)
+    session, fetched_at, time_note = _a_share_quote_time_context()
     if src == "tencent":
         return ToolResult(
-            f"{q.get('name','?')} ({q.get('code', code)})\n"
-            f"  现价 {q.get('price')}  涨跌 {q.get('change')} ({q.get('changePercent')}%)\n"
+            f"{q.get('name','?')} ({q.get('code', code)}) · 最新可得报价\n"
+            f"{time_note}\n"
+            f"  最新可得价 {q.get('price')}  涨跌 {q.get('change')} ({q.get('changePercent')}%)\n"
             f"  开 {q.get('open')} 高 {q.get('high')} 低 {q.get('low')} 昨收 {q.get('prevClose')}\n"
             f"  量比 {q.get('vol_ratio')}  换手 {q.get('turnover_rate')}%  振幅 {q.get('amplitude')}%\n"
             f"  PE {q.get('pe')}  PB {q.get('pb')}  总市值 {q.get('total_mv')}亿  成交额 {q.get('amount')}万",
-            side_effect={"quote": q, "source": src},
+            side_effect={"quote": q, "source": src, "market_session": session,
+                         "fetched_at": fetched_at, "quote_time_status": "unknown"},
         )
     # xueqiu shape
     return ToolResult(
-        f"{q.get('name','?')} ({q.get('symbol', code)}) [{q.get('market_status','?')}]\n"
-        f"  现价 {q.get('price','?')}  涨跌 {q.get('change','?')} ({q.get('changePercent','?')})\n"
+        f"{q.get('name','?')} ({q.get('symbol', code)}) [{q.get('market_status','?')}] · 最新可得报价\n"
+        f"{time_note}\n"
+        f"  最新可得价 {q.get('price','?')}  涨跌 {q.get('change','?')} ({q.get('changePercent','?')})\n"
         f"  开 {q.get('open','?')} 高 {q.get('high','?')} 低 {q.get('low','?')} 昨收 {q.get('prevClose','?')}\n"
         f"  量 {q.get('volume','?')}  额 {q.get('amount','?')}  换手 {q.get('turnover_rate','?')}\n"
         f"  市值 {q.get('marketCap','?')}  振幅 {q.get('amplitude','?')}  时间 {q.get('time','?')}",
-        side_effect={"quote": q, "source": src},
+        side_effect={"quote": q, "source": src, "market_session": session,
+                     "fetched_at": fetched_at, "quote_time_status": "unknown"},
     )
 
 
@@ -1119,7 +1211,8 @@ def _tool_quote_batch(codes: str) -> ToolResult:
         return ToolResult(f"批量行情抓取失败: {exc}", is_error=True)
     if not data:
         return ToolResult("批量行情返回空 (代码可能无效)", is_error=True)
-    lines = [f"批量行情 ({len(data)} 只):"]
+    session, fetched_at, time_note = _a_share_quote_time_context()
+    lines = [f"批量行情（最新可得报价，{len(data)} 只）:", time_note]
     lines.append(f"  {_pad('代码', 10)}{_pad('名称', 12)}{_pad('现价', 9)}"
                  f"{_pad('涨跌幅', 9)}{_pad('量比', 7)}{_pad('换手', 7)}{_pad('PE', 8)}")
     for v in data.values():
@@ -1132,7 +1225,11 @@ def _tool_quote_batch(codes: str) -> ToolResult:
             f"{_pad((str(v.get('turnover_rate')) + '%') if v.get('turnover_rate') is not None else '-', 7)}"
             f"{_pad(v.get('pe') if v.get('pe') is not None else '-', 8)}"
         )
-    return ToolResult("\n".join(lines), side_effect={"quotes": data})
+    return ToolResult(
+        "\n".join(lines),
+        side_effect={"quotes": data, "market_session": session,
+                     "fetched_at": fetched_at, "quote_time_status": "unknown"},
+    )
 
 
 def _tool_market_status() -> ToolResult:
@@ -2541,8 +2638,10 @@ TOOL_REGISTRY: List[Tool] = [
     Tool(
         name="mainline_radar",
         description=(
-            "Run monthly industry-chain mainline radar: classifies each chain "
-            "into mainline / initiation / revival / decay / cold. "
+            "Run the monthly industry-chain mainline radar: price/volume state first "
+            "selects and ranks candidates, then the latest attributed research-report "
+            "views cross-check them and support conditional 1-3 month scenarios. "
+            "Report availability or opinions never change candidate selection/ranking. "
             "Use when the user asks which sectors are leading / 主线 / 板块轮动."
         ),
         input_schema={"type": "object", "properties": {}},
@@ -2707,9 +2806,9 @@ TOOL_REGISTRY: List[Tool] = [
     Tool(
         name="realtime_quote",
         description=(
-            "实时行情 (雪球, 盘中实时价/涨跌幅/量/换手/市值/盘口状态). "
-            "区别于 quote_lookup (日线 EOD). Use when user wants 现在多少钱 / "
-            "盘中价 / 实时. 需要雪球 cookie."
+            "最新可得行情 (腾讯→雪球 fallback,价/涨跌幅/量/换手/市值/盘口状态). "
+            "区别于 quote_lookup (日线 EOD). 上游未提供成交时间时只能称最新可得报价；"
+            "休市/午休/收盘后禁止称实时或盘中。需要雪球 cookie."
         ),
         input_schema={
             "type": "object",
@@ -2722,8 +2821,9 @@ TOOL_REGISTRY: List[Tool] = [
     Tool(
         name="quote_batch",
         description=(
-            "批量实时行情 (腾讯, 无 cookie, 一次几十只 ~120ms). 用于多股对比 / "
-            "自选股监控墙 / '看下这几只'. codes 逗号分隔. 比逐只 realtime_quote 快得多."
+            "批量最新可得行情 (腾讯→雪球 fallback,一次几十只). 用于多股对比 / "
+            "自选股监控墙 / '看下这几只'. codes 逗号分隔. 输出显式市场时段与抓取时间；"
+            "上游未逐行提供成交时间时禁止称实时或盘中。"
         ),
         input_schema={
             "type": "object",

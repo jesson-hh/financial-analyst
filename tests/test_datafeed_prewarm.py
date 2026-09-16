@@ -5,6 +5,10 @@ import guanlan_v2.datafeed.prewarm as pw
 
 def _run_inline(monkeypatch):
     """把线程启动改为同步执行,便于断言。"""
+    # The release test environment disables background prewarm globally.  Tests
+    # that exercise the enabled path must opt in explicitly instead of depending
+    # on the caller's ambient environment.
+    monkeypatch.setenv("GUANLAN_DATAFEED_PREWARM", "1")
     calls = []
 
     class _T:

@@ -9,11 +9,15 @@ read 新在前/坏行跳过/limit 钳制。run 状态推导在读取时做:有�
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-RUNS_PATH = Path(__file__).resolve().parents[2] / "var" / "research_runs.jsonl"
-ROUNDS_PATH = Path(__file__).resolve().parents[2] / "var" / "research_rounds.jsonl"
+_ROOT = Path(os.environ.get("GUANLAN_RESEARCH_STORE_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var"
+))
+RUNS_PATH = _ROOT / "research_runs.jsonl"
+ROUNDS_PATH = _ROOT / "research_rounds.jsonl"
 
 
 def _append(path: Path, record: Dict[str, Any]) -> bool:

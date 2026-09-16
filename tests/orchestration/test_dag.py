@@ -27,7 +27,10 @@ import pytest
 
 from guanlan_v2.orchestration import dag as D
 from guanlan_v2.orchestration import worker as W
-from guanlan_v2.orchestration.budget import BudgetLedger
+from guanlan_v2.orchestration.budget import (
+    BudgetLedger,
+    IdempotencyReplayRefused,
+)
 from guanlan_v2.orchestration.catalog import (
     ContentManifestEntry,
     EvidencePolicy,
@@ -158,6 +161,7 @@ class NodeSpec:
     deps: tuple = ()
     behaviour: str = "ok"
     worker: str = "root"   # "root" (no inputs) | "chain" (one) | "fan" (many)
+    token_reservation: int = 0
 
 
 @dataclass
@@ -275,7 +279,7 @@ def build_dag_env(
 
     nodes = tuple(
         PlanNode(id=ns.id, worker_id=_wid[ns.worker], writes_slot=f"slot-{ns.id}",
-                 dependencies=tuple(ns.deps))
+                 dependencies=tuple(ns.deps), token_reservation=ns.token_reservation)
         for ns in node_specs)
     context = _context()
     ctx_ref = PayloadRef(namespace="main", object_id="ctx-obj", content_digest=context.content_digest)
@@ -507,6 +511,7 @@ def test_deterministic_reserves_zero_llm_invocations():
     assert result.terminal_status == "completed"
     node_res = [r for r in _node_reservations(env) if r.scope_id == "a"][0]
     assert node_res.reserved_llm_invocations == 0
+    assert node_res.reserved_tokens == 0
     assert result.settled_llm_invocations == 0
 
 
@@ -516,7 +521,108 @@ def test_llm_reserves_one_llm_invocation():
     assert result.terminal_status == "completed"
     node_res = [r for r in _node_reservations(env) if r.scope_id == "a"][0]
     assert node_res.reserved_llm_invocations == 1
+    assert node_res.reserved_tokens == W.DEFAULT_LLM_ATTEMPT_TOKEN_RESERVATION
     assert result.settled_llm_invocations == 1
+
+
+def test_zero_output_model_success_still_settles_one_llm_invocation():
+    """Invocation accounting is dispatch evidence, never an output-token proxy."""
+
+    class _ZeroOutputGateway(FakeModelGateway):
+        def invoke(self, request, *, prompt_assembly_ref):
+            W.verify_model_request_binding(
+                request, prompt_assembly_ref, reader=self._stores.payloads)
+            return W.ModelResult(
+                payload=_payload("zero-output"), rendered_text="",
+                input_tokens=0, output_tokens=0, provider_attempted=True,
+                provider="fake", model="fake-model")
+
+    env = build_dag_env([NodeSpec("a")], sink_node_ids=("a",), kind="llm")
+    result, rec = env.run(model_gateway=_ZeroOutputGateway(env.stores))
+    node_run = [nr for nr in rec.node_runs if nr.node_id == "a"][-1]
+    settled = _node_reservations(env)[0]
+
+    assert result.terminal_status == "completed"
+    assert node_run.output_tokens == 0
+    assert W.node_run_llm_invocations(node_run) == 1
+    assert settled.actual_tokens == 0
+    assert settled.actual_llm_invocations == 1
+    assert result.settled_llm_invocations == 1
+
+
+@pytest.mark.parametrize(
+    "provider_attempted,expected_llm,expected_tokens",
+    [(False, 0, 0), (True, 1, 9)],
+)
+def test_model_failure_settlement_distinguishes_dispatch_boundary(
+        provider_attempted, expected_llm, expected_tokens):
+    """Pre-dispatch refusal is free; a dispatched failure burns one invocation."""
+
+    class _EvidenceFailureGateway(FakeModelGateway):
+        def invoke(self, request, *, prompt_assembly_ref):
+            W.verify_model_request_binding(
+                request, prompt_assembly_ref, reader=self._stores.payloads)
+            raise W.ModelInvocationEvidenceError(
+                "scripted provider failure",
+                provider_attempted=provider_attempted,
+                input_tokens=(9 if provider_attempted else 0),
+                output_tokens=0,
+            )
+
+    env = build_dag_env([NodeSpec("a")], sink_node_ids=("a",), kind="llm")
+    result, rec = env.run(model_gateway=_EvidenceFailureGateway(env.stores))
+    node_run = [nr for nr in rec.node_runs if nr.node_id == "a"][-1]
+    settled = _node_reservations(env)[0]
+
+    assert result.terminal_status == "failed"
+    assert node_run.reason_code == "model_error"
+    assert W.node_run_llm_invocations(node_run) == expected_llm
+    assert (node_run.input_tokens + node_run.output_tokens) == expected_tokens
+    assert settled.status == "settled"
+    assert settled.actual_tokens == expected_tokens
+    assert settled.actual_llm_invocations == expected_llm
+
+
+def test_untyped_gateway_failure_after_invoke_is_conservatively_accounted():
+    """A non-conforming gateway must not erase a possibly billed invocation."""
+    calls = {"n": 0}
+
+    class _UntypedFailureGateway(FakeModelGateway):
+        def invoke(self, request, *, prompt_assembly_ref):
+            W.verify_model_request_binding(
+                request, prompt_assembly_ref, reader=self._stores.payloads)
+            calls["n"] += 1
+            raise RuntimeError("untyped failure after gateway entry")
+
+    env = build_dag_env([NodeSpec("a")], sink_node_ids=("a",), kind="llm")
+    result, rec = env.run(model_gateway=_UntypedFailureGateway(env.stores))
+    node_run = [nr for nr in rec.node_runs if nr.node_id == "a"][-1]
+    settled = _node_reservations(env)[0]
+
+    assert calls["n"] == 1
+    assert result.terminal_status == "failed"
+    assert W.node_run_llm_invocations(node_run) == 1
+    assert settled.actual_llm_invocations == 1
+
+
+def test_llm_respects_explicit_node_reservation_and_settles_exact_actual():
+    class _HighTokenGateway(FakeModelGateway):
+        def invoke(self, request, *, prompt_assembly_ref):
+            W.verify_model_request_binding(
+                request, prompt_assembly_ref, reader=self._stores.payloads)
+            return W.ModelResult(
+                payload=_payload("model"), rendered_text="rendered",
+                number_anchors=(), input_tokens=2500, output_tokens=2500,
+                provider="fake", model="fake-model")
+
+    env = build_dag_env(
+        [NodeSpec("a", token_reservation=6000)],
+        sink_node_ids=("a",), kind="llm")
+    result, _ = env.run(model_gateway=_HighTokenGateway(env.stores))
+    node_res = [r for r in _node_reservations(env) if r.scope_id == "a"][0]
+
+    assert node_res.reserved_tokens == 6000
+    assert node_res.actual_tokens == result.settled_tokens == 5000
 
 
 def test_llm_model_gateway_resolved_from_factory_when_not_supplied():
@@ -974,6 +1080,38 @@ def test_crash_residue_reconciled_and_plan_not_wedged():
     assert released.status == "released"
 
 
+def test_crash_reconcile_never_releases_an_exact_usage_overage():
+    class _OverBudgetGateway(FakeModelGateway):
+        def invoke(self, request, *, prompt_assembly_ref):
+            W.verify_model_request_binding(
+                request, prompt_assembly_ref, reader=self._stores.payloads)
+            return W.ModelResult(
+                payload=_payload("model"), rendered_text="rendered",
+                number_anchors=(), input_tokens=2048, output_tokens=2049,
+                provider="fake", model="fake-model")
+
+    env = build_dag_env(
+        [NodeSpec("a", token_reservation=4096)],
+        sink_node_ids=("a",), kind="llm")
+
+    class _Crash(Exception):
+        pass
+
+    def layer_hook(layer_index, *, committed):
+        raise _Crash("after commit, before settle")
+
+    with pytest.raises(_Crash):
+        env.run(
+            model_gateway=_OverBudgetGateway(env.stores),
+            layer_hook=layer_hook)
+
+    with pytest.raises(D.DagRunError, match="remains active"):
+        env.run(model_gateway=_OverBudgetGateway(env.stores))
+
+    child = [r for r in _node_reservations(env) if r.scope_id == "a"][0]
+    assert child.status == "reserved" and child.actual_tokens == 0
+
+
 def test_crash_before_layer_commit_leaves_no_visible_artifact_then_replays():
     env = build_dag_env([NodeSpec("a")], sink_node_ids=("a",))
 
@@ -999,3 +1137,40 @@ def test_crash_before_layer_commit_leaves_no_visible_artifact_then_replays():
     result, rec = env.run()
     assert result.terminal_status == "completed"
     assert env.pool.committed_output("a", "primary") is not None
+
+
+def test_llm_crash_before_layer_commit_refuses_duplicate_provider_dispatch():
+    """An uncommitted durable attempt key is ambiguous external spend.
+
+    Deterministic nodes may be replayed, but an LLM node must not call the
+    provider twice merely because its reservation command is idempotent.
+    """
+    calls = {"n": 0}
+
+    class _CountingGateway(FakeModelGateway):
+        def invoke(self, request, *, prompt_assembly_ref):
+            calls["n"] += 1
+            return super().invoke(
+                request, prompt_assembly_ref=prompt_assembly_ref)
+
+    env = build_dag_env(
+        [NodeSpec("a")], sink_node_ids=("a",), kind="llm")
+    gateway = _CountingGateway(env.stores)
+
+    class _Crash(Exception):
+        pass
+
+    real_commit = env.pool.commit_layer
+
+    def crashing_commit(*_args, **_kwargs):
+        raise _Crash("crash after provider and terminal persistence")
+
+    env.pool.commit_layer = crashing_commit  # type: ignore
+    with pytest.raises(_Crash):
+        env.run(model_gateway=gateway)
+    assert calls["n"] == 1
+
+    env.pool.commit_layer = real_commit  # type: ignore
+    with pytest.raises(IdempotencyReplayRefused, match="fresh-only"):
+        env.run(model_gateway=gateway)
+    assert calls["n"] == 1

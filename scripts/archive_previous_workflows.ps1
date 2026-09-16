@@ -3,6 +3,8 @@ param(
     [ValidateSet('Inventory', 'Archive', 'Restore')][string]$Mode = 'Inventory',
     [Parameter(Mandatory = $true)][string]$ManifestPath,
     [string]$ArchivePath,
+    [string]$LiveRoot = $env:GUANLAN_REPO_ROOT,
+    [string]$ApiBase = 'http://127.0.0.1:9999',
     [switch]$Execute
 )
 
@@ -10,10 +12,13 @@ param(
 # saved graphs. Run Inventory BEFORE creating replacements, then keep its bytes.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$LiveRoot = 'G:\guanlan-v2'
-$GraphRoot = 'G:\guanlan-v2\.data\workflows'
-$ArchiveRoot = 'G:\guanlan-v2\var\archive'
-$ApiBase = 'http://127.0.0.1:9999'
+$LiveRoot = if ([string]::IsNullOrWhiteSpace($LiveRoot)) {
+    (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+} else {
+    (Resolve-Path -LiteralPath $LiveRoot).Path
+}
+$GraphRoot = Join-Path $LiveRoot '.data\workflows'
+$ArchiveRoot = Join-Path $LiveRoot 'var\archive'
 
 function Assert-PlainPath([string]$Path, [string]$Parent, [switch]$File) {
     $full = [IO.Path]::GetFullPath($Path)

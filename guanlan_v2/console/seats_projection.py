@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -17,10 +18,11 @@ from guanlan_v2.console.workspaces import normalize_security_code
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-ASSIGNMENTS_PATH = _REPO_ROOT / "var" / "seats_watch_assignments.json"
-STRATEGY_ARCHIVE_DIR = _REPO_ROOT / "var" / "archive"
-DECISIONS_LOG = _REPO_ROOT / "var" / "seats_decisions.jsonl"
-REALTIME_DB_PATH = _REPO_ROOT / "var" / "realtime" / "seats_bars.sqlite3"
+_SEATS_VAR = Path(os.environ.get("GUANLAN_SEATS_VAR_ROOT") or (_REPO_ROOT / "var"))
+ASSIGNMENTS_PATH = _SEATS_VAR / "seats_watch_assignments.json"
+STRATEGY_ARCHIVE_DIR = Path(os.environ.get("GUANLAN_ARCHIVE_DIR") or (_REPO_ROOT / "var" / "archive"))
+DECISIONS_LOG = _SEATS_VAR / "seats_decisions.jsonl"
+REALTIME_DB_PATH = _SEATS_VAR / "realtime" / "seats_bars.sqlite3"
 
 _A_SHARE_CODE_RE = re.compile(r"^(SH|SZ|BJ)(\d{6})$")
 _TEXT_LIMITS = {

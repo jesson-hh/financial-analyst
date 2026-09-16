@@ -1,5 +1,7 @@
 from __future__ import annotations
 import asyncio
+import json
+import os
 import sys
 import typer
 from pathlib import Path
@@ -16,6 +18,12 @@ for stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+# Test collection imports this module to inspect the Typer app.  In the explicit
+# Guanlan test mode, startup discovery must not inspect a developer's real .env
+# or execute user-private plugins: either can mutate credentials/output roots
+# before a test body starts.  Production keeps the existing startup behaviour.
+_EXPLICIT_TEST_MODE = os.environ.get("GUANLAN_TESTING") == "1"
+
 # Three-pass .env loading (order = priority, last write wins via override=True):
 #   1. cwd / parents — legacy behaviour, covers users running from a project dir
 #      that has a local .env (e.g. devs in G:\financial-analyst).
@@ -29,29 +37,31 @@ for stream in (sys.stdout, sys.stderr):
 # without finding ~/.financial-analyst/.env. Result: os.environ missing
 # DASHSCOPE_API_KEY / DEEPSEEK_API_KEY → /models returns 0 providers →
 # the UI model picker hides itself and the user can't switch models.
-load_dotenv(override=True)
-try:
-    from financial_analyst.workspace import get_workspace as _get_ws
-    _ws_env = _get_ws() / ".env"
-    if _ws_env.exists():
-        load_dotenv(dotenv_path=_ws_env, override=True)
-except Exception:
-    pass
-try:
-    from financial_analyst.init_cli import _project_root as _pr
-    _pr_env = _pr() / ".env"
-    if _pr_env.exists():
-        load_dotenv(dotenv_path=_pr_env, override=True)
-except Exception:
-    pass
+if not _EXPLICIT_TEST_MODE:
+    load_dotenv(override=True)
+    try:
+        from financial_analyst.workspace import get_workspace as _get_ws
+        _ws_env = _get_ws() / ".env"
+        if _ws_env.exists():
+            load_dotenv(dotenv_path=_ws_env, override=True)
+    except Exception:
+        pass
+    try:
+        from financial_analyst.init_cli import _project_root as _pr
+        _pr_env = _pr() / ".env"
+        if _pr_env.exists():
+            load_dotenv(dotenv_path=_pr_env, override=True)
+    except Exception:
+        pass
 
 # Load user plugins (user-private .py files that call ModelRegistry.register etc.)
 # Errors here are non-fatal — a broken plugin won't prevent the CLI from working.
-try:
-    from financial_analyst.plugins import load_plugins
-    load_plugins()
-except Exception:
-    pass
+if not _EXPLICIT_TEST_MODE:
+    try:
+        from financial_analyst.plugins import load_plugins
+        load_plugins()
+    except Exception:
+        pass
 
 from financial_analyst import __version__
 
@@ -84,6 +94,22 @@ app.command(name="update", help="一键从 PyPI 升级 financial-analyst 到最�
 def version():
     """Print version."""
     typer.echo(f"financial-analyst {__version__}")
+
+
+@app.command(name="pit-preflight")
+def pit_preflight():
+    """Check strict-PIT production prerequisites without exposing secrets.
+
+    Exit code 0 means ready.  Exit code 2 means blocked; the JSON ``blockers``
+    list contains stable, non-secret reason codes suitable for deployment
+    gates and health collectors.
+    """
+    from financial_analyst.data.pit_preflight import deployment_preflight
+
+    result = deployment_preflight()
+    typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+    if not result["ready"]:
+        raise typer.Exit(code=2)
 
 
 @app.command()
@@ -726,8 +752,46 @@ async def _run_mainline(asof: Optional[str], panel: Optional[str], out_dir: Path
 
     writer_result = results.get("mainline-writer")
     if writer_result and writer_result.ok:
-        typer.echo(f"Brief: {writer_result.output.output_md_path}")
-        typer.echo(f"Headline: {writer_result.output.headline}")
+        output = writer_result.output
+
+        def clip(value, limit: int) -> str:
+            text = " ".join(str(value or "").split())
+            return text if len(text) <= limit else text[: max(0, limit - 1)].rstrip() + "…"
+
+        typer.echo(f"Brief: {clip(output.output_md_path, 240)}")
+        typer.echo(
+            "Narrative headline (mixed inference; not pure quant): "
+            f"{clip(output.headline, 180)}"
+        )
+        quant_state = getattr(output, "quant_state", {}) or {}
+        typer.echo(
+            "Quant state (authoritative; reports excluded): "
+            + clip(json.dumps(quant_state, ensure_ascii=False, separators=(",", ":")), 900)
+        )
+        typer.echo(
+            "Report context: "
+            f"status={clip(output.report_context_status, 40)}; "
+            f"reason={clip(output.report_context_reason, 140)}; "
+            f"asof={clip(output.report_context_asof, 40)}"
+        )
+        citations = list(output.report_citations or [])[:6]
+        typer.echo(f"Report citations ({len(citations)}):")
+        if citations:
+            for citation in citations:
+                typer.echo(
+                    "  "
+                    f"[{clip(citation.get('citation_id'), 20)}] "
+                    f"{clip(citation.get('publish_ts'), 32)} | "
+                    f"{clip(citation.get('institution'), 40)} | "
+                    f"{clip(citation.get('title'), 80)} | "
+                    f"{clip(citation.get('source_ref'), 140)}"
+                )
+        else:
+            typer.echo("  (none; report availability is not a market signal)")
+        signals = list(output.actionable_signals or [])[:5]
+        typer.echo(f"Actionable signals ({len(signals)}):")
+        for signal in signals:
+            typer.echo(f"  - {clip(signal, 120)}")
     else:
         for n, r in results.items():
             if not r.ok:

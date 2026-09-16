@@ -19,7 +19,15 @@ _ENGINE = pathlib.Path(__file__).resolve().parents[1] / "engine"
 if str(_ENGINE) not in sys.path:
     sys.path.insert(0, str(_ENGINE))
 
+from financial_analyst.agent.tier1 import evidence_loader as ev_mod
 from financial_analyst.agent.tier1.evidence_loader import EvidenceLoader
+from financial_analyst.data.trusted_receipts import (
+    KEY_ENV,
+    KEY_ID_ENV,
+    REPORT_MANIFEST_DOMAIN,
+    REPORT_SECTION_DOMAIN,
+    sign_payload,
+)
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _REPO_YAML = _REPO_ROOT / "config" / "swarm" / "stock-deep-dive.yaml"
@@ -37,6 +45,52 @@ def _pack(tmp_path, **overrides):
     }
     payload.update(overrides)
     p = tmp_path / "evidence_pack.json"
+    p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return p
+
+
+def _signed_historical_pack(
+    tmp_path, monkeypatch, *, asof="2020-01-02",
+    pulled_at="2020-01-02T15:00:00",
+):
+    monkeypatch.setenv(KEY_ID_ENV, "evidence-loader-test-key")
+    monkeypatch.setenv(
+        KEY_ENV, "test-only-evidence-loader-hmac-material-over-32-bytes",
+    )
+    section = {"as_of": asof, "price": 12.3}
+    receipt = {
+        "source": "quote_live",
+        "status": "available",
+        "requested_asof": asof,
+        "data_asof": asof,
+        "pulled_at": pulled_at,
+        "snapshot_version": f"fixture-{asof}",
+        "snapshot_asof": asof,
+        "snapshot_immutable": True,
+        "content_sha256": ev_mod._digest(section),
+        "cache_key": f"quote-{asof}",
+        "point_in_time": True,
+        "historical_version_proven": True,
+        "proof": "captured_snapshot",
+        "reason": "",
+    }
+    receipt["auth"] = sign_payload(REPORT_SECTION_DOMAIN, receipt)
+    payload = {
+        "schema_version": "company-research-evidence@2",
+        "manifest_schema_version": "report-evidence-manifest/v1",
+        "code": "SH603986",
+        "asof": asof,
+        "mode": "historical",
+        "generated_at": "2020-01-02T15:01:00",
+        "cache_key": ev_mod._manifest_cache_key("SH603986", asof, "historical"),
+        "sections": {"quote_live": section},
+        "receipts": {"quote_live": receipt},
+        "unavailable_sources": [],
+        "errors": {},
+    }
+    payload["manifest_auth"] = sign_payload(REPORT_MANIFEST_DOMAIN, payload)
+    payload["manifest_digest"] = ev_mod._digest(payload)
+    p = tmp_path / f"historical-{asof}.json"
     p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return p
 
@@ -113,6 +167,55 @@ def test_evidence_loader_bad_json_degrades(tmp_path, monkeypatch):
 
     assert res.ok is False
     assert res.error  # json 异常原样冒泡,不吞
+
+
+def test_historical_loader_rejects_cross_asof_pack(tmp_path, monkeypatch):
+    path = _signed_historical_pack(tmp_path, monkeypatch, asof="2020-01-01")
+    agent = EvidenceLoader(memory_root=tmp_path, pack_path=str(path))
+    res = asyncio.run(
+        agent.run(inputs={"code": "SH603986", "asof_date": "2020-01-02"})
+    )
+    assert res.ok is False
+    assert "asof mismatch" in res.error
+
+
+def test_historical_loader_pauses_receipt_pulled_after_asof(tmp_path, monkeypatch):
+    path = _signed_historical_pack(
+        tmp_path, monkeypatch,
+        asof="2020-01-02", pulled_at="2020-01-03T09:00:00",
+    )
+    agent = EvidenceLoader(memory_root=tmp_path, pack_path=str(path))
+    res = asyncio.run(
+        agent.run(inputs={"code": "SH603986", "asof_date": "2020-01-02"})
+    )
+    assert res.ok is True
+    assert res.output.sections["quote_live"] is None
+    assert res.output.receipts["quote_live"]["status"] == "unavailable"
+    assert "pulled_at" in res.output.errors["quote_live"]
+
+
+def test_historical_loader_accepts_proven_same_day_receipt(tmp_path, monkeypatch):
+    path = _signed_historical_pack(tmp_path, monkeypatch)
+    agent = EvidenceLoader(memory_root=tmp_path, pack_path=str(path))
+    res = asyncio.run(
+        agent.run(inputs={"code": "SH603986", "asof_date": "2020-01-02"})
+    )
+    assert res.ok is True
+    assert res.output.sections["quote_live"]["price"] == 12.3
+    assert res.output.manifest_digest
+
+
+def test_historical_loader_rejects_tampered_manifest(tmp_path, monkeypatch):
+    path = _signed_historical_pack(tmp_path, monkeypatch)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["sections"]["quote_live"]["price"] = 999.0
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    agent = EvidenceLoader(memory_root=tmp_path, pack_path=str(path))
+    res = asyncio.run(
+        agent.run(inputs={"code": "SH603986", "asof_date": "2020-01-02"})
+    )
+    assert res.ok is False
+    assert "digest mismatch" in res.error
 
 
 # ---------------------------------------------------------------------------

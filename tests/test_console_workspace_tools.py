@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import json
 import sys
+import threading
+import time
 
 import pytest
 
@@ -285,6 +288,166 @@ def test_run_output_is_bounded_and_psutil_is_required(tmp_path, monkeypatch):
         wt._run_command([sys.executable, "-I", "-c", "print('never')"], tmp_path, 10)
 
 
+def test_confirmed_analysis_runs_code_and_registers_chart_and_documents(tmp_path):
+    store = ConsoleStore(root=tmp_path / "console")
+    workspace, sid = _space(store, "600667", mode="research")
+    code = """
+import csv
+import json
+from pathlib import Path
+
+from matplotlib import pyplot as plt
+from docx import Document
+
+rows = json.loads(Path("input.json").read_text(encoding="utf-8"))["rows"]
+values = [float(item["return"]) for item in rows]
+mean_value = sum(values) / len(values)
+fig, ax = plt.subplots(figsize=(4, 2.5))
+ax.plot([item["date"] for item in rows], values, marker="o")
+ax.axhline(mean_value, linestyle="--", color="#b33a2b")
+ax.set_title("Return sample")
+fig.tight_layout()
+fig.savefig("returns.png", dpi=120)
+plt.close(fig)
+with Path("summary.csv").open("w", newline="", encoding="utf-8") as handle:
+    writer = csv.writer(handle)
+    writer.writerow(["metric", "value"])
+    writer.writerow(["mean", mean_value])
+Path("report.md").write_text(f"# Analysis\\n\\nMean: {mean_value:.4f}\\n", encoding="utf-8")
+document = Document()
+document.add_heading("Analysis", level=1)
+document.add_paragraph(f"Mean: {mean_value:.4f}")
+document.save("report.docx")
+""".strip()
+    data = {
+        "rows": [
+            {"date": "2026-08-24", "return": 0.01},
+            {"date": "2026-08-25", "return": -0.02},
+            {"date": "2026-08-26", "return": 0.03},
+        ]
+    }
+
+    allowed = wt.allowed_tools_for_workspace(
+        set(), {"id": workspace["id"], "agent_mode": "research"},
+    )
+    assert "ww_workspace_analysis_run" in allowed
+    assert wt.may_auto_approve(workspace, "ww_workspace_analysis_run", {}) is False
+
+    with _bound(store, sid):
+        result = wt.workspace_analysis_run_impl(
+            code=code, data=data, title="收益样本分析", timeout_seconds=60,
+        )
+
+    assert result["ok"] is True, result["content"]
+    artifact = result["artifact"]
+    assert artifact["kind"] == "analysis_bundle"
+    assert artifact["payload"]["asset_id"].startswith("wa_")
+    assert len(artifact["payload"]["images"]) == 1
+    assert {item["name"] for item in artifact["payload"]["documents"]} == {
+        "report.docx", "report.md", "summary.csv",
+    }
+    from guanlan_v2.console.media import MediaStore
+
+    media_store = MediaStore(store)
+    image = artifact["payload"]["images"][0]
+    assert media_store.load_for_session(image["media_id"], sid)[0]["mime"] == "image/png"
+    for document in artifact["payload"]["documents"]:
+        metadata, body = media_store.load_document_for_session(
+            document["document_id"], sid,
+        )
+        assert metadata["name"] == document["name"] and body
+    public = wt.analysis_public_args({"code": code, "data": data, "title": "收益样本分析"})
+    assert public["code"] == code
+    assert len(public["code_sha256"]) == len(public["input_sha256"]) == 64
+    assert "data" not in public
+    assert "2026-08-24" not in json.dumps(public, ensure_ascii=False)
+    run_dir = next(
+        (tmp_path / "console" / "workspace_files" / workspace["id"] / "output").glob(
+            "analysis_*"
+        )
+    )
+    actual_input = (run_dir / "input.json").read_bytes()
+    assert hashlib.sha256(actual_input).hexdigest() == public["input_sha256"]
+    assert actual_input == wt._analysis_input_bytes(data)
+    asset = wt.get_workspace_asset(
+        store, workspace["id"], artifact["payload"]["asset_id"],
+    )
+    assert asset["kind"] == "report" and asset["run_id"] == result["run_id"]
+    assert len(asset["attachments"]["images"]) == 1
+    assert len(asset["attachments"]["documents"]) == 3
+    indexed = wt.public_asset_rows(store, workspace["id"])
+    assert any(row["id"] == asset["id"] and row["kind"] == "report" for row in indexed)
+    with _bound(store, sid):
+        reopened = wt.workspace_asset_get_impl(asset["id"])
+    assert reopened["ok"] is True
+    assert reopened["artifact"]["kind"] == "analysis_bundle"
+    assert reopened["artifact"]["payload"]["asset_id"] == asset["id"]
+    assert len(reopened["artifact"]["payload"]["documents"]) == 3
+
+
+def test_analysis_arguments_are_exact_and_empty_output_is_not_success(tmp_path):
+    store = ConsoleStore(root=tmp_path / "console")
+    _workspace, sid = _space(store, "600667", mode="research")
+    with pytest.raises(wt.WorkspaceToolError, match="5-300"):
+        wt.validated_analysis_args({"code": "print('x')", "timeout_seconds": "300"})
+    with pytest.raises(wt.WorkspaceToolError, match="结构"):
+        wt.validated_analysis_args({"code": "print('x')", "shell": "whoami"})
+
+    with _bound(store, sid):
+        result = wt.workspace_analysis_run_impl(
+            code="print('中文输出正常')",
+            data={"sample": 1},
+            title="空产物检查",
+            timeout_seconds=20,
+        )
+
+    assert result["ok"] is False and result["artifact"] is None
+    assert "没有生成通过校验" in result["content"]
+    assert "中文输出正常" in result["content"]
+
+
+def test_analysis_subprocess_honors_turn_cancel_event(tmp_path):
+    cancel = threading.Event()
+    token = wt.CTX_TOOL_CANCEL.set(cancel)
+    timer = threading.Timer(0.2, cancel.set)
+    started = time.monotonic()
+    timer.start()
+    try:
+        rc, output, _elapsed = wt._run_command(
+            [sys.executable, "-I", "-X", "utf8", "-c", "import time; time.sleep(30)"],
+            tmp_path,
+            40,
+        )
+    finally:
+        timer.cancel()
+        wt.CTX_TOOL_CANCEL.reset(token)
+    assert rc == 130
+    assert "用户已请求中断分析" in output
+    assert time.monotonic() - started < 5
+
+
+def test_post_run_oversize_output_is_rejected_and_purged(tmp_path, monkeypatch):
+    store = ConsoleStore(root=tmp_path / "console")
+    workspace, sid = _space(store, "600667", mode="research")
+    monkeypatch.setattr(wt, "_MAX_ANALYSIS_OUTPUT_BYTES", 100)
+    # A fast writer can finish between live 100ms disk scans; final validation
+    # must still purge the exact fresh run instead of leaving a large orphan.
+    with _bound(store, sid):
+        result = wt.workspace_analysis_run_impl(
+            code="from pathlib import Path; Path('large.bin').write_bytes(b'x' * 10000)",
+            data=None,
+            title="超限清理",
+            timeout_seconds=20,
+        )
+    assert result["ok"] is False and result["artifact"] is None
+    run_dir = next(
+        (tmp_path / "console" / "workspace_files" / workspace["id"] / "output").glob(
+            "analysis_*"
+        )
+    )
+    assert list(run_dir.iterdir()) == []
+
+
 def test_workspace_memory_is_shared_within_space_and_isolated_across_spaces(tmp_path):
     from guanlan_v2.console.api import _memory_block
 
@@ -295,7 +458,8 @@ def test_workspace_memory_is_shared_within_space_and_isolated_across_spaces(tmp_
 
     with _console_bound(store, first_sid) as ct:
         saved = ct.memory_write_impl(
-            "护城河假设需跟踪毛利率验证", scope="workspace", key="核心假设",
+            "护城河假设需跟踪毛利率验证", scope="workspace", key="thesis",
+            subject_code=first["code"],
         )
         assert saved["ok"] is True
 

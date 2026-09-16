@@ -1,11 +1,18 @@
 from __future__ import annotations
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import pandas as pd
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from financial_analyst.agent.base import SubAgent
 from financial_analyst.data.loader_factory import get_default_loader
 from financial_analyst.data import f10_corpus
 from financial_analyst.data import stock_basic
+from financial_analyst.data.pit import (
+    PitUnavailableError,
+    guard_frame_asof,
+    is_historical_asof,
+    normalize_asof,
+    unavailable_receipt,
+)
 
 
 def _safe_float(val) -> Optional[float]:
@@ -48,6 +55,8 @@ class QuoteOutput(BaseModel):
     area: Optional[str] = None
     market: Optional[str] = None
     list_date: Optional[str] = None
+    snapshot_receipts: List[Dict[str, Any]] = Field(default_factory=list)
+    unavailable_sources: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class QuoteFetcher(SubAgent[QuoteOutput]):
@@ -63,16 +72,51 @@ class QuoteFetcher(SubAgent[QuoteOutput]):
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         code = inputs["code"]
-        asof = inputs["asof_date"]
+        asof = normalize_asof(inputs["asof_date"])
         from datetime import datetime, timedelta
         end_dt = datetime.strptime(asof, "%Y-%m-%d")
         start_dt = end_dt - timedelta(days=120)
+        quote_start = start_dt.strftime("%Y-%m-%d")
+        basic_start = (end_dt - timedelta(days=20)).strftime("%Y-%m-%d")
         loader = self._get_loader()
-        quote = loader.fetch_quote(code, start_dt.strftime("%Y-%m-%d"), asof)
-        db = loader.fetch_daily_basic(code, (end_dt - timedelta(days=20)).strftime("%Y-%m-%d"), asof)
+        quote = loader.fetch_quote(code, quote_start, asof)
+        db = loader.fetch_daily_basic(code, basic_start, asof)
 
         if quote is None or quote.empty:
             raise ValueError(f"no quote data for {code}")
+
+        quote, quote_receipt = guard_frame_asof(
+            quote, source="quote", code=code, asof=asof,
+            params={"start": quote_start, "end": asof, "freq": "day"},
+        )
+        snapshot_receipts: List[Dict[str, Any]] = [quote_receipt]
+        unavailable_sources: List[Dict[str, Any]] = []
+
+        basic_params = {"start": basic_start, "end": asof}
+        if db is None or db.empty:
+            reason = "daily_basic unavailable: provider returned no rows"
+            snapshot_receipts.append(unavailable_receipt(
+                "daily_basic", code=code, asof=asof,
+                params=basic_params, reason=reason,
+            ))
+            unavailable_sources.append({"source": "daily_basic", "reason": reason})
+            db = pd.DataFrame()
+        else:
+            try:
+                db, basic_receipt = guard_frame_asof(
+                    db, source="daily_basic", code=code, asof=asof,
+                    params=basic_params,
+                )
+            except PitUnavailableError as exc:
+                reason = str(exc)
+                snapshot_receipts.append(unavailable_receipt(
+                    "daily_basic", code=code, asof=asof,
+                    params=basic_params, reason=reason,
+                ))
+                unavailable_sources.append({"source": "daily_basic", "reason": reason})
+                db = pd.DataFrame()
+            else:
+                snapshot_receipts.append(basic_receipt)
 
         close = quote["close"]
         out = {
@@ -87,6 +131,8 @@ class QuoteFetcher(SubAgent[QuoteOutput]):
             "ma60": float(close.iloc[-60:].mean()) if len(close) >= 60 else None,
             "volatility_20d": float(close.pct_change().iloc[-20:].std()) if len(close) >= 20 else None,
             "volume_ratio": float(quote["vol"].iloc[-1] / quote["vol"].iloc[-20:].mean()) if len(quote) >= 20 else None,
+            "snapshot_receipts": snapshot_receipts,
+            "unavailable_sources": unavailable_sources,
         }
         if db is not None and not db.empty:
             row = db.iloc[-1]
@@ -104,9 +150,20 @@ class QuoteFetcher(SubAgent[QuoteOutput]):
         # F10 兜底:daily_basic 缺失/为空时,用确定性 F10 估值(灭②市值误判)
         if out.get("mv_yi") is None:
             try:
-                v = f10_corpus.load_facts(code, asof).valuation
-            except Exception:
+                f10_facts = f10_corpus.load_facts(code, asof)
+                out["snapshot_receipts"].extend(f10_facts.snapshot_receipts)
+                out["unavailable_sources"].extend(f10_facts.unavailable_sources)
+                v = f10_facts.valuation
+            except Exception as exc:
                 v = None
+                reason = f"F10 fallback unavailable: {type(exc).__name__}: {exc}"
+                out["snapshot_receipts"].append(unavailable_receipt(
+                    "f10:valuation", code=code, asof=asof,
+                    params={"category": "最新提示"}, reason=reason,
+                ))
+                out["unavailable_sources"].append(
+                    {"source": "f10:valuation", "reason": reason}
+                )
             if v:
                 price = out["price"]
                 ts = v.get("total_shares")
@@ -119,17 +176,26 @@ class QuoteFetcher(SubAgent[QuoteOutput]):
                 if bvps:
                     out["pb"] = round(price / bvps, 4)
                 out["f10_valuation"] = v   # 透传真营收/净利/ROE 供下游
-        # 本票身份注入(供所有下游 agent 在 prompt 里看到本票名称/行业/地区)
-        try:
-            b = stock_basic.get_basic(code)
-        except Exception:
-            b = None
-        if b:
-            out.update({
-                "name": b.get("name"),
-                "industry": b.get("industry"),
-                "area": b.get("area"),
-                "market": b.get("market"),
-                "list_date": b.get("list_date"),
-            })
+        # stock_basic is a current mutable snapshot.  Do not inject today's
+        # identity/industry membership into a historical prompt.
+        if is_historical_asof(asof):
+            source = "current_stock_basic_metadata"
+            reason = f"{source} unavailable: current unversioned snapshot is not PIT-safe"
+            out["snapshot_receipts"].append(unavailable_receipt(
+                source, code=code, asof=asof, params={}, reason=reason,
+            ))
+            out["unavailable_sources"].append({"source": source, "reason": reason})
+        else:
+            try:
+                b = stock_basic.get_basic(code)
+            except Exception:
+                b = None
+            if b:
+                out.update({
+                    "name": b.get("name"),
+                    "industry": b.get("industry"),
+                    "area": b.get("area"),
+                    "market": b.get("market"),
+                    "list_date": b.get("list_date"),
+                })
         return out

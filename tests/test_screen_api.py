@@ -21,7 +21,7 @@ def _stub_market_temp(monkeypatch):
     触发后台预热真打东财。单元测试必须打桩(test_rescore_api 漏桩真调 LLM 的正典同款护栏)。
     market_temp 自身逻辑由 test_market_temp.py 全桩覆盖。"""
     import guanlan_v2.screen.market_temp as mt
-    monkeypatch.setattr(mt, "build_market_temp", lambda now=None: {
+    monkeypatch.setattr(mt, "build_market_temp", lambda now=None, **_kw: {
         "gate": None, "global": None, "board": None, "flow": None, "llm": None,
         "notes": ["test:market_temp 已打桩"]})
 
@@ -38,7 +38,7 @@ def _client() -> TestClient:
 
 
 def test_factors_lists_defs():
-    """选股页 2.0:动态目录(~56 因子·11 族·全 supported);幽灵因子(北向/PEAD/消息面)已除名。"""
+    """The clean source tree exposes the built-in supported factor catalog."""
     j = _client().get("/screen/factors").json()
     assert j["ok"] is True
     by_id = {f["id"]: f for f in j["factors"]}
@@ -49,6 +49,14 @@ def test_factors_lists_defs():
     assert any("idx_ret" in (f.get("expr") or "") for f in j["factors"])  # 含大盘因子(共振/跟随)
     assert {"family", "ic", "desc"} <= set(j["factors"][0])  # 族/实测IC字段(ic 可为 null)
     assert j.get("families")                                # 族序下发
+
+
+@pytest.mark.realdata
+def test_factors_include_production_mined_library():
+    """Generated/mined production factors are an optional deployment artifact."""
+    j = _client().get("/screen/factors").json()
+    assert j["ok"] is True
+    by_id = {f["id"]: f for f in j["factors"]}
     for fid in {
         "lib_gl_fb_potential_no_recent_board",
         "lib_gl_fb_event_quality_score",
@@ -81,6 +89,7 @@ def test_catalog_allows_factorlib_indmean(monkeypatch):
     assert defs["lib_gl_fb_indmean_probe"]["expr"] == "rank(indmean(returns,industry))"
 
 
+@pytest.mark.realdata
 def test_health_reports_v4_freshness():
     j = _client().get("/screen/health").json()
     assert j["ok"] is True
@@ -88,6 +97,7 @@ def test_health_reports_v4_freshness():
     assert re.match(r"^\d{4}-\d{2}-\d{2}$", j["v4_ranking"]["date"])
 
 
+@pytest.mark.realdata
 def test_run_uses_vendored_v4():
     r = _client().post("/screen/run", json=_CFG)
     assert r.status_code == 200            # 诚实:HTTP 恒 200
@@ -107,6 +117,7 @@ def test_run_topN_respected():
     assert len(j["chosen"]) <= 5
 
 
+@pytest.mark.realdata
 def test_run_rows_carry_v4_and_mainline():
     j = _client().post("/screen/run", json=_CFG).json()
     chosen = j["chosen"]
@@ -123,6 +134,7 @@ def test_industry_neutral_cap():
     assert all(v <= 5 for v in cnt.values())                          # 每行业 ≤ ceil(20*0.25)=5
 
 
+@pytest.mark.realdata
 def test_run_carries_l4_views_and_l5_rating():
     j = _client().post("/screen/run", json=_CFG).json()
     chosen = j["chosen"]
@@ -136,6 +148,7 @@ def test_run_carries_l4_views_and_l5_rating():
     assert all("shields" in x["s"] for x in chosen)
 
 
+@pytest.mark.realdata
 def test_run_decision_converges_to_5():
     j = _client().post("/screen/run", json=_CFG).json()
     dec = j["decision"]
@@ -147,6 +160,7 @@ def test_run_decision_converges_to_5():
     assert "market" in j                                             # V1 节奏(可能为 None)
 
 
+@pytest.mark.realdata
 def test_run_v4_path_reports_unsupported_factors():
     """v4 主路径诚实回报未识别因子(原静默丢弃 → 看不见的错)。掌控审计 2026-06-15。"""
     j = _client().post("/screen/run", json={
@@ -164,6 +178,7 @@ def test_run_v4_path_no_unsupported_when_all_valid():
     assert j["ok"] is True and j.get("unsupported_factors") == []
 
 
+@pytest.mark.realdata
 def test_run_uses_model_variant(monkeypatch):
     # _screen_via_v4 调 `S.load_v4_ranking`(S = guanlan_v2.strategy 包级再导出绑定),
     # 故 spy 必须打在包属性上,而非 ranking 子模块(那是另一个绑定,看不到)。
@@ -180,6 +195,7 @@ def test_run_uses_model_variant(monkeypatch):
     assert j.get("model") == "prod"                             # 响应回报实际所跑模型
 
 
+@pytest.mark.realdata
 def test_run_bad_model_falls_back():
     j = _client().post("/screen/run", json={**_CFG, "model": "does_not_exist"}).json()
     assert j["ok"] is True and j["source"] == "v4_ranking"      # 回落 prod,不 500
@@ -189,6 +205,7 @@ def test_run_bad_model_falls_back():
     assert "FileNotFoundError" in (j.get("fallback_reason") or "")
 
 
+@pytest.mark.realdata
 def test_run_corrupt_variant_falls_back_to_prod_not_legacy(monkeypatch, tmp_path):
     """变体 parquet 损坏(非 FileNotFoundError)→ 回落 prod 并显形,绝不跌到 legacy 玩具因子路径。"""
     from guanlan_v2.screen import model_registry as reg
@@ -202,6 +219,7 @@ def test_run_corrupt_variant_falls_back_to_prod_not_legacy(monkeypatch, tmp_path
     assert j["requested_model"] == "m_bad" and j["fallback_reason"]
 
 
+@pytest.mark.realdata
 def test_run_success_has_no_fallback_keys_and_reports_pool_stale():
     """成功路径:无回落三键(缺省响应不背噪声);pool_kind/pool_n/ranking_stale_days 诚实下发。"""
     import datetime as _dt
@@ -412,6 +430,7 @@ def test_screen_regime_endpoint_honest(monkeypatch, tmp_path):
 
 # ── P0 §1: picks 落档 ──────────────────────────────────────────────────────
 
+@pytest.mark.realdata
 def test_screen_run_records_picks(monkeypatch, tmp_path):
     """v4 主路径成功 → picks 落档一行 + 响应 picks_recorded:true + GET /screen/picks 读回。"""
     import guanlan_v2.screen.picks as picks
@@ -430,12 +449,97 @@ def test_screen_run_records_picks(monkeypatch, tmp_path):
     assert g["ok"] is True and g["n"] >= 1 and g["items"][0]["note"] == "t_p0"
 
 
+@pytest.mark.realdata
 def test_screen_run_picks_failure_is_visible(monkeypatch, tmp_path):
     """落盘失败 → 选股照常成功,但 picks_recorded:false 显形(红线:失败显形不阻断)。"""
     import guanlan_v2.screen.picks as picks
     monkeypatch.setattr(picks, "append_pick", lambda rec: False)
     j = _client().post("/screen/run", json=_CFG).json()
     assert j["ok"] is True and j["picks_recorded"] is False
+
+
+@pytest.mark.realdata
+def test_screen_run_query_only_never_records_or_refreshes(monkeypatch, tmp_path):
+    """Codex preview consumes prod v4/cache only and has no picks side effect."""
+    import guanlan_v2.screen.api as api
+    import guanlan_v2.screen.market_temp as market_temp
+    import guanlan_v2.screen.picks as picks
+
+    path = tmp_path / "picks.jsonl"
+    path.write_text('{"sentinel":true}\n', encoding="utf-8")
+    before = path.read_bytes()
+    monkeypatch.setattr(picks, "PICKS_PATH", path)
+
+    def no_record(*_args, **_kwargs):
+        raise AssertionError("query_only must not archive picks")
+
+    seen_refresh = []
+
+    def cache_only(*, allow_refresh=True, **_kwargs):
+        seen_refresh.append(allow_refresh)
+        assert allow_refresh is False
+        return {"gate": None, "global": None, "board": None,
+                "flow": None, "llm": None, "notes": ["cache only"]}
+
+    monkeypatch.setattr(api, "_record_picks", no_record)
+    monkeypatch.setattr(
+        api, "_panel_enrich",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("query_only must not run heavy panel enrichment")
+        ),
+    )
+    monkeypatch.setattr(market_temp, "build_market_temp", cache_only)
+    result = _client().post(
+        "/screen/run?query_only=true",
+        json={**_CFG, "model": "../../private", "snapshot": True,
+              "note": "must disappear", "regimeWeights": True},
+    ).json()
+    assert result["ok"] is True and result["query_only"] is True
+    assert result["model"] == "prod"
+    assert result["picks_persistence"] == "disabled_query_only"
+    assert result["cache_refresh_started"] is False
+    assert result["panel_enrichment"] == "disabled_query_only"
+    assert result["panel_ok"] is False
+    assert "picks_recorded" not in result
+    assert path.read_bytes() == before
+    assert seen_refresh == [False]
+
+
+def test_panel_enrich_query_only_never_uses_default_or_mkdir_loader(monkeypatch):
+    """Scoped preview pins local Qlib and never calls the configurable loader/cache mkdir helper."""
+    import financial_analyst.data.loaders.industry as industry_module
+    import financial_analyst.factors.zoo.expr as expr_module
+    import financial_analyst.factors.zoo.panel_cache as panel_cache
+    import guanlan_v2.console.codex_query_tools as cq
+    import guanlan_v2.screen.api as api
+
+    query_loader = object()
+    industry_loader = object()
+    monkeypatch.setattr(
+        cq, "_read_only_loaders",
+        lambda: (query_loader, object(), industry_loader),
+    )
+    monkeypatch.setattr(
+        api, "_screen_loader",
+        lambda: (_ for _ in ()).throw(AssertionError("default loader forbidden")),
+    )
+    monkeypatch.setattr(
+        industry_module, "industry_map_path",
+        lambda: (_ for _ in ()).throw(AssertionError("mkdir helper forbidden")),
+    )
+    seen = {}
+
+    def _load(loader, codes, start, end, *, freq="day", industry_loader=None):
+        seen.update({"loader": loader, "industry_loader": industry_loader})
+        return object()
+
+    monkeypatch.setattr(panel_cache, "load_panel_cached", _load)
+    monkeypatch.setattr(expr_module, "compile_factor", lambda expr: lambda panel: None)
+    assert api._panel_enrich(
+        ["SH600000"], factors=[{"id": "c_1cab6d", "w": 1.0}],
+        query_only=True,
+    ) == ({}, {}, {})
+    assert seen == {"loader": query_loader, "industry_loader": industry_loader}
 
 
 def test_screen_fallback_path_does_not_record(monkeypatch):
@@ -447,7 +551,7 @@ def test_screen_fallback_path_does_not_record(monkeypatch):
         calls["n"] += 1
         return True
     monkeypatch.setattr(picks, "append_pick", _spy)
-    monkeypatch.setattr(api, "_screen_via_v4", lambda body: None)
+    monkeypatch.setattr(api, "_screen_via_v4", lambda body, **_kw: None)
     j = _client().post("/screen/run", json=_CFG).json()
     assert j["ok"] is True and calls["n"] == 0 and "picks_recorded" not in j
 

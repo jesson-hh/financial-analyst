@@ -23,6 +23,17 @@ function MiniLine({ eq, color, rt, w = 88, h = 26 }) {
 const pct = (x, d = 1) => (x >= 0 ? '+' : '') + (x * 100).toFixed(d) + '%';
 const plFmt = (x) => x >= 99 ? '∞' : x.toFixed(2);
 
+function lzQuoteSessionLabel(quote) {
+  if (quote && quote.fresh) return '实时盘中';
+  const phase = quote && quote.marketPhase;
+  if (phase === 'lunch_break') return '午间休市 · 最新快照';
+  if (phase === 'preopen') return '等待开盘 · 上次快照';
+  if (phase === 'non_trading_day') return '休市 · 最新快照';
+  if (phase === 'closed') return '已收盘 · 最新快照';
+  if (quote && quote.marketOpen) return '盘中 · 报价未更新';
+  return '最新收盘';
+}
+
 // 第3期:把落子的 seat(= strategy.id)解析成 {id,cn,color,glyph};兼容旧席位 id;永不返 undefined。
 function lzSeatMeta(id) {
   const st = window.lzStrategyGet ? window.lzStrategyGet(id) : null;
@@ -39,23 +50,46 @@ const LZ_REASON_CN = { manual: '手动研判', fill: '成交后研判', timer: '
 
 // ───────── 条件单 · agent 盯盘(2b:右侧栏,非全屏)─────────
 //   agent(/seats/order)按席位信条 + 真实时上下文出一张到价/放量/指标触发单 → 触发引擎(真 5min 回放)检验。
-function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId, symbol }) {
+function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId, symbol, marketOpen, onRecordChange }) {
   // 2026-07-11 三页重排瘦身:研判循环/影子持仓/w 滑杆退役(循环归后端 watcher,持仓记账随台账退役);
   //   保留:⚡立单(LLM 拟条件单)· ◷复盘验触发(真 5min 回放)· 盘中 8s 实时比对自动触发。
   const seat = (seatId && (strategies || []).some(s => s.id === seatId)) ? seatId : ((strategies && strategies[0] && strategies[0].id) || 'momentum');
-  const [otf, setOtf] = useState('day');   // 交易单周期:day(日线波段) / 5min(日内短线)
+  const [otf, setOtf] = useState('day');   // 本张条件单的指标口径:day / 5min（与图表/自动研判周期分离）
   const [order, setOrder] = useState(null);     // {seat,seat_cn,asof,model_name,ctx,order:{...}}
   const [gen, setGen] = useState(false);
   const [trig, setTrig] = useState(null);
   const [checking, setChecking] = useState(false);
   const [liveFired, setLiveFired] = useState(null);   // 盘中真实时触发结果
   const [liveCtx, setLiveCtx] = useState(null);       // 最近一次实时上下文(盯盘指示)
-  useEffect(() => { setOrder(null); setTrig(null); setGen(false); setChecking(false); setLiveFired(null); setLiveCtx(null); setOtf('day'); }, [code, seat]);
+  const [restoreState, setRestoreState] = useState('loading'); // loading/restored/empty/unavailable/fresh/generate_error
+  const requestSeqRef = useRef(0);                    // 切票/切策略后拒收旧请求回包
+  // 今日/复盘切页会卸载本面板。重新挂载时只读 decisions 中最新的同票+同策略条件单
+  // 重建详情卡；绝不重调 /seats/order，且异步返回不得串到已经切换的票/策略上。
+  useEffect(() => {
+    const seq = ++requestSeqRef.current;
+    let alive = true;
+    setOrder(null); setTrig(null); setGen(false); setChecking(false); setLiveFired(null); setLiveCtx(null);
+    setOtf('day');
+    setRestoreState('loading');
+    if (!window.lzFetchLatestSeatOrder) { setRestoreState('unavailable'); return () => { alive = false; }; }
+    window.lzFetchLatestSeatOrder(code, seat).then(res => {
+      if (!alive || seq !== requestSeqRef.current) return;
+      if (res && res.ok && res.order) {
+        setOrder(res.order);
+        if (res.order.tf === 'day' || res.order.tf === '5min') setOtf(res.order.tf);
+        setRestoreState('restored');
+      } else {
+        setRestoreState(res && res.ok ? 'empty' : 'unavailable');
+      }
+    }).catch(() => { if (alive) setRestoreState('unavailable'); });
+    return () => { alive = false; };
+  }, [code, seat]);
   const SEATCN = { reversal: '反转席', momentum: '动量席', event: '事件席', risk: '风控席' };
   const seatName = ((strategies || []).find(s => s.id === seat) || {}).name || SEATCN[seat] || '策略';
   const runJudge = () => {
-    if (!window.lzSeatOrder || gen) return;
-    setGen(true); setTrig(null); setOrder(null); setLiveFired(null); setLiveCtx(null);
+    if (!window.lzSeatOrder || gen || restoreState === 'loading') return;
+    const seq = ++requestSeqRef.current;
+    setGen(true); setTrig(null); setOrder(null); setChecking(false); setLiveFired(null); setLiveCtx(null);
     const strat = (strategies || []).find(s => s.id === seat) || (strategies || [])[0] || null;
     const tmpl = strat ? strat.template : ((window.LZ_TEMPLATE_IDS && window.LZ_TEMPLATE_IDS.indexOf(seat) >= 0) ? seat : 'momentum');
     const meta = window.lzSeatMeta ? window.lzSeatMeta(seat) : null;
@@ -63,7 +97,11 @@ function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId
     const extra = { creed: (meta && meta.creed) || '', note: (rcp.cards[0] && rcp.cards[0].insight) || '',
       strategy_id: seat, strategy_name: strat ? (strat.name || seat) : (meta ? meta.cn : seat),
       date: (mode === 'backtest' && asOf) ? asOf : '' };   // 复盘=按历史日 PIT 思考;实盘=空→后端走实时
-    window.lzSeatOrder(code, tmpl, otf, null, extra).then(o => { setOrder(o); setGen(false); });
+    window.lzSeatOrder(code, tmpl, otf, null, extra).then(o => {
+      if (seq !== requestSeqRef.current) return;
+      setOrder(o); setGen(false); setRestoreState(o ? 'fresh' : 'generate_error');
+      if (o && onRecordChange) onRecordChange(o);
+    });
   };
   const genOrder = () => runJudge();
   const clauseOf = (t) => {
@@ -79,12 +117,14 @@ function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId
   const check = () => {
     const o = order && order.order;
     if (!o || !(o.triggers || []).length || checking || !window.lzRunTriggerReplay) return;
+    const seq = requestSeqRef.current;
     setChecking(true); setTrig(null);
     const orderTF = order && order.tf === '5min' ? '5min' : 'day';
     const source = orderTF === '5min'
       ? (window.lzFetchBars5 ? window.lzFetchBars5(code, 480) : Promise.resolve(null))
       : Promise.resolve(symbol && symbol.bars ? symbol.bars : null);
     source.then(bars => {
+      if (seq !== requestSeqRef.current) return;
       if (!bars || !bars.length) { setTrig({ error: '无' + (orderTF === '5min' ? '5分钟' : '日线') + '数据(后端/窗口)' }); setChecking(false); return; }
       const win = bars.slice(-(orderTF === '5min' ? 240 : 120));
       const ord = { id: 'chk', seat: order.seat, side: o.side, triggers: o.triggers, logic: o.logic };
@@ -96,26 +136,46 @@ function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId
     });
   };
   // ②搬实盘:live 模式对已生成条件单,每 8s 拉真实时上下文(/seats/live_eval),用同一 evalTrigger 比对;
-  //   价到 / 指标满足即**自动触发**(盘中,无需点检验)→ 弹实时触发 + 标 K 线。fresh=false(休市)只显示不判。
+  //   价到 / 指标满足即**自动触发**(盘中,无需点检验)→ 弹实时触发 + 标 K 线。休市时停止轮询与触发判断。
   useEffect(() => {
     const o2 = order && order.order;
     if (mode !== 'live' || !o2 || !(o2.triggers || []).length || liveFired
       || !window.lzFetchLiveEval || !window.lzEvalTrigger) return;
+    // 只有能被确定为仍在有效期内的恢复单才重新接上盯盘；未知/过期历史单不武装。
+    if (order.restored && (!window.lzSeatOrderIsActive
+      || !window.lzSeatOrderIsActive(o2.validity, order.asof, order.ts))) return;
+    // 同一张单在当前浏览器只发一次讯。恢复卡使用与新生成响应相同的内容指纹，
+    // 因而切走再回来不会把已触发条件再次弹一遍；存储失败时仍诚实降级为原行为。
+    const firedKey = window.lzSeatOrderIdentity ? window.lzSeatOrderIdentity(order, code, seat) : '';
+    if (firedKey) {
+      try {
+        const saved = localStorage.getItem(firedKey);
+        if (saved) { setLiveFired(JSON.parse(saved)); return; }
+      } catch (e) {}
+    }
+    if (marketOpen !== true) return;
     let alive = true;
-    const pull = () => window.lzFetchLiveEval(code, (order && order.tf) || 'day').then(ctx => {
+    const pull = () => {
+      // 页面若跨过午夜，effect 不一定重挂；每轮请求前再验一次，过期即停止取数/判触发。
+      if (order.restored && (!window.lzSeatOrderIsActive
+        || !window.lzSeatOrderIsActive(o2.validity, order.asof, order.ts))) return Promise.resolve(null);
+      return window.lzFetchLiveEval(code, (order && order.tf) || 'day').then(ctx => {
       if (!alive || !ctx) return;
       setLiveCtx(ctx);
-      if (!ctx.fresh) return;                        // 仅盘中(报价日 > 末日K)才判触发
+      if (!ctx.fresh) return;                        // 仅交易时段内且供应商报价足够新鲜才判触发
       const r = window.lzEvalTrigger({ triggers: o2.triggers, logic: o2.logic, status: 'armed' }, ctx);
       if (r && r.triggered) {
-        setLiveFired({ at: ctx.asof, fill: r.fill, ctx: ctx });
+        const fired = { at: ctx.asof, fill: r.fill, ctx: ctx };
+        setLiveFired(fired);
+        if (firedKey) { try { localStorage.setItem(firedKey, JSON.stringify(fired)); } catch (e) {} }
         if (onTrigger) onTrigger({ id: code + '·' + seat + '·live', at: ctx.asofDate || ctx.asof, side: o2.side, fill: r.fill, seat: seat, stop: o2.stop, take: o2.take });   // seat = strategy.id
       }
-    });
+      });
+    };
     pull();
     const iv = setInterval(pull, 8000);
     return () => { alive = false; clearInterval(iv); };
-  }, [mode, order, liveFired, code]);
+  }, [mode, order, liveFired, code, marketOpen]);
   const o = order && order.order;
   const dir = o && o.side;
   const dirColor = dir && /买/.test(dir) ? 'var(--zhu)' : (dir && /卖/.test(dir) ? 'var(--dai)' : 'var(--ink-2)');
@@ -127,20 +187,27 @@ function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px 5px' }}>
         <span className="serif" style={{ width: 19, height: 19, background: 'var(--yin)', color: 'var(--paper)', fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 2, flexShrink: 0 }}>令</span>
         <span className="serif" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink)', letterSpacing: '0.06em', whiteSpace: 'nowrap' }}>条件单 · 触发监控</span>
-        <span onClick={genOrder} className="serif" style={{ marginLeft: 'auto', flexShrink: 0, whiteSpace: 'nowrap', fontSize: 11, letterSpacing: '0.06em', color: gen ? 'var(--ink-3)' : 'var(--paper)', background: gen ? 'transparent' : 'var(--yin)', border: gen ? '1px solid var(--line)' : 'none', cursor: gen ? 'default' : 'pointer', borderRadius: 3, padding: '3px 11px' }}>
-          {gen ? '拟单中…' : '⚡ 立 单'}
+        {restoreState === 'restored' && <span className="mono" title="从后端已落盘条件单恢复；未再次调用 Agent" style={{ fontSize: 8, color: 'var(--yin)', border: '1px solid var(--zhu-soft)', borderRadius: 3, padding: '0 4px' }}>已恢复</span>}
+        <span onClick={genOrder} className="serif" style={{ marginLeft: 'auto', flexShrink: 0, whiteSpace: 'nowrap', fontSize: 11, letterSpacing: '0.06em', color: (gen || restoreState === 'loading') ? 'var(--ink-3)' : 'var(--paper)', background: (gen || restoreState === 'loading') ? 'transparent' : 'var(--yin)', border: (gen || restoreState === 'loading') ? '1px solid var(--line)' : 'none', cursor: (gen || restoreState === 'loading') ? 'default' : 'pointer', borderRadius: 3, padding: '3px 11px' }}>
+          {restoreState === 'loading' ? '读取中…' : (gen ? '拟单中…' : '⚡ 立 单')}
         </span>
       </div>
-      {/* 第二行:当前策略 + 条件指标口径；与图表周期/自动研判周期互不混用。 */}
+      {/* 条件单指标口径独立于图表周期和自动 Agent 研判周期。 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '0 14px 8px' }}>
         <span className="serif" title="当前策略(单 agent:在左栏「当前策略」卡切换;下拉退役)" style={{ fontSize: 10.5, color: 'var(--ink-1)', borderBottom: '1px solid var(--line)', padding: '0 2px 1px', whiteSpace: 'nowrap' }}>{seatName}</span>
         <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>指标口径</span>
-        <select value={otf} onChange={e => { const next = e.target.value; setOtf(next); if (order && order.tf !== next) { setOrder(null); setTrig(null); setLiveFired(null); setLiveCtx(null); } }} className="serif" title="只控制本张条件单的指标计算；修改后需重新立单" style={{ fontSize: 10.5, color: 'var(--jin)', border: 'none', borderBottom: '1px solid var(--line)', background: 'transparent', padding: '0 2px 1px', cursor: 'pointer', outline: 'none' }}>
+        <select value={otf} onChange={e => { const next = e.target.value; setOtf(next); if (order && order.tf !== next) { setOrder(null); setTrig(null); setLiveFired(null); setLiveCtx(null); setRestoreState('fresh'); } }} className="serif" title="只控制本张条件单的指标计算；修改后需重新立单" style={{ fontSize: 10.5, color: 'var(--jin)', border: 'none', borderBottom: '1px solid var(--line)', background: 'transparent', padding: '0 2px 1px', cursor: 'pointer', outline: 'none' }}>
           <option value="day">日线指标</option>
           <option value="5min">5分钟指标</option>
         </select>
       </div>
-      {!o && !gen && <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-3)', padding: '0 14px 11px', lineHeight: 1.7, textWrap: 'pretty' }}>令 <b style={{ color: 'var(--ink-2)', fontWeight: 600 }}>{seatName}</b> 依信条 + 所选指标口径拟一张 <b style={{ color: 'var(--jin)' }}>到价 · 放量 · 指标</b> 条件单。生成后仅在本页在线时监控触发，不受自动盯盘总闸控制。</div>}
+      {!o && !gen && restoreState === 'loading' && <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', padding: '0 14px 11px' }}>正在读取当前股票 · 当前策略的已落盘条件单…</div>}
+      {!o && !gen && restoreState !== 'loading' && <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-3)', padding: '0 14px 11px', lineHeight: 1.7, textWrap: 'pretty' }}>
+        {restoreState === 'empty' && <div className="mono" style={{ fontSize: 9, marginBottom: 3 }}>当前股票 · 当前策略暂无仍在有效期内的已落盘条件单。</div>}
+        {restoreState === 'unavailable' && <div className="mono" style={{ fontSize: 9, marginBottom: 3 }}>条件单记录暂不可读；未用其他股票或策略的记录代替。</div>}
+        {restoreState === 'generate_error' && <div className="mono" style={{ fontSize: 9, marginBottom: 3 }}>本次拟单失败，未产生或伪造条件单。</div>}
+        令 <b style={{ color: 'var(--ink-2)', fontWeight: 600 }}>{seatName}</b> 依信条 + 所选指标口径拟一张 <b style={{ color: 'var(--jin)' }}>到价 · 放量 · 指标</b> 条件单。生成后仅在本页在线时监控触发，不受自动盯盘总闸控制。
+      </div>}
       {gen && <div className="serif" style={{ fontSize: 10.5, color: 'var(--yin)', padding: '0 14px 11px' }}>{seatName} 拟单中…(deepseek 真调,需几秒)</div>}
       {o && (
         <div style={{ margin: '1px 12px 12px', border: '1px solid var(--line)', borderLeft: '2.5px solid ' + dirColor, borderRadius: '1px 7px 7px 1px', background: 'var(--paper)', padding: '9px 12px 10px', boxShadow: '0 1px 2px rgba(28,24,20,0.05)' }}>
@@ -149,7 +216,7 @@ function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId
             <span className="serif" style={{ fontSize: 17, fontWeight: 700, color: dirColor, letterSpacing: '0.12em' }}>{dir || '—'}</span>
             <span className="serif" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{order.seat_cn || ''}</span>
             <span className="mono" style={{ fontSize: 8, color: 'var(--jin)', border: '1px solid var(--jin)', borderRadius: 3, padding: '0 4px' }}>{order.tf === '5min' ? '5min 单' : '日线单'}</span>
-            <span className="mono" style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--ink-3)' }}>{order.ctx && order.ctx.price != null ? '现价 ' + order.ctx.price : ''}</span>
+            <span className="mono" style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--ink-3)' }}>{((order.ctx || liveCtx) && (order.ctx || liveCtx).price != null) ? '现价 ' + (order.ctx || liveCtx).price : ''}</span>
           </div>
           {/* 触发条款 */}
           <div style={{ marginTop: 8 }}>
@@ -177,6 +244,7 @@ function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId
           </div>
           {/* 拟单批语 */}
           {o.note && <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-2)', marginTop: 8, lineHeight: 1.65, paddingLeft: 8, borderLeft: '2px solid var(--jin)', textWrap: 'pretty' }}>{o.note}</div>}
+          {order.restored && <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', marginTop: 6 }}>落盘恢复{order.ts ? ' · ' + String(order.ts).replace('T', ' ').slice(0, 16) : ''} · 未重新调用 Agent</div>}
           {/* 验触发 */}
           <div onClick={check} className="serif" style={{ marginTop: 9, fontSize: 10.5, color: 'var(--yin)', cursor: checking ? 'default' : 'pointer', display: 'inline-block' }}>
             {checking ? '○ 回放推演中…' : '◷ 复盘验触发 →'}
@@ -202,8 +270,8 @@ function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId
                   <div className="serif" style={{ fontSize: 9, color: 'var(--ink-2)', marginTop: 2 }}>盘中真到价 —— 照此讯在手机自行落单(系统不代下单)。</div>
                 </div>
               </div>
-            : <div className="mono" style={{ marginTop: 9, fontSize: 9.5, color: 'var(--dai)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--dai)', animation: 'pulse 1.5s ease-in-out infinite' }} />触发监控中…(本页在线 · 每 8s 比对真价/指标{liveCtx && liveCtx.price != null ? ' · 现价 ' + liveCtx.price : ''})
+            : <div className="mono" style={{ marginTop: 9, fontSize: 9.5, color: marketOpen === true ? 'var(--dai)' : 'var(--ink-3)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: marketOpen === true ? 'var(--dai)' : 'var(--ink-3)', animation: marketOpen === true ? 'pulse 1.5s ease-in-out infinite' : 'none' }} />{marketOpen === true ? ('触发监控中…(本页在线 · 每 8s 比对真价/指标' + (liveCtx && liveCtx.price != null ? ' · 现价 ' + liveCtx.price : '') + ')') : '休市暂停 · 下次开盘自动恢复'}
               </div>)}
         </div>
       )}
@@ -573,7 +641,7 @@ function MarketBar({ symbol, revealTo, mode, market, quote }) {
           ? (quote && quote.price != null
             ? (
               <span className="mono" style={{ display: 'flex', alignItems: 'center', gap: 5, color: 'var(--yin)', fontSize: 10 }}>
-                <span style={{ width: 7, height: 7, borderRadius: '50%', background: quote.fresh ? 'var(--zhu)' : 'var(--ink-3)', animation: quote.fresh ? 'pulse 1.4s ease-in-out infinite' : 'none' }} />{quote.fresh ? '实时盘中' : '最新收盘'}{quote.asof ? ' · ' + String(quote.asof).slice(5) : ''}
+                <span style={{ width: 7, height: 7, borderRadius: '50%', background: quote.fresh ? 'var(--zhu)' : 'var(--ink-3)', animation: quote.fresh ? 'pulse 1.4s ease-in-out infinite' : 'none' }} />{lzQuoteSessionLabel(quote)}{quote.asof ? ' · ' + String(quote.asof).slice(5) : ''}
               </span>
             )
             : <span className="mono" style={{ fontSize: 10, color: 'var(--yin)', display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -606,8 +674,8 @@ function StockHero({ symbol, rt, mode, quote }) {
       { l: '额', v: quote.amount != null ? big(+quote.amount * 1e4) : '—' },   // 腾讯 amount 单位=万元(f[37])→ ×1e4 转元再格式化
     ];
     hasDot = true;
-    status = (quote.fresh ? '实时盘中' : '最新收盘') + (quote.asof ? ' · ' + String(quote.asof).slice(5) : '');
-    tag = '真·盘口'; tagTitle = '腾讯实时盘口 /seats/quote(同引擎 /quotes 源)';
+    status = lzQuoteSessionLabel(quote) + (quote.asof ? ' · ' + String(quote.asof).slice(5) : '');
+    tag = quote.fresh ? '真·实时' : '真·快照'; tagTitle = '腾讯盘口 /seats/quote；是否实时由交易时段与报价时间共同判定';
   } else {
     price = bar.c;
     chgAmt = prev ? bar.c - prev.c : null;
@@ -636,7 +704,7 @@ function StockHero({ symbol, rt, mode, quote }) {
           <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{symbol.meta.code}</span>
         </div>
         <span className="mono" style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 9.5, color: hasDot ? 'var(--yin)' : 'var(--ink-3)', whiteSpace: 'nowrap' }}>
-          {hasDot && <span style={{ width: 6, height: 6, borderRadius: '50%', background: (quote && quote.fresh) ? 'var(--zhu)' : 'var(--yin)', animation: 'pulse 1.5s ease-in-out infinite' }} />}
+          {hasDot && <span style={{ width: 6, height: 6, borderRadius: '50%', background: (quote && quote.fresh) ? 'var(--zhu)' : 'var(--ink-3)', animation: (quote && quote.fresh) ? 'pulse 1.5s ease-in-out infinite' : 'none' }} />}
           {status}
         </span>
       </div>
@@ -935,7 +1003,10 @@ function RunPicker({ code, bump, selRun, onSelect, strategyId, strategyName, run
                           {d.conf != null && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', flexShrink: 0 }}>{d.conf}%</span>}
                           <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={d.rationale || ''}>{d.rationale || ''}</span>
                           {(d.card_names || []).length > 0 && <span className="mono" title={'命中经验卡:' + (d.card_names || []).join('、')} style={{ fontSize: 8, color: 'var(--yin)', flexShrink: 0 }}>⌘{d.card_names.length}</span>}
-                          {(d.research || []).length > 0 && <span className="mono" title={'引用研报:' + (d.research || []).map(r => typeof r === 'string' ? r : (r && r.title) || '').join('、')} style={{ fontSize: 8, color: 'var(--ink-3)', flexShrink: 0 }}>📄{d.research.length}</span>}
+                           {d.workspace_history_ref && (() => {
+                             const hm = lzWorkspaceHistoryRefMeta(d.workspace_history_ref);
+                             return hm && <span className="mono" title={'工作空间历史摘要 · 使用 ' + hm.count + ' 条' + (hm.digest ? ' · digest ' + hm.digest : '')} style={{ fontSize: 8, color: 'var(--ink-3)', flexShrink: 0 }}>忆{hm.count}</span>;
+                           })()}
                           {d.offChart && <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)', flexShrink: 0 }}>窗外</span>}
                         </div>
                         {/* 证据第二行:买卖关键证据(PIT 因子真值);观望也带,点行看详情卡完整链 */}
@@ -978,6 +1049,325 @@ function RunDecCard({ dec }) {
   );
 }
 
+const LZ_WORKSPACE_HISTORY_UI_MAX = 3;
+
+function lzWorkspaceHistoryItems(history) {
+  const raw = Array.isArray(history) ? history : (history && Array.isArray(history.items) ? history.items : []);
+  return raw.slice(0, LZ_WORKSPACE_HISTORY_UI_MAX).map((item) => {
+    if (typeof item === 'string') return { text: item, date: '', key: '' };
+    if (!item || typeof item !== 'object') return null;
+    const text = String(item.text || item.summary || item.content || '').trim();
+    if (!text) return null;
+    return { text, date: String(item.date || '').slice(0, 10), key: String(item.key || '').trim() };
+  }).filter(Boolean);
+}
+
+function lzWorkspaceHistoryRefMeta(ref) {
+  if (!ref) return null;
+  const obj = typeof ref === 'object' ? ref : { digest: ref };
+  const rawCount = obj.item_count != null ? obj.item_count : (obj.items_used != null ? obj.items_used : (obj.count != null ? obj.count : 0));
+  const count = Number.isFinite(+rawCount) ? Math.max(0, Math.floor(+rawCount)) : 0;
+  const rawDigest = String(obj.digest || obj.source_digest || obj.snapshot_digest || '').trim();
+  const digest = rawDigest ? rawDigest.slice(0, 12) + (rawDigest.length > 12 ? '…' : '') : '';
+  return { count, digest };
+}
+
+// 仅即时响应可展示已浓缩正文；最多三条，不展开工作空间文件或对话原文。
+function WorkspaceHistorySummary({ history }) {
+  const items = lzWorkspaceHistoryItems(history);
+  if (!items.length) return null;
+  return (
+    <Field label="工作空间历史摘要·仅背景">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {items.map((item, i) => (
+          <div key={i} className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.55 }}>
+            · {item.date ? '[' + item.date + '] ' : ''}{item.key ? item.key + '：' : ''}{item.text}
+          </div>
+        ))}
+        <div className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>最多 3 条浓缩信息 · 仅作背景，不以条数作为判断依据</div>
+      </div>
+    </Field>
+  );
+}
+
+// 落盘历史只回显安全引用：使用条数与摘要指纹，不回显工作空间私有正文。
+function WorkspaceHistoryReference({ historyRef, legacyResearch }) {
+  const meta = lzWorkspaceHistoryRefMeta(historyRef);
+  if (!meta && !legacyResearch) return null;
+  return (
+    <Field label="工作空间历史使用记录">
+      {meta && <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.5 }}>使用 {meta.count} 条{meta.digest ? ' · digest ' + meta.digest : ' · digest —'}</div>}
+      {legacyResearch && <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', marginTop: meta ? 2 : 0 }}>旧版研报引用·已停用</div>}
+    </Field>
+  );
+}
+
+function lzDeepText(value, maxLen) {
+  const text = (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
+    ? String(value).replace(/\s+/g, ' ').trim() : '';
+  const cap = maxLen || 180;
+  return text.length > cap ? text.slice(0, cap) + '…' : text;
+}
+
+function lzDeepConfidenceBand(value) {
+  const band = String(value || '').trim().toLowerCase();
+  return ({ low: '低', medium: '中', high: '高' })[band] || '';
+}
+
+const LZ_RECORD_FACTOR_KEYS = ['rev_20', 'mom_60', 'rsi_14', 'ma_diff_20', 'turnover_20'];
+const LZ_RECORD_PA_LABELS = {
+  date: '时点', bar_type: 'K线型态', body: '实体比', upper_wick: '上影', lower_wick: '下影',
+  close_pos: '收盘位', range_atr: '振幅/ATR', ema20_rel: '距EMA20', breakout: '突破',
+  inside_streak: '连续内含', vol_ratio: '量比', limit: '涨跌停', gap: '跳空', follow: '跟随',
+};
+
+function lzRecordHasValue(value) {
+  return value !== null && value !== undefined && value !== ''
+    && !(typeof value === 'number' && !Number.isFinite(value));
+}
+
+function lzRecordShort(value, head, tail) {
+  const text = String(value == null ? '' : value).trim();
+  const h = head || 54, t = tail || 18;
+  return text.length > h + t + 1 ? text.slice(0, h) + '…' + text.slice(-t) : text;
+}
+
+function lzRecordDiagnosticCount(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (Array.isArray(value)) return value.length;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'object') return Object.keys(value).length;
+  return 1;
+}
+
+// 结构化诊断只取审核过的状态/计数字段；不把后端对象或潜在错误正文整段铺到 UI。
+function lzRecordDiagnosticSummary(value, kind) {
+  const scalar = lzDeepText(value, 220);
+  if (scalar) return scalar;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const parts = [];
+  const addText = (label, raw) => {
+    const text = lzDeepText(raw, 56);
+    if (text) parts.push(label + ' ' + text);
+  };
+  const addCount = (label, raw) => {
+    const count = lzRecordDiagnosticCount(raw);
+    if (count !== null) parts.push(label + ' ' + count);
+  };
+  addText('status', value.status || value.state);
+  addText('error_type', value.error_type || value.error_kind);
+  if (kind === 'factor') {
+    addCount('missing', value.missing !== undefined ? value.missing : value.missing_fields);
+    addCount('derived', value.derived !== undefined ? value.derived : value.derived_fields);
+    const adapter = lzDeepText(value.input_adapter, 56);
+    if (adapter && adapter !== 'none') parts.push('adapter ' + adapter);
+  } else if (kind === 'ref') {
+    addCount('requested', value.requested);
+    addCount('resolved', value.resolved);
+    addCount('unresolved', value.unresolved);
+    addCount('errors', value.errors);
+  }
+  return lzDeepText(parts.join(' · '), 220) || '结构化诊断（无可展示摘要）';
+}
+
+const LZ_RECORD_EXTERNAL_SECTION_KEYS = ['news', 'orderbook', 'ticks', 'auction'];
+
+// 外部证据只展示后端落盘的有界审计回执；不读 items / prompt，也不由缺失字段推断可用性。
+function lzRecordExternalEvidenceSummary(row) {
+  const r = row && typeof row === 'object' && !Array.isArray(row) ? row : {};
+  const external = r.external_evidence && typeof r.external_evidence === 'object'
+    && !Array.isArray(r.external_evidence) ? r.external_evidence : null;
+  if (!external) return null;
+  const diagnostics = r.evidence_diagnostics && typeof r.evidence_diagnostics === 'object'
+    && !Array.isArray(r.evidence_diagnostics) ? r.evidence_diagnostics : {};
+  const externalDiagnostic = diagnostics.external_evidence
+    && typeof diagnostics.external_evidence === 'object'
+    && !Array.isArray(diagnostics.external_evidence) ? diagnostics.external_evidence : {};
+  const sections = external.sections && typeof external.sections === 'object'
+    && !Array.isArray(external.sections) ? external.sections : {};
+  const bounded = (value, maxLen) => lzDeepText(value, maxLen) || '—';
+  const digestRaw = lzDeepText(external.digest, 128);
+  return {
+    status: bounded(external.status, 56),
+    mode: lzDeepText(external.mode, 56) || lzDeepText(externalDiagnostic.mode, 56) || '—',
+    asof: bounded(external.asof, 80),
+    digest: digestRaw ? digestRaw.slice(0, 12) + (digestRaw.length > 12 ? '…' : '') : '—',
+    digestRaw,
+    anchorUpdate: lzDeepText(externalDiagnostic.anchor_update, 72),
+    sections: LZ_RECORD_EXTERNAL_SECTION_KEYS.map(key => {
+      const raw = sections[key] && typeof sections[key] === 'object'
+        && !Array.isArray(sections[key]) ? sections[key] : {};
+      return {
+        key,
+        status: bounded(raw.status, 56),
+        itemCount: bounded(raw.item_count, 24),
+        source: bounded(raw.source, 96),
+      };
+    }),
+  };
+}
+
+// 历史记录的只读诊断面：只解释后端已落盘字段，不补数据、不触发研判，也不改变交易语义。
+function SeatRecordDiagnostics({ row }) {
+  const r = row && typeof row === 'object' ? row : {};
+  const quality = r.data_quality && typeof r.data_quality === 'object' ? r.data_quality : {};
+  const pick = (...values) => values.find(v => v !== null && v !== undefined && v !== '');
+  const qTotal = pick(quality.n, quality.total_n, quality.total);
+  const qComplete = pick(quality.complete_n, quality.completed_n, quality.complete);
+  const qFlagged = pick(quality.quality_flagged_n, quality.flagged_n, quality.abnormal_n, quality.abnormal);
+  const factors = r.factors_std && typeof r.factors_std === 'object' ? r.factors_std : {};
+  const factorAvailable = LZ_RECORD_FACTOR_KEYS.filter(key => lzRecordHasValue(factors[key]));
+  const factorMissing = LZ_RECORD_FACTOR_KEYS.filter(key => !lzRecordHasValue(factors[key]));
+  const factorDiagnostic = pick(r.factor_diagnostics, r.factor_diagnostic, r.factor_error, r.factor_status);
+  const refDiagnostic = pick(r.ref_resolution, r.ref_diagnostics, r.ref_diagnostic, r.ref_error, r.reference_status);
+  const factorNote = lzRecordDiagnosticSummary(factorDiagnostic, 'factor');
+  const refNote = lzRecordDiagnosticSummary(refDiagnostic, 'ref');
+  const recipeN = Array.isArray(r.recipe_factors) ? r.recipe_factors.length : 0;
+  const cardN = Array.isArray(r.card_names) ? r.card_names.length : 0;
+  const workspaceN = r.workspace_history_ref ? 1 : 0;
+  const digestRaw = String(r.data_digest || '').trim();
+  const digest = digestRaw ? digestRaw.slice(0, 12) + (digestRaw.length > 12 ? '…' : '') : '—';
+  const dataRefRaw = String(r.data_ref || '').trim();
+  const dataRef = dataRefRaw ? lzRecordShort(dataRefRaw, 60, 20) : '—';
+  const pa = r.pa_features && typeof r.pa_features === 'object' ? r.pa_features : {};
+  const paItems = Object.keys(LZ_RECORD_PA_LABELS)
+    .filter(key => lzRecordHasValue(pa[key]))
+    .map(key => [LZ_RECORD_PA_LABELS[key], String(pa[key])]);
+  const externalEvidence = lzRecordExternalEvidenceSummary(r);
+  return (
+    <React.Fragment>
+      <Field label="执行 / 数据来源">
+        <div className="mono" style={{ fontSize: 8.8, color: 'var(--ink-2)', lineHeight: 1.55 }}>
+          source · {r.source || '—'} · deep_status · {r.deep_status || '—'}
+        </div>
+        <div className="mono" style={{ fontSize: 8.8, color: 'var(--ink-2)', lineHeight: 1.55 }}>
+          evidence_source · {r.evidence_source || '—'} · data_asof · {r.data_asof || r.asof || '—'}
+        </div>
+      </Field>
+      <Field label="分钟证据质量">
+        <div className="mono" style={{ fontSize: 8.8, color: 'var(--ink-2)', lineHeight: 1.55 }}>
+          总数 {lzRecordHasValue(qTotal) ? qTotal : '—'} · 完整 {lzRecordHasValue(qComplete) ? qComplete : '—'} · 异常 {lzRecordHasValue(qFlagged) ? qFlagged : '—'}
+        </div>
+        <div className="mono" title={digestRaw || ''} style={{ fontSize: 8.5, color: 'var(--ink-3)', lineHeight: 1.55 }}>digest · {digest}</div>
+        <div className="mono" title={dataRefRaw || ''} style={{ fontSize: 8.5, color: 'var(--ink-3)', lineHeight: 1.55, overflowWrap: 'anywhere' }}>data_ref · {dataRef}</div>
+      </Field>
+      <Field label="因子 / 引用诊断">
+        <div className="mono" style={{ fontSize: 8.8, color: 'var(--ink-2)', lineHeight: 1.55 }}>
+          标准因子 {factorAvailable.length}/{LZ_RECORD_FACTOR_KEYS.length}
+          {factorMissing.length ? ' · 缺 ' + factorMissing.join(', ') : ' · 齐全'}
+        </div>
+        {factorNote && <div className="mono" style={{ fontSize: 8.5, color: 'var(--dai)', lineHeight: 1.5 }}>factor · {factorNote}</div>}
+        <div className="mono" style={{ fontSize: 8.8, color: 'var(--ink-2)', lineHeight: 1.55 }}>
+          引用 · 经验卡 {cardN} · 配方因子 {recipeN} · 工作空间摘要 {workspaceN}
+        </div>
+        {refNote && <div className="mono" style={{ fontSize: 8.5, color: 'var(--dai)', lineHeight: 1.5 }}>ref · {refNote}</div>}
+      </Field>
+      <Field label="价量形态诊断（确定性记录）">
+        {paItems.length > 0 ? <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+          {paItems.map(([label, value]) => <span key={label} className="mono" style={{ fontSize: 8.4, color: 'var(--ink-2)', border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>{label} · {value}</span>)}
+        </div> : <div className="mono" style={{ fontSize: 8.6, color: 'var(--ink-3)' }}>pa_features · —（旧记录未返回）</div>}
+      </Field>
+      <Field label="外部证据审计（只读）">
+        {!externalEvidence ? <div className="mono" style={{ fontSize: 8.6, color: 'var(--ink-3)' }}>外部证据 · —（旧记录未返回）</div> : <React.Fragment>
+          <div className="mono" style={{ fontSize: 8.8, color: 'var(--ink-2)', lineHeight: 1.55 }}>
+            总 · status {externalEvidence.status} · mode {externalEvidence.mode} · asof {externalEvidence.asof}
+          </div>
+          <div className="mono" title={externalEvidence.digestRaw || ''} style={{ fontSize: 8.5, color: 'var(--ink-3)', lineHeight: 1.55 }}>
+            bundle digest · {externalEvidence.digest}
+          </div>
+          {externalEvidence.anchorUpdate && <div className="mono" style={{ fontSize: 8.5, color: 'var(--dai)', lineHeight: 1.5 }}>anchor_update · {externalEvidence.anchorUpdate}</div>}
+          {externalEvidence.sections.map(section => <div key={section.key} className="mono" style={{ fontSize: 8.5, color: 'var(--ink-2)', lineHeight: 1.5 }}>
+            {section.key} · status {section.status} · item_count {section.itemCount} · source {section.source}
+          </div>)}
+        </React.Fragment>}
+      </Field>
+    </React.Fragment>
+  );
+}
+
+// 仅 source=orchestrated 才标为10席深研；旧行字段缺失就显示未知，不从模型名反推。
+function lzDeepTraceMeta(row) {
+  if (!row || String(row.source || '').toLowerCase() !== 'orchestrated') return null;
+  const orchestration = row.orchestration && typeof row.orchestration === 'object' ? row.orchestration : {};
+  const preset = String(row.preset_id || orchestration.preset_id || '').toLowerCase();
+  const hints = [row.deep_variant, row.orchestration_mode, row.orchestration_grade, row.deep_status,
+    row.coverage, row.evidence_note, orchestration.mode, orchestration.grade, orchestration.status]
+    .concat(Array.isArray(row.badges) ? row.badges : []).map(x => String(x || '').toLowerCase()).join(' ');
+  let grade = '';
+  if (preset === 'pipeline.luozi_deep_decide_reduced' || /reduced|degraded|partial|fallback/.test(hints)) grade = 'degraded';
+  else if (preset === 'pipeline.luozi_deep_decide' || /(^|\W)full(\W|$)|complete/.test(hints)) grade = 'full';
+
+  const triggerRaw = row.escalation_triggers != null ? row.escalation_triggers
+    : (row.triggers != null ? row.triggers : (orchestration.triggers != null ? orchestration.triggers : []));
+  const triggerList = Array.isArray(triggerRaw) ? triggerRaw : (triggerRaw == null ? [] : [triggerRaw]);
+  const triggers = triggerList.map((item) => {
+    if (item && typeof item === 'object') {
+      const label = lzDeepText(item.label || item.name || item.type || item.kind || item.id, 48);
+      const detail = lzDeepText(item.summary || item.note || item.reason || item.text || item.status, 150);
+      return label && detail && label !== detail ? label + ' · ' + detail : (detail || label);
+    }
+    return lzDeepText(item, 180);
+  }).filter(Boolean).slice(0, 6);
+  const triggerDigest = lzDeepText(row.trigger_summary || row.escalation_digest || orchestration.trigger_summary, 240);
+
+  const nodesRaw = row.node_summaries != null ? row.node_summaries
+    : (row.agent_summaries != null ? row.agent_summaries
+      : (row.node_statuses != null ? row.node_statuses
+        : (row.nodes != null ? row.nodes : (orchestration.node_summaries != null ? orchestration.node_summaries : []))));
+  const nodeList = Array.isArray(nodesRaw) ? nodesRaw
+    : (nodesRaw && typeof nodesRaw === 'object' ? Object.entries(nodesRaw).map(([name, value]) => ({ name, value }))
+      : (nodesRaw == null ? [] : [nodesRaw]));
+  const nodes = nodeList.map((item, i) => {
+    if (item && typeof item === 'object') {
+      const nested = item.value && typeof item.value === 'object' ? item.value : item;
+      const label = lzDeepText(item.name || item.node_name || item.node_id || item.seat || item.agent || item.id || ('节点 ' + (i + 1)), 64);
+      const status = lzDeepText(nested.status || item.status, 32);
+      const summary = lzDeepText(nested.summary || nested.output_summary || nested.note || nested.rationale
+        || (typeof item.value !== 'object' ? item.value : ''), 180);
+      return { label, status, summary };
+    }
+    return { label: '节点 ' + (i + 1), status: '', summary: lzDeepText(item, 180) };
+  }).filter(x => x.summary || x.status).slice(0, 10);
+  const quality = row.deep_quality && typeof row.deep_quality === 'object' ? row.deep_quality : {};
+  const warningsRaw = row.evidence_warnings != null ? row.evidence_warnings
+    : (quality.evidence_warnings != null ? quality.evidence_warnings : orchestration.evidence_warnings);
+  const warningList = Array.isArray(warningsRaw) ? warningsRaw
+    : (warningsRaw && typeof warningsRaw === 'object' ? Object.entries(warningsRaw).map(([name, value]) => name + ' · ' + lzDeepText(value, 120))
+      : (warningsRaw == null ? [] : [warningsRaw]));
+  const warnings = warningList.map(x => lzDeepText(x, 180)).filter(Boolean).slice(0, 8);
+  const confidenceBand = lzDeepConfidenceBand(row.confidence_band != null ? row.confidence_band
+    : (quality.confidence_band != null ? quality.confidence_band : orchestration.confidence_band));
+  return { grade, triggers, triggerDigest, nodes, warnings, confidenceBand };
+}
+
+function DeepTraceBadge({ row }) {
+  const meta = lzDeepTraceMeta(row);
+  if (!meta) return null;
+  return <span className="mono" title="服务端10席编排深研" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 4, border: '1px solid var(--zhu-soft)', color: 'var(--yin)', flexShrink: 0 }}>10席深研{meta.grade ? ' · ' + meta.grade : ''}</span>;
+}
+
+function DeepTraceDetails({ row }) {
+  const meta = lzDeepTraceMeta(row);
+  if (!meta) return null;
+  const hasTrace = meta.triggers.length > 0 || !!meta.triggerDigest || meta.nodes.length > 0 || meta.warnings.length > 0 || !!meta.confidenceBand;
+  return (
+    <Field label="Pro · 10席事件深研">
+      <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.55 }}>
+        形态 · {meta.grade || '—（旧记录未标注）'}
+      </div>
+      {meta.confidenceBand && <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.55, marginTop: 3 }}>深研置信 · {meta.confidenceBand}</div>}
+      {meta.triggers.length > 0 && <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.55, marginTop: 3 }}>触发 · {meta.triggers.join('；')}</div>}
+      {meta.triggerDigest && <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.55, marginTop: 3 }}>触发摘要 · {meta.triggerDigest}</div>}
+      {meta.nodes.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 4 }}>
+        {meta.nodes.map((node, i) => <div key={i} className="mono" style={{ fontSize: 8.8, color: 'var(--ink-2)', lineHeight: 1.5 }}>· {node.label}{node.status ? ' [' + node.status + ']' : ''}{node.summary ? '：' + node.summary : ''}</div>)}
+      </div>}
+      {meta.nodes.length === 0 && <div className="mono" style={{ fontSize: 8.7, color: 'var(--ink-3)', marginTop: 3 }}>节点摘要 · 该记录未返回（兼容旧记录）。</div>}
+      {meta.warnings.length > 0 && <div className="mono" style={{ fontSize: 8.8, color: 'var(--dai)', lineHeight: 1.5, marginTop: 4 }}>证据缺口 · {meta.warnings.join('；')}</div>}
+      {!hasTrace && <div className="mono" style={{ fontSize: 8.7, color: 'var(--ink-3)', marginTop: 3 }}>该条为10席深研；此记录未包含触发或节点摘要字段。</div>}
+    </Field>
+  );
+}
+
 // ───────── 证据链渲染(2026-07-11 三页重排:RunDecCard / JudgeCard 时间线共用)─────────
 //   容忍两种行形状:run 映射行(conf)与落盘原始行(confidence);字段缺席即不渲染,绝不编造。
 function EvidenceFields({ dec }) {
@@ -989,6 +1379,7 @@ function EvidenceFields({ dec }) {
   const partial = pa === '减仓' && isFinite(ef) && ef > 0 && ef < 1;
   return (
     <React.Fragment>
+      <DeepTraceDetails row={dec} />
       {pa && (
         <Field label="出场评估(持仓语境·必答)">
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
@@ -1059,13 +1450,7 @@ function EvidenceFields({ dec }) {
           </div>
         </Field>
       )}
-      {(dec.research || []).length > 0 && (
-        <Field label="当日浮出研报(PIT 按日)">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-            {dec.research.map((t, i) => <div key={i} className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.5 }}>📄 {typeof t === 'string' ? t : (t && t.title) || ''}</div>)}
-          </div>
-        </Field>
-      )}
+      <WorkspaceHistoryReference historyRef={dec.workspace_history_ref} legacyResearch={!!dec.legacy_research || (Array.isArray(dec.research) && dec.research.length > 0)} />
       {dec.regime_asof && (
         <Field label="当日大盘(PIT 日产物)">
           <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.5 }}>{dec.regime_asof}</div>
@@ -1145,7 +1530,10 @@ function DecisionHistory({ code, open, onClose }) {
           {!loading && rows.map((r) => {
             const isOpen = openId === r.id;
             const isOrder = r.kind === 'order';
-            const dir = isOrder ? r.side : r.direction;
+            const isDeepAttempt = r.kind === 'deep_attempt';
+            const attemptState = r.deep_status === 'degraded' ? '深研降级'
+              : (r.deep_status === 'failed' ? '深研失败' : (r.deep_status === 'refused' ? '深研拒绝' : '深研尝试'));
+            const dir = isOrder ? r.side : (isDeepAttempt ? attemptState : r.direction);
             return (
               <div key={r.id} style={{ borderBottom: '1px solid var(--line-soft)', padding: '9px 2px' }}>
                 <div onClick={() => setOpenId(isOpen ? null : r.id)} className="hover-row" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
@@ -1154,14 +1542,19 @@ function DecisionHistory({ code, open, onClose }) {
                   <span className="mono" style={{ fontSize: 9, color: 'var(--ink-2)' }}>{r.name || r.code}</span>
                   <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>{r.strategy_name || ''}</span>
                   {r.confidence != null && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>置信{r.confidence}</span>}
-                  <span className="mono" style={{ marginLeft: 'auto', fontSize: 8, padding: '1px 5px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)' }}>{isOrder ? '条件单' : '研判'}</span>
+                  {r.confidence == null && lzDeepConfidenceBand(r.confidence_band) && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>深研置信{lzDeepConfidenceBand(r.confidence_band)}</span>}
+                  <DeepTraceBadge row={r} />
+                  <span className="mono" style={{ marginLeft: 'auto', fontSize: 8, padding: '1px 5px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)' }}>{isOrder ? '条件单' : (isDeepAttempt ? '深研尝试' : '研判')}</span>
                 </div>
                 {isOpen && (
                   <div style={{ marginTop: 6, paddingLeft: 4 }}>
+                    <DeepTraceDetails row={r} />
+                    <SeatRecordDiagnostics row={r} />
                     {r.rationale && <div className="serif" style={{ fontSize: 11, color: 'var(--ink-1)', lineHeight: 1.6 }}>{r.rationale}</div>}
                     {isOrder && (r.triggers || []).length > 0 && <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', marginTop: 4 }}>触发:{(r.triggers || []).map(t => t.kind + t.op + t.value).join(r.logic === 'OR' ? ' 或 ' : ' 且 ')}{r.stop != null ? ' · 止损' + r.stop : ''}{r.take != null ? ' · 止盈' + r.take : ''}</div>}
                     {(r.key_evidence || []).length > 0 && <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}>{r.key_evidence.map((k, i) => <span key={i} className="mono" style={{ fontSize: 8.5, color: 'var(--ink-2)', border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>{k}</span>)}</div>}
                     {(r.recipe_factors || []).length > 0 && <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', marginTop: 4 }}>配方因子(供参考·未回测):{(r.recipe_factors || []).map(f => f.name).join('、')}</div>}
+                    <WorkspaceHistoryReference historyRef={r.workspace_history_ref} legacyResearch={!!r.legacy_research || (Array.isArray(r.research) && r.research.length > 0)} />
                     <ReasoningChain reasoning={r.reasoning} />
                     <div className="mono" style={{ fontSize: 8, color: 'var(--ink-3)', marginTop: 4 }}>{r.model_name || ''}{r.asof ? ' · as-of ' + r.asof : ''}</div>
                   </div>
@@ -1174,8 +1567,13 @@ function DecisionHistory({ code, open, onClose }) {
     </div>
   );
 }
+function lzDecisionRegimeForPayload(historyReplay, regime) {
+  // 历史单点研判由后端按决策日 PIT 重算；页面当前/示例 regime 只供展示，不得进入回放 payload。
+  if (historyReplay === true) return null;
+  return regime === null || regime === undefined || regime === '' ? null : regime;
+}
+
 function DecisionCard({ dec, symbol, mode }) {
-  const [report, setReport] = useState(null);     // 本股深度研报状态(/report-progress)
   const [signal, setSignal] = useState(null);     // 今日因子(/watch/signal_pack,按 code)
   const [market, setMarket] = useState(null);     // 今日市况(/watch/market_status,仅实盘)
   const [decide, setDecide] = useState(null);     // ⑤ 席位 agent 真研判(/seats/decide,on-demand)
@@ -1185,8 +1583,7 @@ function DecisionCard({ dec, symbol, mode }) {
   const [wEdit, setWEdit] = useState(null);            // P3:本卡就地调因子权重 w(null=用策略持久值;拖动后覆盖并回存策略,实盘定时/手动研判同源)
   const code = symbol && symbol.meta && symbol.meta.code;
   useEffect(() => {
-    let alive = true; setReport(null); setSignal(null); setMarket(null); setDecide(null); setDeciding(false);
-    if (code && window.lzFetchReportStatus) window.lzFetchReportStatus(code).then(r => { if (alive) setReport(r); });
+    let alive = true; setSignal(null); setMarket(null); setDecide(null); setDeciding(false);
     // ③a 实盘:今日 signal_pack(按 code);③b 复盘:按 (code, dec.date) 取真历史因子(价量真算 + 模型旁路)
     if (code) {
       if (mode === 'live') {
@@ -1202,7 +1599,7 @@ function DecisionCard({ dec, symbol, mode }) {
   useEffect(() => { setWEdit(null); }, [dec && dec.seat]);   // 切换决策(换策略/换票)→ 清就地覆盖,回落该策略持久 w
   if (!dec) return (
     <div style={{ padding: 20, color: 'var(--ink-3)', fontFamily: 'var(--serif)', fontSize: 12.5, lineHeight: 1.7, textWrap: 'pretty' }}>
-      点选 K 线上的 <b style={{ color: 'var(--zhu)' }}>▲</b> 买点 / <b style={{ color: 'var(--dai)' }}>▼</b> 卖点,或右侧决策流水中的任意一次落子 —— 此处摊开它背后的<b>证据链</b>:触发的量化因子、引用的研报观点、命中的经验卡,以及当时的市场状态。
+      点选 K 线上的 <b style={{ color: 'var(--zhu)' }}>▲</b> 买点 / <b style={{ color: 'var(--dai)' }}>▼</b> 卖点,或右侧决策流水中的任意一次落子 —— 此处摊开它背后的<b>证据链</b>:触发的量化因子、工作空间历史摘要(如有)、命中的经验卡,以及当时的市场状态。
     </div>
   );
   const s = lzSeatMeta(dec.seat);
@@ -1296,41 +1693,6 @@ function DecisionCard({ dec, symbol, mode }) {
             );
           })()}
         </Field>
-        {/* 研报(A+闭环):本股真深度研报状态(/report-progress)+ 席位 GL 引用的 research 素材 */}
-        <Field label="引用 · 研报观点">
-          {(() => {
-            const code = symbol.meta.code, name = symbol.meta.name;
-            const goChat = (extra) => window.GL && window.GL.go('../chat/观澜 · 交互原型.html', 'chat', Object.assign({ code, name }, extra || {}));
-            const refs = window.lzSeatResearch ? window.lzSeatResearch(dec.seat) : [];
-            return (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-                {report && report.exists ? (
-                  <div onClick={() => goChat({ intent: 'report' })} title="去对话·研报模块读全文"
-                    style={{ display: 'flex', alignItems: 'center', gap: 7, border: '1px solid var(--jin)', borderRadius: 8, background: 'rgba(138,111,63,0.06)', padding: '7px 10px', cursor: 'pointer' }}>
-                    <span style={{ color: 'var(--jin)' }}>📄</span>
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div className="serif" style={{ fontSize: 11.5, color: 'var(--ink-1)' }}>{name} 深度研报 · 已生成</div>
-                      <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>{report.done}/{report.total} agents{report.asof ? ' · ' + report.asof : ''} · 看全文 →</div>
-                    </div>
-                  </div>
-                ) : report && report.running ? (
-                  <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>研报生成中 {report.done}/{report.total}…</div>
-                ) : (
-                  <div onClick={() => goChat({ intent: 'report' })} className="serif" style={{ fontSize: 10.5, color: 'var(--ink-3)', cursor: 'pointer' }}>
-                    本股暂无深度研报 · <span style={{ color: 'var(--yin)', borderBottom: '1px dashed var(--zhu-soft)' }}>去对话生成 →</span>
-                  </div>
-                )}
-                {refs.length ? refs.map((r, i) => (
-                  <div key={i} onClick={() => goChat({ researchId: r.id, intent: 'research' })} title="去对话·研报看此素材"
-                    style={{ display: 'flex', gap: 7, fontSize: 11.5, color: 'var(--ink-1)', fontFamily: 'var(--serif)', lineHeight: 1.5, cursor: 'pointer' }}>
-                    <span style={{ color: 'var(--jin)', flexShrink: 0 }}>§</span>
-                    <span style={{ textWrap: 'pretty' }}>{r.title}{r.from ? ' · ' + r.from : ''}</span>
-                  </div>
-                )) : <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>该席位未引用研报素材</div>}
-              </div>
-            );
-          })()}
-        </Field>
         {/* 价量形态 · 确定性:scanSeat 真算(dec.geo)/ decide 后端真算(pa_features);非 LLM,几何常显 */}
         {(() => {
           const g = (decide && decide.pa_features) || dec.geo;
@@ -1409,14 +1771,14 @@ function DecisionCard({ dec, symbol, mode }) {
             );
           })()}
         </Field>
-        {/* ⑤ 席位 agent 真研判(on-demand 真调 LLM,综合 因子+卡+研报+市况;区别于 K 线 scanSeat 启发式)*/}
+        {/* ⑤ 席位 agent 真研判(on-demand 真调 LLM,综合 配方卡/因子+工作空间摘要+市况;区别于 K 线 scanSeat 启发式)*/}
         <Field label="席位 · agent 研判(真)">
           {(() => {
             const runDecide = () => {
               if (!window.lzSeatDecide || deciding) return;
               setDeciding(true); setDecide(null);
-              // 第3期:喂该策略实例「自己配的」经验卡/研报/因子(配方),而非旧席位卡。配方因子只作 LLM 参考、不冒充回测。
-              const rcp = window.lzRecipeForStrategy ? window.lzRecipeForStrategy(dec.seat) : { cards: [], research: [], factors: [] };
+              // 喂该策略实例「自己配的」经验卡/因子；工作空间历史摘要由后端按 code/as-of 安全提取。
+              const rcp = window.lzRecipeForStrategy ? window.lzRecipeForStrategy(dec.seat) : { cards: [], factors: [] };
               const regimeNow = (mode === 'live' && market && market.regime) ? market.regime : (ev && ev.regime);
               const st = (window.lzStrategyGet && window.lzStrategyGet(dec.seat)) || s;
               window.lzSeatDecide({
@@ -1426,24 +1788,24 @@ function DecisionCard({ dec, symbol, mode }) {
                 card: rcp.cards[0] ? { name: rcp.cards[0].name, insight: rcp.cards[0].insight, verdict: rcp.cards[0].verdict, conf: rcp.cards[0].conf, ic: rcp.cards[0].ic } : null,
                 cards: rcp.cards,
                 recipe_factors: rcp.factors,
-                research: rcp.research.map(r => ({ title: r.title, from: r.from || '', path: r.path || null })),   // 带 path → 后端读研报正文摘录(P1⑤)
-                regime: regimeNow,
+                history_replay: mode === 'backtest',
+                regime: lzDecisionRegimeForPayload(mode === 'backtest', regimeNow),
                 pa: !!(st && st.pa),
                 pa_method: (st && st.pa) ? (st.paMethod || window.LZ_PA_METHOD_DEFAULT || '') : '',
                 w: (st && isFinite(+st.w)) ? Math.max(0, Math.min(1, +st.w)) : 0,   // P3:手动研判按本策略 w 混合(下方滑块就地可调);w=0 严格纯 LLM
               }).then(d => { setDecide(d); setDeciding(false); });
             };
-            // 快/深双模式(用户偏好,跨卡保持):两者均为 V4-Flash;快=非思考,深=thinking enabled + high。
+            // 本次手动研判只调用单模型；与自动盯盘的 Pro·10席事件深研严格分开。
             const modeBtn = (m, label, tip) => (
               <span onClick={(e) => { e.stopPropagation(); if (!deciding) setAgentMode(m); }} title={tip}
                 style={{ fontSize: 9, padding: '2px 7px', borderRadius: 5, cursor: deciding ? 'default' : 'pointer', fontFamily: 'var(--mono)', border: '1px solid ' + (agentMode === m ? 'var(--zhu-soft)' : 'var(--line)'), background: agentMode === m ? 'rgba(168,57,45,0.07)' : 'transparent', color: agentMode === m ? 'var(--yin)' : 'var(--ink-3)', fontWeight: agentMode === m ? 600 : 400, opacity: deciding ? 0.45 : 1 }}>{label}</span>
             );
             const modeRow = (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 7 }}>
-                <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>模式</span>
-                {modeBtn('fast', '快 · V4', 'deepseek-v4-flash · 非思考模式(thinking disabled)')}
-                {modeBtn('deep', '深 · V4 思考', 'deepseek-v4-flash · 高强度思考(thinking enabled · high)')}
-                <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)', marginLeft: 2 }}>{agentMode === 'deep' ? '慢 · 高强度思考' : '快 · 非思考'}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 7, flexWrap: 'wrap' }}>
+                <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>本次方式</span>
+                {modeBtn('fast', '本次快速研判', '单模型 deepseek-v4-flash · 非思考模式(thinking disabled)')}
+                {modeBtn('deep', '本次单模型深思', '单模型 deepseek-v4-flash · 高强度思考(thinking enabled · high)')}
+                <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)', marginLeft: 2 }}>{agentMode === 'deep' ? '单模型高强度思考' : '单模型非思考'}</span>
                 <span onClick={(e) => { e.stopPropagation(); setHistOpen(true); }} className="mono" title="查看历次 agent 研判 / 条件单的真思维链(落盘)"
                   style={{ marginLeft: 'auto', fontSize: 9, padding: '2px 8px', borderRadius: 5, cursor: 'pointer', border: '1px solid var(--line)', color: 'var(--ink-3)' }}>研判历史 ⏱</span>
               </div>
@@ -1465,13 +1827,13 @@ function DecisionCard({ dec, symbol, mode }) {
             let body;
             if (deciding) body = (
               <div className="mono" style={{ fontSize: 10.5, color: 'var(--yin)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--yin)', animation: 'pulse 1s ease-in-out infinite' }} />{agentMode === 'deep' ? 'agent 研判中…(V4-Flash 高强度思考)' : 'agent 研判中…(V4-Flash 非思考)'}
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--yin)', animation: 'pulse 1s ease-in-out infinite' }} />{agentMode === 'deep' ? '本次单模型深思中…' : '本次快速研判中…'}
               </div>
             );
             else if (!decide) body = (
-              <div onClick={runDecide} title="真调 LLM:综合 量化因子 + 经验卡 + 研报 + 市况(仅用 ≤当日信息)研判这一笔"
+              <div onClick={runDecide} title="真调 LLM：配方卡/因子+工作空间摘要+市况（仅用 ≤当日信息）研判这一笔"
                 style={{ fontSize: 10.5, color: 'var(--yin)', cursor: 'pointer', border: '1px dashed var(--zhu-soft)', borderRadius: 8, padding: '7px 10px', display: 'inline-block', fontFamily: 'var(--serif)' }}>
-                ▶ 真·agent 研判(综合 因子 + 卡 + 研报 + 市况)
+                ▶ 真·agent 研判(配方卡/因子 + 空间摘要 + 市况)
               </div>
             );
             else if (decide.error) body = (
@@ -1500,8 +1862,9 @@ function DecisionCard({ dec, symbol, mode }) {
                       {decide.key_evidence.map((k, i) => <span key={i} className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', border: '1px solid var(--line)', borderRadius: 5, padding: '2px 6px' }}>{k}</span>)}
                     </div>
                   )}
+                  <WorkspaceHistorySummary history={decide.workspace_history_items} />
                   <ReasoningChain reasoning={decide.reasoning} />
-                  <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', marginTop: 5 }}>独立真 agent 研判({(decide.model_name || '').split('/').pop()}),与 K 线 scanSeat 启发式标记可能不同{decide.reasoning ? ' —— 这才是真·思考' : ' · 快模式无思维链,切「深」看逐步推理'}。<span onClick={runDecide} style={{ color: 'var(--yin)', cursor: 'pointer' }}> 重研判 →</span></div>
+                  <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', marginTop: 5 }}>独立真 agent 单模型研判({(decide.model_name || '').split('/').pop()}),与 K 线 scanSeat 启发式标记可能不同{decide.reasoning ? ' · 本次含模型思考摘要' : ' · 本次快速研判不含思考摘要，可切「本次单模型深思」'}。<span onClick={runDecide} style={{ color: 'var(--yin)', cursor: 'pointer' }}> 重研判 →</span></div>
                 </div>
               );
             }
@@ -1519,20 +1882,37 @@ function DecisionCard({ dec, symbol, mode }) {
 //   行点开 = EvidenceFields 完整证据链。industry 传真值(修旧 runTimedDecide 恒空 bug)。
 const JUDGE_TF_CN = { day: '日线', '30min': '30分钟', '5min': '5分钟', '1min': '1分钟' };
 const JUDGE_CADENCE_CN = { daily: '每日一次', '60min': '每60分钟', hourly: '每60分钟', '30min': '每30分钟', '10min': '每10分钟' };
+const JUDGE_QUOTE_FIELD_ALIASES = [
+  ['price', ['price']], ['open', ['open']], ['high', ['high']], ['low', ['low']],
+  ['asof', ['asof']], ['volume', ['volume']], ['amount', ['amount']],
+  ['turnover_rate', ['turnover_rate', 'turnoverRate']],
+  ['vol_ratio', ['vol_ratio', 'volRatio']],
+  ['fresh', ['fresh']], ['source', ['source']],
+];
+function lzJudgeQuoteEvidence(quote) {
+  if (!quote || typeof quote !== 'object') return null;
+  // 只有服务端已按交易时段 + 供应商时间判为 fresh 的报价才可进入研判。
+  // TDX failover 没有供应商 asof，只作为操作台快照展示。
+  if (quote.fresh !== true || !quote.asof || !quote.source) return null;
+  const out = {};
+  JUDGE_QUOTE_FIELD_ALIASES.forEach(([outputKey, inputKeys]) => {
+    const inputKey = inputKeys.find(key => Object.prototype.hasOwnProperty.call(quote, key) && quote[key] !== undefined);
+    if (inputKey) out[outputKey] = quote[inputKey];
+  });
+  return Object.keys(out).length ? out : null;
+}
 function _judgeNow(freq) {
   const d = new Date(), p = n => String(n).padStart(2, '0');
   const day = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
-  return freq === 'day' ? day : (day + 'T' + p(d.getHours()) + ':' + p(d.getMinutes()));
+  // 分钟研判仍保留秒级 anchor，避免页面 quote 的秒级 asof 被误判成“同分钟未来”。
+  return freq === 'day' ? day : (day + 'T' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()));
 }
 
-function JudgeCard({ code, name, industry, strat, regime, assignment, assignmentMode, onConfigureWatch }) {
+function JudgeCard({ code, name, industry, strat, regime, quote, assignment, assignmentMode, onConfigureWatch, onDecisionComplete }) {
   const [decide, setDecide] = useState(null);
   const [deciding, setDeciding] = useState(false);
   const [agentMode, setAgentMode] = useState('deep');
-  const [rows, setRows] = useState(null);
-  const [openId, setOpenId] = useState(null);
-  const [histOpen, setHistOpen] = useState(false);
-  const [bump, setBump] = useState(0);
+  const decideSeq = useRef(0);
   const modernAssignment = !!(assignmentMode && assignmentMode.supported === true);
   const legacyAssignment = !!(assignmentMode && assignmentMode.legacy);
   const requestedTF = modernAssignment && assignment ? (assignment.requested_evidence_tf || assignment.evidence_tf || 'day') : 'day';
@@ -1541,16 +1921,16 @@ function JudgeCard({ code, name, industry, strat, regime, assignment, assignment
     : 'day';
   const unsupportedTF = modernAssignment && assignment && !effectiveTF;
   useEffect(() => {
-    let alive = true; setDecide(null); setOpenId(null);
-    if (window.lzFetchDecisionsTimeline) window.lzFetchDecisionsTimeline(code, 40)
-      .then(ds => { if (alive) setRows(ds ? ds.filter(d => d.kind !== 'order') : null); });
-    else setRows(null);
-    return () => { alive = false; };
-  }, [code, bump]);
+    decideSeq.current += 1;
+    setDecide(null); setDeciding(false);
+  }, [code, strat && strat.id]);
   const runDecide = async () => {
     if (!window.lzSeatDecide || deciding || !strat || unsupportedTF) return;
+    const seq = ++decideSeq.current;
     setDeciding(true); setDecide(null);
-    const rcp = window.lzRecipeForStrategy ? window.lzRecipeForStrategy(strat.id) : { cards: [], research: [], factors: [] };
+    const rcp = window.lzRecipeForStrategy ? window.lzRecipeForStrategy(strat.id) : { cards: [], factors: [] };
+    // JudgeCard 只挂在「今日」页：发送页面已有 quote 的严格白名单；历史复盘路径不携带 quote。
+    const liveQuote = lzJudgeQuoteEvidence(quote);
     // 持仓上下文(可选,诚实降级):台账若已开仓且本票在持 → 喂 hold_entry(加权成本);
     //   台账无入场日,不传 hold_bars。台账调用失败/未开仓/找不到该票 → 不传,研判照常(纯上下文,不改 schema)。
     let holdExtra = null;
@@ -1569,12 +1949,16 @@ function JudgeCard({ code, name, industry, strat, regime, assignment, assignment
       industry: industry || '',
       card: rcp.cards[0] ? { name: rcp.cards[0].name, insight: rcp.cards[0].insight, verdict: rcp.cards[0].verdict, conf: rcp.cards[0].conf, ic: rcp.cards[0].ic } : null,
       cards: rcp.cards, recipe_factors: rcp.factors,
-      research: rcp.research.map(r => ({ title: r.title, from: r.from || '', path: r.path || null })),
       regime: regime || null,
       pa: !!strat.pa,
       pa_method: strat.pa ? (strat.paMethod || window.LZ_PA_METHOD_DEFAULT || '') : '',
       w: isFinite(+strat.w) ? Math.max(0, Math.min(1, +strat.w)) : 0,
-    }, holdExtra).then(d => { setDecide(d); setDeciding(false); setBump(b => b + 1); });
+      ...(liveQuote ? { quote: liveQuote } : {}),
+    }, holdExtra).then(d => {
+      if (seq !== decideSeq.current) return;
+      setDecide(d); setDeciding(false);
+      if (onDecisionComplete) onDecisionComplete(d);
+    });
   };
   const dirColor = (d) => d && /买/.test(d) ? 'var(--zhu)' : (d && /卖/.test(d) ? 'var(--dai)' : 'var(--ink-2)');
   const modeBtn = (m, label, tip) => (
@@ -1583,21 +1967,19 @@ function JudgeCard({ code, name, industry, strat, regime, assignment, assignment
   );
   return (
     <div style={{ borderBottom: '1px solid var(--line)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 13px 7px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 13px 7px', flexWrap: 'wrap' }}>
         <span className="serif" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-1)' }}>研判</span>
         <span className="mono" style={{ fontSize: 8.5, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--zhu-soft)', color: 'var(--yin)' }}>真 · LLM</span>
-        <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>本次思考</span>
-        {modeBtn('fast', '快速', 'deepseek-v4-flash · 非思考模式(thinking disabled)')}
-        {modeBtn('deep', 'Pro', 'deepseek-v4-flash · 高强度思考(thinking enabled · high)')}
-        {onConfigureWatch && <span onClick={onConfigureWatch} className="mono" title="设置本票负责 Agent、研判数据周期、自动节奏和自动思考强度" style={{ marginLeft: 'auto', fontSize: 9, padding: '2px 8px', borderRadius: 5, cursor: 'pointer', border: '1px solid var(--zhu-soft)', color: 'var(--yin)' }}>盯盘设置</span>}
-        <span onClick={() => setHistOpen(true)} className="mono" title="历次研判/条件单全量(落盘)"
-          style={{ fontSize: 9, padding: '2px 8px', borderRadius: 5, cursor: 'pointer', border: '1px solid var(--line)', color: 'var(--ink-3)' }}>⏱ 全部</span>
+        <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>本次方式</span>
+        {modeBtn('fast', '本次快速研判', '单模型 deepseek-v4-flash · 非思考模式(thinking disabled)')}
+        {modeBtn('deep', '本次单模型深思', '单模型 deepseek-v4-flash · 高强度思考(thinking enabled · high)')}
+        {onConfigureWatch && <span onClick={onConfigureWatch} className="mono" title="设置本票负责 Agent、研判数据周期、自动节奏，以及快速研判 / Pro·10席事件深研" style={{ marginLeft: 'auto', fontSize: 9, padding: '2px 8px', borderRadius: 5, cursor: 'pointer', border: '1px solid var(--zhu-soft)', color: 'var(--yin)' }}>盯盘设置</span>}
       </div>
       <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '0 13px 8px', fontSize: 8.5, color: 'var(--ink-3)' }}>
         <span title="当前实际负责的策略 Agent" style={{ border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>Agent · {(strat && strat.name) || (assignment && (assignment.strategy_name || assignment.strategy_id)) || '未指定'}</span>
         <span title="Agent 研判所读取的数据周期；与图表周期无关" style={{ border: '1px solid ' + (unsupportedTF ? 'var(--zhu-soft)' : 'var(--line)'), borderRadius: 4, padding: '1px 5px', color: unsupportedTF ? 'var(--yin)' : 'var(--ink-3)' }}>依据 · {JUDGE_TF_CN[requestedTF] || requestedTF}{unsupportedTF ? '（未接通·已暂停）' : ''}</span>
         {modernAssignment && assignment && <span style={{ border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>自动 · {assignment.enabled ? (JUDGE_CADENCE_CN[assignment.decision_cadence] || assignment.decision_cadence) : '已停用'}</span>}
-        {modernAssignment && assignment && <span style={{ border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>自动思考 · {assignment.thinking_mode === 'deep' ? 'Pro' : '快速'}</span>}
+        {modernAssignment && assignment && <span style={{ border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>自动研判 · {assignment.thinking_mode === 'deep' ? 'Pro·10席事件深研' : '快速研判'}</span>}
         {legacyAssignment && <span style={{ color: 'var(--jin)' }}>旧版绑定 · 自动研判固定日线</span>}
         {!modernAssignment && !legacyAssignment && <span style={{ color: 'var(--ink-3)' }}>单票配置不可达 · 手动研判仍按日线</span>}
         {modernAssignment && !assignment && <span>未纳入自动盯盘 · 手动研判按日线</span>}
@@ -1606,10 +1988,10 @@ function JudgeCard({ code, name, industry, strat, regime, assignment, assignment
         {deciding ? (
           <div className="mono" style={{ fontSize: 10.5, color: 'var(--yin)', display: 'flex', alignItems: 'center', gap: 6, padding: '6px 0' }}>
             <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--yin)', animation: 'pulse 1s ease-in-out infinite' }} />
-            {agentMode === 'deep' ? '研判中…(V4-Flash 高强度思考)' : '研判中…(V4-Flash 非思考)'}
+            {agentMode === 'deep' ? '本次单模型深思中…' : '本次快速研判中…'}
           </div>
         ) : (
-          <div onClick={runDecide} title={unsupportedTF ? '所选研判数据周期尚未接通；为防伪造，未回退日线' : ('真调 LLM：按 ' + (JUDGE_TF_CN[effectiveTF] || effectiveTF || '日线') + ' 口径综合配方与市况研判')}
+          <div onClick={runDecide} title={unsupportedTF ? '所选研判数据周期尚未接通；为防伪造，未回退日线' : ('真调 LLM：按 ' + (JUDGE_TF_CN[effectiveTF] || effectiveTF || '日线') + ' 口径综合配方、工作空间历史摘要与市况研判')}
             style={{ fontSize: 10.5, color: (strat && !unsupportedTF) ? 'var(--yin)' : 'var(--ink-3)', cursor: (strat && !unsupportedTF) ? 'pointer' : 'default', border: '1px dashed var(--zhu-soft)', borderRadius: 8, padding: '6px 10px', display: 'inline-block', fontFamily: 'var(--serif)' }}>
             {unsupportedTF ? ('所选' + (JUDGE_TF_CN[requestedTF] || requestedTF) + '研判未接通 · 未降级日线') : ('▶ 研判一次' + (strat ? ' · ' + strat.name + ' · ' + (JUDGE_TF_CN[effectiveTF] || effectiveTF) : '(无策略,去「策略」页建)'))}
           </div>
@@ -1630,70 +2012,89 @@ function JudgeCard({ code, name, industry, strat, regime, assignment, assignment
               </div>
             )}
             <div className="serif" style={{ fontSize: 11.5, color: 'var(--ink-1)', marginTop: 5, lineHeight: 1.6, textWrap: 'pretty' }}>{decide.rationale}</div>
+            <WorkspaceHistorySummary history={decide.workspace_history_items} />
             <ReasoningChain reasoning={decide.reasoning} />
           </div>
         )}
-        {/* 研判时间线(后端落盘,含 watcher/手动;条件单在下方「决策留痕」)*/}
-        <div style={{ marginTop: 9 }}>
-          {rows === null && <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>时间线读取中 / 后端未连…</div>}
-          {rows && rows.length === 0 && <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>本票尚无研判 —— 点上方「▶ 研判一次」,或开顶部「盯盘」由服务端盘中自动判</div>}
-          {rows && rows.slice(0, 8).map(r => {
-            const isOpen = openId === r.id;
-            return (
-              <div key={r.id} style={{ borderTop: '1px solid var(--line-soft)', padding: '6px 0' }}>
-                <div onClick={() => setOpenId(isOpen ? null : r.id)} className="hover-row" style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer' }}>
-                  <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', width: 84, flexShrink: 0 }}>{String(r.ts || '').replace('T', ' ').slice(5, 16)}</span>
-                  <span className="serif" style={{ fontSize: 12, fontWeight: 600, color: dirColor(r.direction) }}>{r.direction || '—'}</span>
-                  {r.confidence != null && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>置信{r.confidence}</span>}
-                  <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.strategy_name || ''}</span>
-                  {r.source === 'watcher' && <span className="mono" title="服务端盯盘自动研判" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)' }}>盯</span>}
-                  {(r.evidence_tf || r.freq) && <span className="mono" title="该条记录实际使用的数据周期" style={{ fontSize: 8, padding: '1px 4px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)' }}>{JUDGE_TF_CN[r.evidence_tf || r.freq] || (r.evidence_tf || r.freq)}</span>}
-                  <span className="mono" style={{ marginLeft: 'auto', fontSize: 8, color: 'var(--ink-3)' }}>{isOpen ? '▴' : '▾'}</span>
-                </div>
-                {isOpen && <div style={{ padding: '6px 2px 4px', display: 'flex', flexDirection: 'column', gap: 10 }}><EvidenceFields dec={r} /></div>}
-              </div>
-            );
-          })}
-        </div>
+        <div className="mono" style={{ marginTop: 9, paddingTop: 7, borderTop: '1px solid var(--line-soft)', fontSize: 8.5, color: 'var(--ink-3)' }}>历次研判、条件单与深研尝试统一在操作台「记录」中查看。</div>
       </div>
-      <DecisionHistory code={code} open={histOpen} onClose={() => setHistOpen(false)} />
     </div>
   );
 }
 
-// ───────── 决策留痕(2026-07-11:台账记账半边退役,只留只读时间线)─────────
-//   按日分组:研判/条件单混排(后端 seats_decisions 落盘全量);纯展示,不记现金/持仓。
-function DecisionTrail({ code }) {
+// ───────── 统一记录(研判历史 / 条件单 / 深研尝试合一)─────────
+//   按日分组、可筛选和展开证据；纯展示,不记现金/持仓。
+function DecisionTrail({ code, strategyId, active, bump }) {
   const [rows, setRows] = useState(null);
+  const [filter, setFilter] = useState('all');        // all | judge | order | deep
+  const [scope, setScope] = useState('strategy');     // strategy | code
+  const [openId, setOpenId] = useState(null);
+  const [refreshBump, setRefreshBump] = useState(0);
   useEffect(() => {
+    if (!active) return;
     let alive = true; setRows(null);
-    if (window.lzFetchDecisionsTimeline) window.lzFetchDecisionsTimeline(code, 60).then(ds => { if (alive) setRows(ds); });
+    if (window.lzFetchDecisionsTimeline) window.lzFetchDecisionsTimeline(code, 120).then(ds => { if (alive) setRows(ds || []); });
+    else setRows([]);
     return () => { alive = false; };
-  }, [code]);
+  }, [code, active, bump, refreshBump]);
+  useEffect(() => { setOpenId(null); }, [code, strategyId]);
+  const isOrder = (r) => r && r.kind === 'order';
+  const isDeep = (r) => r && (r.kind === 'deep_attempt' || r.source === 'orchestrated' || !!r.orchestration_grade || !!r.deep_status);
+  const scoped = (rows || []).filter(r => scope !== 'strategy' || !strategyId || String(r.strategy_id || '') === String(strategyId));
+  const visible = scoped.filter(r => filter === 'all'
+    || (filter === 'order' && isOrder(r))
+    || (filter === 'deep' && isDeep(r))
+    || (filter === 'judge' && !isOrder(r) && r.kind !== 'deep_attempt'));
   const days = {};
-  (rows || []).forEach(r => { const d = String(r.ts || '').slice(0, 10) || '—'; (days[d] = days[d] || []).push(r); });
+  visible.forEach(r => { const d = String(r.ts || '').slice(0, 10) || '—'; (days[d] = days[d] || []).push(r); });
   const keys = Object.keys(days).sort().reverse();
   const dirColor = (d) => d && /买/.test(d) ? 'var(--zhu)' : (d && /卖/.test(d) ? 'var(--dai)' : 'var(--ink-2)');
+  const filterTabs = [['all', '全部'], ['judge', '研判'], ['order', '条件单'], ['deep', '深研']];
   return (
-    <div style={{ borderBottom: '1px solid var(--line)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 13px 6px' }}>
-        <span className="serif" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-1)' }}>决策留痕</span>
-        <span className="mono" title="只读时间线(后端落盘);记账/持仓管理已退役——你在手机下单,系统只留研判与信号的痕" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)' }}>只读 · 不记账</span>
+    <div style={{ minHeight: '100%', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ flexShrink: 0, padding: '10px 13px 9px', borderBottom: '1px solid var(--line)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span className="serif" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-1)' }}>记录</span>
+          <span className="mono" title="后端落盘的只读研判、条件单与深研记录；不记账、不代下单" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)' }}>只读 · 不记账</span>
+          <button type="button" onClick={() => setRefreshBump(v => v + 1)} className="mono" style={{ marginLeft: 'auto', border: 'none', background: 'transparent', color: 'var(--ink-3)', cursor: 'pointer', fontSize: 9 }}>↻ 刷新</button>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 8, flexWrap: 'wrap' }}>
+          {filterTabs.map(([k, label]) => <button type="button" key={k} onClick={() => setFilter(k)} className="mono" style={{ border: '1px solid ' + (filter === k ? 'var(--zhu-soft)' : 'var(--line)'), borderRadius: 5, padding: '2px 7px', background: filter === k ? 'rgba(168,57,45,0.06)' : 'transparent', color: filter === k ? 'var(--yin)' : 'var(--ink-3)', cursor: 'pointer', fontSize: 8.5 }}>{label}</button>)}
+          <span style={{ width: 1, height: 14, background: 'var(--line)', margin: '0 2px' }} />
+          {[['strategy', '当前策略'], ['code', '本票全部策略']].map(([k, label]) => <button type="button" key={k} onClick={() => setScope(k)} className="mono" style={{ border: 'none', borderBottom: '1px solid ' + (scope === k ? 'var(--yin)' : 'transparent'), padding: '2px 3px', background: 'transparent', color: scope === k ? 'var(--yin)' : 'var(--ink-3)', cursor: 'pointer', fontSize: 8.5 }}>{label}</button>)}
+        </div>
       </div>
-      <div style={{ padding: '0 13px 10px', maxHeight: 200, overflowY: 'auto' }}>
+      <div style={{ flex: 1, padding: '5px 13px 14px' }}>
         {rows === null && <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>读取中 / 后端未连…</div>}
-        {rows && keys.length === 0 && <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>本票暂无留痕</div>}
+        {rows && keys.length === 0 && <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', padding: '18px 0', textAlign: 'center' }}>{scope === 'strategy' ? '当前策略暂无匹配记录' : '本票暂无匹配记录'}</div>}
         {keys.map(d => (
           <div key={d} style={{ marginBottom: 4 }}>
-            <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '.06em', padding: '4px 0 2px' }}>{d}</div>
-            {days[d].map(r => (
-              <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '2px 0' }}>
-                <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', width: 38, flexShrink: 0 }}>{String(r.ts || '').slice(11, 16)}</span>
-                <span className="mono" style={{ fontSize: 8, padding: '0 5px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)', flexShrink: 0 }}>{r.kind === 'order' ? '条件单' : '研判'}</span>
-                <span className="serif" style={{ fontSize: 11, fontWeight: 600, color: dirColor(r.kind === 'order' ? r.side : r.direction) }}>{(r.kind === 'order' ? r.side : r.direction) || '—'}</span>
-                <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.strategy_name || ''}</span>
-              </div>
-            ))}
+            <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '.06em', padding: '6px 0 3px' }}>{d}</div>
+            {days[d].map(r => {
+              const opened = openId === r.id;
+              const order = isOrder(r), deepAttempt = r.kind === 'deep_attempt';
+              const direction = deepAttempt ? (r.deep_status === 'degraded' ? '降级' : (r.deep_status === 'failed' ? '失败' : (r.deep_status === 'refused' ? '拒绝' : '未接管'))) : ((order ? r.side : r.direction) || '—');
+              return <div key={r.id} style={{ borderTop: '1px solid var(--line-soft)', padding: '5px 0' }}>
+                <div onClick={() => setOpenId(opened ? null : r.id)} className="hover-row" style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer' }}>
+                  <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', width: 38, flexShrink: 0 }}>{String(r.ts || '').slice(11, 16)}</span>
+                  <span className="mono" style={{ fontSize: 8, padding: '0 5px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)', flexShrink: 0 }}>{order ? '条件单' : (deepAttempt ? '深研尝试' : (r.source === 'orchestrated' ? '10席深研' : '研判'))}</span>
+                  <span className="serif" style={{ fontSize: 11, fontWeight: 600, color: dirColor(direction) }}>{direction}</span>
+                  <DeepTraceBadge row={r} />
+                  <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.strategy_name || ''}</span>
+                  <span className="mono" style={{ marginLeft: 'auto', fontSize: 8, color: 'var(--ink-3)' }}>{opened ? '▴' : '▾'}</span>
+                </div>
+                {opened && <div style={{ padding: '7px 2px 3px', display: 'flex', flexDirection: 'column', gap: 7 }}>
+                  <SeatRecordDiagnostics row={r} />
+                  <DeepTraceDetails row={r} />
+                  {order ? <React.Fragment>
+                    {(r.triggers || []).length > 0 && <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)' }}>触发：{(r.triggers || []).map(t => t.kind + t.op + t.value).join(r.logic === 'OR' ? ' 或 ' : ' 且 ')}</div>}
+                    <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>{r.stop != null ? '止损 ' + r.stop : '无止损'}{r.take != null ? ' · 目标 ' + r.take : ''}{r.validity ? ' · ' + r.validity : ''}</div>
+                    {r.rationale && <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-1)', lineHeight: 1.6 }}>{r.rationale}</div>}
+                  </React.Fragment> : <EvidenceFields dec={r} />}
+                  <div className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>{r.model_name || ''}{r.asof ? ' · as-of ' + r.asof : ''}</div>
+                </div>}
+              </div>;
+            })}
           </div>
         ))}
       </div>
@@ -1702,4 +2103,4 @@ function DecisionTrail({ code }) {
 }
 
 Object.assign(window, { MiniLine, MarketBar, MetricsStrip, SeatRail, LiveDecideFlow, DecisionCard, DecisionHistory, ReasoningChain, LedgerPanel, pct, plFmt,
-  EvidenceFields, JudgeCard, DecisionTrail });   // 2026-07-11 三页重排新组件
+  EvidenceFields, SeatRecordDiagnostics, JudgeCard, DecisionTrail });   // 2026-07-11 三页重排新组件

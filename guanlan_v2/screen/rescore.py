@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-RUNS_PATH = Path(__file__).resolve().parents[2] / "var" / "rescore_runs.jsonl"
+_SCREEN_ROOT = Path(os.environ.get("GUANLAN_SCREEN_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var"
+))
+RUNS_PATH = _SCREEN_ROOT / "rescore_runs.jsonl"
 # 情绪判读缓存已迁至统一 store(datafeed.sentiment,var/sentiment/*);此处不再自存。
 
 _TAG_SCORE = {"利好": 1.0, "中性": 0.0, "利空": -1.0}   # news_pulse.NEWS_SYSTEM tag 枚举

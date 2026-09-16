@@ -4,10 +4,12 @@
 [50,200]→vol×100;[0.05,0.2]→vol×100+amount×1000;ref_vol 模式只修 amount。
 """
 import pandas as pd
+from pathlib import Path
 
 from guanlan_v2.strategy.compute.units import normalize_frame_units
 
 _IDX = pd.to_datetime(["2026-03-13", "2026-03-16", "2026-03-31", "2026-04-01"])
+_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _mk(vol, amount, close=100.0):
@@ -51,8 +53,8 @@ def test_graceful_passthrough():
 
 def test_pillars_pin_normalize():
     # 契约钉:三支柱面板构建必须过 normalize_frame_units(防回退)
-    for fn in (r"G:\guanlan-v2\guanlan_v2\strategy\compute\v4.py",
-               r"G:\guanlan-v2\guanlan_v2\strategy\compute\breadth.py",
-               r"G:\guanlan-v2\guanlan_v2\strategy\compute\mainline.py"):
-        src = open(fn, encoding="utf-8").read()
+    for fn in (_ROOT / "guanlan_v2/strategy/compute/v4.py",
+               _ROOT / "guanlan_v2/strategy/compute/breadth.py",
+               _ROOT / "guanlan_v2/strategy/compute/mainline.py"):
+        src = fn.read_text(encoding="utf-8")
         assert "normalize_frame_units(" in src, fn

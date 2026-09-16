@@ -29,7 +29,7 @@ def test_start_requires_goal(monkeypatch):
 def test_start_rejects_bad_universe(monkeypatch):
     _reset_state(monkeypatch)
     j = _client().post("/research/loop/start",
-                       json={"goal": "找反转", "universe": "csi300"}).json()   # csi300 非法(是 benchmark id)
+                       json={"goal": "找反转", "universe": "../../private"}).json()
     assert j["ok"] is False and "universe" in j["reason"]
 
 

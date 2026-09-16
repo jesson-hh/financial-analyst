@@ -12,6 +12,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PATCH = ROOT / "var/agent_workflow_20260905/live_confirmation_wait.patch"
+pytestmark = [
+    pytest.mark.realdata,
+    pytest.mark.skipif(not PATCH.is_file(), reason="private live patch fixture is not distributed"),
+]
 
 
 def sources():

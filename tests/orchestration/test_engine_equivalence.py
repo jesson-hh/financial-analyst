@@ -80,7 +80,10 @@ from guanlan_v2.orchestration.admission import (
     ApprovalSubmission,
     PlanAdmissionService,
 )
-from guanlan_v2.orchestration.budget import BudgetLedger
+from guanlan_v2.orchestration.budget import (
+    BudgetLedger,
+    IdempotencyReplayRefused,
+)
 from guanlan_v2.orchestration.catalog_runtime import (
     BridgeCatalogView,
     CatalogMaterialError,
@@ -900,8 +903,10 @@ def test_crash_after_layer_commit_resumes_to_the_clean_result(FX):
         assert len([r for r in _node_reservations(crashed) if r.scope_id == node]) == 1
 
 
-def test_crash_before_commit_leaves_no_visible_artifact_then_replays(FX):
-    # assertion 8: a staged artifact is NEVER visible before its LayerCommitted.
+def test_crash_before_commit_leaves_no_visible_artifact_and_llm_replay_refuses(FX):
+    # assertion 8: a staged artifact is NEVER visible before its LayerCommitted;
+    # an old LLM attempt is ambiguous external spend and must not be dispatched
+    # again merely because its reservation command is idempotent.
     env = build_new_env(FX)
 
     class _Crash(Exception):
@@ -922,9 +927,10 @@ def test_crash_before_commit_leaves_no_visible_artifact_then_replays(FX):
     assert env.pool.committed_output("news-sentiment", "primary") is None
     assert env.pool.committed_output("report-writer", "primary") is None
     env.pool.commit_layer = real_commit  # type: ignore[method-assign]
-    result, _ = env.run()
-    assert result.terminal_status == "completed"
-    assert env.pool.committed_output("report-writer", "primary") is not None
+    with pytest.raises(IdempotencyReplayRefused, match="fresh-only"):
+        env.run()
+    assert env.pool.committed_output("news-sentiment", "primary") is None
+    assert env.pool.committed_output("report-writer", "primary") is None
 
 
 # =========================================================================== #

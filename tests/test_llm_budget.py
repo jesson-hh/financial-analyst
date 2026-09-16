@@ -92,6 +92,30 @@ def test_explicit_arg_beats_seat_default(fake_openai):
     assert kw["max_tokens"] == 1024 and kw["timeout"] == 60.0
 
 
+def test_explicit_retry_policy_disables_openai_sdk_hidden_retries(monkeypatch):
+    requests = []
+    options = []
+
+    class _RetryAwareFakeOpenAI(_FakeOpenAI):
+        def with_options(self, **kwargs):
+            options.append(kwargs)
+            return self
+
+    client = _RetryAwareFakeOpenAI(requests)
+    monkeypatch.setattr(C, "_get_openai_compat_client", lambda *a, **k: client)
+    c = C.LLMClient(
+        provider="deepseek", model="deepseek-v4-flash", config=CFG)
+
+    dispatches = []
+    asyncio.run(c.chat(
+        [{"role": "user", "content": "hi"}], max_retries=0,
+        on_dispatch=lambda: dispatches.append("http")))
+
+    assert options == [{"max_retries": 0}]
+    assert dispatches == ["http"]
+    assert len(requests) == 1
+
+
 def test_with_overrides_carries_budget(fake_openai):
     c = C.LLMClient.for_agent("rerank").with_overrides(model="deepseek-v4-pro")
     assert c.default_max_tokens == 8192 and c.default_timeout == 300.0

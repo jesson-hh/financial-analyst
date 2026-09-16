@@ -917,14 +917,17 @@ def build_app():
 
     @app.get("/data/status")
     async def data_status():
-        """Last-update timestamps + staleness flags for each data type.
+        """Canonical data health plus deprecated updater-stamp compatibility.
 
-        UI uses this to render the data-refresh button state (e.g. badge
-        the button red if day data > 24h old).
+        ``/data/health`` is the sole system-freshness truth.  The historical
+        ``items``/``stale_count`` fields remain for the vendored Buddy refresh
+        button, but are explicitly scoped as action receipts in
+        ``refresh_tracker`` and must not be interpreted as shared data health.
         """
         try:
             from financial_analyst.data import last_update as _lu
             from financial_analyst.buddy.alerts import market_session
+            from guanlan_v2.datafeed.health import build_legacy_status_compat
             implemented = set(_lu.IMPLEMENTED_TYPES)
             rows = []
             for dt, age, stale in _lu.status_summary():
@@ -934,21 +937,13 @@ def build_app():
                     "stale":       stale,
                     "implemented": dt in implemented,
                 })
-            # Only types we can actually refresh count towards the badge.
-            # financials/f10 have no updater yet — they'd otherwise show
-            # "never" forever and the red ⚠ would never clear.
-            stale_count = sum(1 for r in rows if r["stale"] and r["implemented"])
             # Market session — frontend uses this to render an orange
             # "waiting for close" state when data is fresh but today's
             # trading day isn't done yet ('open' / 'lunch' on weekdays).
             session = market_session()
-            return JSONResponse({
-                "ok":             True,
-                "items":          rows,
-                "stale_count":    stale_count,
-                "any_stale":      stale_count > 0,
-                "market_session": session,  # 'open' / 'lunch' / 'closed' / 'weekend'
-            })
+            return JSONResponse(build_legacy_status_compat(
+                rows, market_session=session,
+            ))
         except Exception as exc:
             return JSONResponse(
                 {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"},

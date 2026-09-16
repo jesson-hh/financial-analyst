@@ -14,7 +14,7 @@ and the manifest kind. It owns exactly three things — one source and two build
   ``live_client`` facade (``probe`` / ``catalog`` / ``resolve_source`` /
   ``known_sources``; tests inject fakes) behind the **existing** Phase-3 method ids
   (``verified_snapshot`` for a per-code realtime quote, ``news`` for
-  announcement/news-style text feeds, ``ohlcv`` for the market-wide tape snapshot —
+  announcement/news-style text feeds, ``ohlcv`` for per-instrument TDX daily bars —
   **no new** ``DataMethodSpec`` id is minted). Each probe-envelope row becomes a
   :class:`~guanlan_v2.orchestration.data.pit.RawRowCandidate` carrying **the data's
   own availability**: a *live* candidate is stamped with the envelope's ``pulled_at``
@@ -69,14 +69,12 @@ and the manifest kind. It owns exactly three things — one source and two build
 
 Honest-degradation red lines (user honesty red lines):
 
-* **No fabricated rows, no silent vendor swap.** An ``ok:False`` (caller/mechanical)
-  envelope raises a raise-bucket :class:`RoutingConfigurationError`; ``status:error``
-  raises :class:`SourceBrokenError` (surfaces loud, never advances the frozen chain);
-  ``status:planned`` raises :class:`NotConfiguredError` (the vendor probe is not
-  implemented/available — the ONLY, per Phase-3, error that advances the frozen chain
-  to the next configured vendor, or exhausts an optional method to an honest
-  ``UNAVAILABLE`` result). None of these fabricates a row or silently substitutes a
-  different vendor's answer.
+* **No fabricated rows, no silent vendor swap.** The accepted data states are the
+  exact closed set ``ok/empty/not_available``; only the exact transient states
+  ``provider_busy/rate_limited`` raise :class:`RateLimitError`. Every unknown,
+  legacy or structurally inconsistent state raises :class:`SourceBrokenError`
+  (surfaces loud, never advances the frozen chain). None of these fabricates a row
+  or silently substitutes a different vendor's answer.
 * **Red line §10 — the live adapter registers NO order/signal write capability.**
   Every bound method spec is ``read_only=True`` by its own frozen contract, and this
   source exposes only reads (``fetch`` + pure accessors); there is no order/signal
@@ -95,14 +93,22 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
+from collections import OrderedDict
 from datetime import date as _date, datetime, time as _time, timedelta, timezone
 from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
+from guanlan_v2.orchestration.adapters.live_binding import (
+    ReviewedLiveBinding,
+    ReviewedLiveBindingSnapshot,
+    reviewed_live_binding_snapshot,
+    verify_code_approved_live_binding_snapshot,
+)
 from guanlan_v2.orchestration.context import DataContext
 from guanlan_v2.orchestration.data.calendar import TradingCalendar
 from guanlan_v2.orchestration.data.errors import (
-    NotConfiguredError,
+    RateLimitError,
     RoutingConfigurationError,
     SourceBrokenError,
 )
@@ -125,7 +131,8 @@ from guanlan_v2.orchestration.data.source import (
     build_raw_fetch,
 )
 from guanlan_v2.orchestration.enums import DataBackend, DataMode
-from guanlan_v2.orchestration.refs import ContentRef, SchemaRef
+from guanlan_v2.orchestration.digest import content_digest
+from guanlan_v2.orchestration.refs import ContentRef, PayloadRef, SchemaRef
 from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock
 
 __all__ = [
@@ -133,8 +140,12 @@ __all__ = [
     "build_online_live_descriptor",
     "build_online_capture_manifest",
     "build_online_data_context",
+    "build_precaptured_indicator_fetch",
+    "bind_precaptured_indicator_store_lookup",
+    "register_precaptured_indicator_fetch",
     "ONLINE_SOURCE_ID",
     "ONLINE_SOURCE_VERSION",
+    "POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX",
 ]
 
 _LOG = logging.getLogger(__name__)
@@ -146,22 +157,38 @@ ONLINE_SOURCE_VERSION = "1"
 _VERIFIED_SNAPSHOT_METHOD_ID = "verified_snapshot"
 _NEWS_METHOD_ID = "news"
 _OHLCV_METHOD_ID = "ohlcv"
-#: the existing Phase-3 method-id families this adapter binds (no new id is minted):
-#: per-code realtime quote → ``verified_snapshot``; announcement/news-style text
-#: feeds → ``news``; market-wide tape snapshot → ``ohlcv``.
+_INDICATORS_METHOD_ID = "indicators"
+#: The executable supported set is derived from the code-approved binding
+#: snapshot, never from the observed stocks manifest.  No method/schema/capability
+#: is minted here; every id is still an existing Phase-3 method.
+_DEFAULT_BINDING_SNAPSHOT = reviewed_live_binding_snapshot()
 _SUPPORTED_METHOD_IDS = frozenset(
-    {_VERIFIED_SNAPSHOT_METHOD_ID, _NEWS_METHOD_ID, _OHLCV_METHOD_ID}
+    binding.method_id for binding in _DEFAULT_BINDING_SNAPSHOT.bindings
 )
 
-#: the reviewed method-id → ``live_client`` facade source-id binding. This is a
-#: fixed *routing* map (which live source serves each method), NOT a source-registry
-#: enumeration — the live source LIST is derived from ``known_sources()`` at call
-#: time (see :meth:`LiveClientSource.live_source_ids`), never a pinned count.
-_METHOD_LIVE_SOURCE: dict[str, str] = {
-    _VERIFIED_SNAPSHOT_METHOD_ID: "tencent_realtime_quote",   # per-code realtime quote
-    _NEWS_METHOD_ID: "eastmoney_stock_news",                  # announcement/news feeds
-    _OHLCV_METHOD_ID: "eastmoney_market_fund_flow",           # market-wide tape snapshot
-}
+#: Price-action's reviewed minimum and one conservative live fetch window.  The
+#: source excludes an as-yet-unclosed current-day bar before the PIT guard, so a
+#: request for exactly twenty vendor rows could otherwise strand the consumer at
+#: nineteen.  120 remains below the facade's hard 300-row cap.
+_OHLCV_MIN_BARS = 20
+_OHLCV_PROBE_LIMIT = 120
+
+#: A deep run freezes its ONLINE context *after* capturing the provider-timed
+#: five-level book.  The runtime adapter must then replay that exact persisted
+#: ``RawFetch``; probing again would create a different, post-freeze observation.
+#: Bindings are process-local locators into the durable payload store (the raw
+#: value itself is never cached here), bounded to avoid retaining old store
+#: closures indefinitely.  A missing binding fails closed in ``fetch``.
+_DEEP_CAPTURE_PREFIX = "deep-capture-"
+_PRECAPTURED_INDICATOR_MAX = 128
+_PRECAPTURED_INDICATOR_LOCK = threading.RLock()
+_PRECAPTURED_INDICATOR_FETCHES: OrderedDict[
+    str, tuple[PayloadRef, Callable[[PayloadRef], Any]]
+] = OrderedDict()
+_PRECAPTURED_INDICATOR_DURABLE_LOOKUP: Callable[
+    [str], tuple[PayloadRef, Callable[[PayloadRef], Any]] | None
+] | None = None
+_RAW_FETCH_SCHEMA_REF = SchemaRef(name="RawFetch", version="1")
 
 _CONFIG_SCHEMA_REF = SchemaRef(name="DataSourceConfigSnapshot", version="1")
 
@@ -193,6 +220,26 @@ _CLIP = 400
 #: ``ctx.as_of`` stays the session-midnight instant the admitted context describes),
 #: so the ONLY honest passer under that boundary is settled data.
 _SETTLED_CLOSE_LOCAL_TIME = _time(hour=15, minute=0)
+
+#: TDX can retain the exchange's final five-level book for a short, provider-
+#: stamped close-processing interval after 15:00.  It is no longer a live book,
+#: but it is still an exact same-session observation whose own availability is
+#: the provider ``servertime``.  Accept only this narrow interval; later stamps,
+#: lunch/pre-open snapshots and next-session guesses remain refused.
+_TDX_RETAINED_CLOSE_BOOK_END = _time(hour=15, minute=30)
+
+#: Exact provenance spelling emitted by the live-client TDX item shaper when
+#: ``publish_ts`` came from the provider's own quote timestamp.  The non-session
+#: retained-book path requires this value at both the unified item and native row;
+#: a fetch-time fallback can never date a prior-session book.
+_TDX_PROVIDER_QUOTE_TIME_SOURCE = "provider.quote_time"
+
+#: ``revision_id`` transport classifier for an exact provider-timed book that
+#: TDX retained during close processing.  The provider timestamp is appended to
+#: the prefix, preserving revision identity while letting deterministic
+#: consumers distinguish the observation from a genuinely live book without a
+#: schema change.  Ordinary in-session books keep ``revision_id=None``.
+POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX = "post_close_retained_book@"
 
 #: Row keys that carry the **settled previous-session CLOSE**, bound at source:
 #: ``prev_close`` is the key the ``verified_snapshot`` record family consumes and the
@@ -569,6 +616,41 @@ def _settled_instant(session: _date) -> datetime:
     return local.astimezone(timezone.utc)
 
 
+def _latest_completed_session(
+    calendar: TradingCalendar, as_of: datetime
+) -> _date | None:
+    """Return the exact latest A-share session completed by ``as_of``.
+
+    The answer is derived only from the frozen cutoff, the reviewed 15:00 close
+    rule and committed calendar bytes.  Before/during a trading session the
+    current daily bar is not complete, so the prior session is expected; at or
+    after close the current session is expected.  On a non-session day the most
+    recent prior session remains current.  ``None`` means the committed material
+    cannot prove an answer; callers must fail closed rather than extrapolate.
+    """
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        return None
+    coverage = calendar.coverage
+    if coverage is None:
+        return None
+    lo, hi = coverage
+    local = as_of.astimezone(_EXCHANGE_TZ)
+    local_day = local.date()
+    if local_day < lo or local_day > hi:
+        return None
+    if (
+        calendar.is_session(local_day)
+        and local.time() >= _SETTLED_CLOSE_LOCAL_TIME
+    ):
+        return local_day
+    day = local_day - timedelta(days=1)
+    while day >= lo:
+        if calendar.is_session(day):
+            return day
+        day -= timedelta(days=1)
+    return None
+
+
 def _settled_payload(
     view: Mapping[str, Any], session: _date, close: float, params: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -602,18 +684,916 @@ def _settled_payload(
     return payload
 
 
+def _ohlcv_bar_instant(view: Mapping[str, Any]) -> datetime:
+    """Return a TDX daily bar's own A-share close instant in aware UTC."""
+    raw = view.get("datetime")
+    if raw is None:
+        raw = view.get("date")
+    parsed: datetime | _date | None = None
+    if isinstance(raw, datetime):
+        parsed = raw
+    elif isinstance(raw, _date):
+        parsed = raw
+    elif isinstance(raw, str):
+        value = raw.strip().replace("/", "-")
+        if len(value) == 8 and value.isdigit():
+            value = f"{value[:4]}-{value[4:6]}-{value[6:]}"
+        try:
+            parsed = datetime.fromisoformat(value.replace(" ", "T"))
+        except ValueError:
+            try:
+                parsed = _date.fromisoformat(value)
+            except ValueError:
+                parsed = None
+    if parsed is None:
+        raise SourceBrokenError(
+            "tdx_kline row has no parseable row-owned datetime/date; refusing "
+            "to stamp OHLCV from the envelope pull time")
+    if isinstance(parsed, datetime):
+        local_day = (
+            parsed.replace(tzinfo=_EXCHANGE_TZ)
+            if parsed.tzinfo is None else parsed.astimezone(_EXCHANGE_TZ)
+        ).date()
+    else:
+        local_day = parsed
+    return _settled_instant(local_day)
+
+
+def _ohlcv_number(view: Mapping[str, Any], key: str) -> float:
+    value = view.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SourceBrokenError(
+            f"tdx_kline row field {key!r} must be a numeric vendor value")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0.0:
+        raise SourceBrokenError(
+            f"tdx_kline row field {key!r} must be finite and positive")
+    return number
+
+
+def _ohlcv_volume(view: Mapping[str, Any]) -> int:
+    """Map the measured TDX ``vol`` float only when it is an exact count."""
+    value = view.get("vol")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SourceBrokenError("tdx_kline row field 'vol' must be numeric")
+    number = float(value)
+    if not math.isfinite(number) or number < 0.0 or not number.is_integer():
+        raise SourceBrokenError(
+            "tdx_kline row field 'vol' must be finite, non-negative and integral")
+    return int(number)
+
+
+def _six_digits(value: Any) -> str:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return digits[-6:] if len(digits) >= 6 else ""
+
+
+def _require_verified_snapshot_identity(
+    request: DataRequest,
+    item: Mapping[str, Any],
+    view: Mapping[str, Any],
+) -> None:
+    """Prove a quote row belongs to the one requested instrument.
+
+    The settled projection reuses only ``last_close``/``name`` from the vendor
+    row and reattaches the request's typed ``Symbol``.  That is safe only after
+    every explicit row identity agrees with the request; otherwise a stale
+    cache row for another security could be relabelled as the requested one.
+    """
+    symbol = _first_symbol(request.params)
+    requested_code = _six_digits((symbol or {}).get("code"))
+    exchange = str((symbol or {}).get("exchange") or "").upper()
+    if symbol is None or not requested_code or exchange not in {"SH", "SZ"}:
+        raise RoutingConfigurationError(
+            "verified_snapshot request has no valid per-instrument identity")
+
+    explicit_codes: list[str] = []
+    for key in ("code", "symbol", "stock_code"):
+        if key not in view:
+            continue
+        code = _six_digits(view.get(key))
+        if not code:
+            raise SourceBrokenError(
+                f"verified_snapshot row {key!r} is not a readable six-digit code")
+        explicit_codes.append(code)
+    if "stock_codes" in item:
+        stock_codes = item.get("stock_codes")
+        if not isinstance(stock_codes, (list, tuple)) or not stock_codes:
+            raise SourceBrokenError(
+                "verified_snapshot item stock_codes must be a non-empty sequence")
+        for value in stock_codes:
+            code = _six_digits(value)
+            if not code:
+                raise SourceBrokenError(
+                    "verified_snapshot item stock_codes contains an unreadable code")
+            explicit_codes.append(code)
+    if not explicit_codes or set(explicit_codes) != {requested_code}:
+        raise SourceBrokenError(
+            "verified_snapshot row identity does not exactly match requested "
+            f"symbol {exchange}{requested_code}")
+
+    prefixes: set[str] = set()
+    for key in ("symbol", "stock_code"):
+        raw = view.get(key)
+        if not isinstance(raw, str):
+            continue
+        normalized = raw.strip().upper()
+        if normalized.startswith("SH"):
+            prefixes.add("SH")
+        elif normalized.startswith("SZ"):
+            prefixes.add("SZ")
+    if prefixes and prefixes != {exchange}:
+        raise SourceBrokenError(
+            "verified_snapshot row exchange prefix does not exactly match "
+            f"requested exchange {exchange}")
+    if "market" in view:
+        market = view.get("market")
+        expected_market = {"SZ": 0, "SH": 1}[exchange]
+        if type(market) is not int or market != expected_market:
+            raise SourceBrokenError(
+                "verified_snapshot row market does not exactly match requested "
+                f"exchange {exchange}")
+
+
+def _ohlcv_candidate(request: DataRequest, item: Any) -> RawRowCandidate:
+    """Build one identity-checked OHLCV candidate from the native TDX shape."""
+    if not isinstance(item, Mapping):
+        raise SourceBrokenError(
+            f"tdx_kline item must be a mapping, got {type(item).__name__}")
+    view = _vendor_row_view(item)
+    freq = str(view.get("freq") or "").strip().lower()
+    if freq not in {"day", "daily", "1d", "d"}:
+        raise SourceBrokenError(
+            f"tdx_kline row is not an attested daily bar (freq={freq!r})")
+    symbol = _first_symbol(request.params)
+    requested_code = _six_digits((symbol or {}).get("code"))
+    row_codes = {
+        code for code in (
+            _six_digits(view.get("code")),
+            _six_digits(view.get("stock_code")),
+        ) if code
+    }
+    if symbol is None or not requested_code:
+        raise RoutingConfigurationError(
+            "ohlcv request has no valid per-instrument symbol identity")
+    if not row_codes or row_codes != {requested_code}:
+        raise SourceBrokenError(
+            f"tdx_kline row identity {sorted(row_codes)!r} does not exactly match "
+            f"requested symbol {requested_code!r}")
+
+    open_ = _ohlcv_number(view, "open")
+    high = _ohlcv_number(view, "high")
+    low = _ohlcv_number(view, "low")
+    close = _ohlcv_number(view, "close")
+    if high < max(open_, low, close) or low > min(open_, high, close):
+        raise SourceBrokenError("tdx_kline row has internally inconsistent OHLC bounds")
+    instant = _ohlcv_bar_instant(view)
+    return RawRowCandidate.build(
+        raw_payload={
+            "symbol": symbol,
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": _ohlcv_volume(view),
+        },
+        effective_at=instant,
+        available_at=instant,
+        ingested_at=request.as_of,
+    )
+
+
+def _finite_book_number(
+    view: Mapping[str, Any], key: str, *, positive: bool
+) -> float:
+    """Read one measured TDX book scalar without coercion or imputation."""
+    value = view.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SourceBrokenError(
+            f"tdx_orderbook row field {key!r} must be a numeric vendor value")
+    number = float(value)
+    if not math.isfinite(number) or (number <= 0.0 if positive else number < 0.0):
+        qualifier = "positive" if positive else "non-negative"
+        raise SourceBrokenError(
+            f"tdx_orderbook row field {key!r} must be finite and {qualifier}")
+    return number
+
+
+def _tdx_provider_local_datetime(value: Any, *, field: str) -> datetime:
+    """Parse one provider-owned TDX timestamp into Asia/Shanghai.
+
+    TDX currently emits naive local ISO timestamps.  An explicit offset is also
+    accepted and normalized, but a date-only/unparseable value is not enough to
+    establish the retained book's exact availability instant.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise SourceBrokenError(
+            f"tdx_realtime_quote stale book has no provider {field}")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace(" ", "T"))
+    except ValueError as exc:
+        raise SourceBrokenError(
+            f"tdx_realtime_quote stale book {field} is not an ISO timestamp"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_EXCHANGE_TZ)
+    else:
+        parsed = parsed.astimezone(_EXCHANGE_TZ)
+    if parsed.timetz().replace(tzinfo=None) == _time(0, 0):
+        raise SourceBrokenError(
+            f"tdx_realtime_quote stale book {field} is date-only, not an exact "
+            "provider quote timestamp"
+        )
+    return parsed
+
+
+def _immediately_previous_committed_session(
+    calendar: TradingCalendar, capture_day: _date
+) -> _date | None:
+    """Return the last committed session before one covered non-session day.
+
+    A date outside the immutable material's covered span cannot be extrapolated:
+    returning ``None`` is the fail-closed answer rather than guessing a holiday or
+    next-year session schedule.
+    """
+    coverage = calendar.coverage
+    if coverage is None:
+        return None
+    lo, hi = coverage
+    if capture_day < lo or capture_day > hi:
+        return None
+    cursor = capture_day - timedelta(days=1)
+    while cursor >= lo:
+        if calendar.is_session(cursor):
+            return cursor
+        cursor -= timedelta(days=1)
+    return None
+
+
+def _stale_indicator_book_instant(
+    request: DataRequest,
+    item: Mapping[str, Any],
+    view: Mapping[str, Any],
+    calendar: TradingCalendar,
+    ingested_at: datetime | None,
+) -> datetime:
+    """Prove one non-session TDX stale row is the prior session's retained book.
+
+    The proof deliberately joins both provenance layers in the real facade shape:
+    the unified item certifies ``publish_ts`` as ``provider.quote_time`` and the
+    nested native row supplies matching ``quote_date`` / ``quote_time`` /
+    ``servertime``.  Neither the envelope pull date nor the current wall clock is
+    allowed to manufacture the book's Friday timestamp.
+    """
+    if item.get(_PIT_CERTIFIED_KEY) is not True:
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale book is not PIT-certified by the item shaper"
+        )
+    if item.get("time_source") != _TDX_PROVIDER_QUOTE_TIME_SOURCE:
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale book item time_source is not exact "
+            "provider.quote_time"
+        )
+    if item.get("source_timezone") != str(_EXCHANGE_TZ):
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale book does not attest Asia/Shanghai as its "
+            "source timezone"
+        )
+    raw = item.get("raw")
+    if not isinstance(raw, Mapping):
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale book has no native provider row")
+    if raw.get("time_source") != _TDX_PROVIDER_QUOTE_TIME_SOURCE:
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale native row time_source is not exact "
+            "provider.quote_time"
+        )
+    if raw.get("is_stale") is not True:
+        raise SourceBrokenError(
+            "tdx_realtime_quote status=stale row does not carry is_stale=true")
+
+    published = _tdx_provider_local_datetime(
+        item.get("publish_ts"), field="item publish_ts")
+    quoted = _tdx_provider_local_datetime(
+        raw.get("quote_time"), field="native quote_time")
+    if published != quoted:
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale book item/native provider timestamps disagree"
+        )
+    quote_day = _as_session_date(raw.get("quote_date"))
+    if quote_day is None or quote_day != quoted.date():
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale book quote_date does not match provider "
+            "quote_time"
+        )
+
+    raw_server_time = view.get("servertime")
+    if not isinstance(raw_server_time, str) or not raw_server_time.strip():
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale book has no provider-owned servertime")
+    try:
+        server_time = _time.fromisoformat(raw_server_time.strip())
+    except ValueError as exc:
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale book servertime is not an ISO local time"
+        ) from exc
+    if server_time.tzinfo is not None:
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale book servertime must be a provider local "
+            "wall time"
+        )
+    if quoted.timetz().replace(tzinfo=None) != server_time:
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale book quote_time and servertime disagree"
+        )
+    if not (_SETTLED_CLOSE_LOCAL_TIME < server_time <= _TDX_RETAINED_CLOSE_BOOK_END):
+        raise SourceBrokenError(
+            f"tdx_realtime_quote stale book servertime {raw_server_time!r} is "
+            "outside the retained-close-book window"
+        )
+
+    if ingested_at is None:
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale envelope has no capture-completion timestamp"
+        )
+    if ingested_at != request.as_of:
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale book request.as_of is not the actual "
+            "capture-completion instant"
+        )
+    local_capture = request.as_of.astimezone(_EXCHANGE_TZ)
+    capture_day = local_capture.date()
+    if calendar.is_session(capture_day):
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale retained book is allowed only on a "
+            "non-session capture date"
+        )
+    previous = _immediately_previous_committed_session(calendar, capture_day)
+    if previous is None:
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale retained book capture date is outside the "
+            "committed calendar coverage"
+        )
+    if quote_day != previous:
+        raise SourceBrokenError(
+            f"tdx_realtime_quote stale book date {quote_day.isoformat()} is not "
+            "the immediately preceding committed trading session "
+            f"{previous.isoformat()}"
+        )
+    if quoted > local_capture:
+        raise SourceBrokenError(
+            "tdx_realtime_quote stale book provider timestamp postdates capture"
+        )
+    return quoted
+
+
+def _indicator_candidates(
+    request: DataRequest,
+    items: Any,
+    calendar: TradingCalendar | None,
+    ingested_at: datetime | None,
+    *,
+    stale_envelope: bool = False,
+) -> tuple[RawRowCandidate, ...]:
+    """Project one exact-code, row-time-bound TDX book into two indicators.
+
+    The projection is deliberately narrow: no raw book row is exposed to a
+    worker and no missing level is treated as zero.  A complete five-level book
+    yields the L1 spread in basis points and the five-level bid/ask volume
+    imbalance.  Anything else fails loudly, so a partial/foreign book can only
+    degrade the microstructure seat, never look like measured evidence.
+    """
+    rows = tuple(items or ())
+    if len(rows) != 1 or not isinstance(rows[0], Mapping):
+        raise SourceBrokenError(
+            "tdx_orderbook must return exactly one mapping row for one instrument")
+    view = _vendor_row_view(rows[0])
+    symbol = _first_symbol(request.params)
+    requested_code = _six_digits((symbol or {}).get("code"))
+    row_codes = {
+        code for code in (
+            _six_digits(view.get("code")),
+            _six_digits(view.get("stock_code")),
+        ) if code
+    }
+    if symbol is None or not requested_code:
+        raise RoutingConfigurationError(
+            "indicators request has no valid per-instrument symbol identity")
+    if not row_codes or row_codes != {requested_code}:
+        raise SourceBrokenError(
+            f"tdx_realtime_quote row identity {sorted(row_codes)!r} does not exactly "
+            f"match requested symbol {requested_code!r}")
+    exchange = str((symbol or {}).get("exchange") or "").upper()
+    expected_market = {"SZ": 0, "SH": 1}.get(exchange)
+    row_market = view.get("market")
+    row_stock_code = str(view.get("stock_code") or "").upper()
+    if expected_market is None or isinstance(row_market, bool) or row_market != expected_market:
+        raise SourceBrokenError(
+            f"tdx_realtime_quote market {row_market!r} does not match requested "
+            f"exchange {exchange!r}")
+    if row_stock_code and not row_stock_code.startswith(exchange):
+        raise SourceBrokenError(
+            f"tdx_realtime_quote stock_code {row_stock_code!r} does not match "
+            f"requested exchange {exchange!r}")
+
+    # ``tdx_orderbook`` has no provider-owned row time and therefore cannot
+    # prove PIT. ``tdx_realtime_quote`` carries ``servertime`` alongside the
+    # same five levels.  An ordinary envelope keeps the reviewed same-session
+    # 10-second/retained-close rules below.  A stale envelope takes a separate,
+    # stricter non-session proof that binds the full provider Friday timestamp;
+    # the two regimes never infer one another.
+    if calendar is None:
+        raise RoutingConfigurationError(
+            "timed TDX book projection requires the committed trading calendar")
+    if stale_envelope:
+        local_instant = _stale_indicator_book_instant(
+            request, rows[0], view, calendar, ingested_at)
+        retained_close_book = True
+    else:
+        # This is the pre-existing same-session path.  Keep its time source and
+        # ten-second live rule intact; a non-session stale row cannot reach it.
+        # The native row may carry stronger, explicit timing facts.  They must
+        # agree with the non-stale envelope and admitted session before the
+        # servertime is combined with request.as_of's date; otherwise that
+        # combination would silently relabel a Friday row as today's live book.
+        local_cutoff = request.as_of.astimezone(_EXCHANGE_TZ)
+        session_day = local_cutoff.date()
+        native = rows[0].get("raw")
+        native = native if isinstance(native, Mapping) else rows[0]
+        identity_layers = (("item", rows[0]),)
+        if native is not rows[0]:
+            identity_layers += (("native", native),)
+        for layer_name, layer in identity_layers:
+            if "is_stale" not in layer:
+                continue
+            layer_stale = layer.get("is_stale")
+            if type(layer_stale) is not bool:
+                raise SourceBrokenError(
+                    f"tdx_realtime_quote {layer_name} is_stale must be a boolean "
+                    "when present")
+            if layer_stale is True:
+                raise SourceBrokenError(
+                    "tdx_realtime_quote non-stale envelope contradicts "
+                    f"{layer_name} is_stale=true")
+        for field in ("quote_date", "quote_time"):
+            if field not in native:
+                continue
+            provider_day = _as_session_date(native.get(field))
+            if provider_day is None:
+                raise SourceBrokenError(
+                    f"tdx_realtime_quote native {field} is not a readable "
+                    "provider session date")
+            if provider_day != session_day:
+                raise SourceBrokenError(
+                    f"tdx_realtime_quote native {field} date "
+                    f"{provider_day.isoformat()} does not match admitted "
+                    f"session {session_day.isoformat()}")
+        if not calendar.is_session(session_day):
+            raise SourceBrokenError(
+                f"tdx_realtime_quote book date {session_day.isoformat()} is not a "
+                "committed exchange session")
+        raw_server_time = view.get("servertime")
+        if not isinstance(raw_server_time, str) or not raw_server_time.strip():
+            raise SourceBrokenError(
+                "tdx_realtime_quote book has no provider-owned servertime")
+        try:
+            server_time = _time.fromisoformat(raw_server_time.strip())
+        except ValueError as exc:
+            raise SourceBrokenError(
+                "tdx_realtime_quote servertime is not an ISO local time") from exc
+        if server_time.tzinfo is not None:
+            raise SourceBrokenError(
+                "tdx_realtime_quote servertime must be a provider local wall time")
+        if "quote_time" in native:
+            provider_quote_time = _tdx_provider_local_datetime(
+                native.get("quote_time"), field="native quote_time")
+            if provider_quote_time.timetz().replace(tzinfo=None) != server_time:
+                raise SourceBrokenError(
+                    "tdx_realtime_quote native quote_time and servertime disagree")
+        local_instant = datetime.combine(
+            session_day, server_time, tzinfo=_EXCHANGE_TZ)
+        local_t = local_instant.timetz().replace(tzinfo=None)
+        if local_instant > local_cutoff:
+            raise SourceBrokenError(
+                "tdx_realtime_quote servertime postdates the frozen evidence cutoff")
+        in_session = (
+            _time(9, 30) <= local_t <= _time(11, 30)
+            or _time(13, 0) <= local_t <= _time(15, 0)
+        )
+        retained_close_book = (
+            _SETTLED_CLOSE_LOCAL_TIME < local_t <= _TDX_RETAINED_CLOSE_BOOK_END
+            and local_cutoff.timetz().replace(tzinfo=None) > _SETTLED_CLOSE_LOCAL_TIME
+        )
+        if not in_session and not retained_close_book:
+            raise SourceBrokenError(
+                f"tdx_realtime_quote servertime {raw_server_time!r} is outside the "
+                "reviewed live/retained-close-book windows")
+        if in_session and (local_cutoff - local_instant).total_seconds() > 10.0:
+            raise SourceBrokenError(
+                "tdx_realtime_quote five-level book is more than 10 seconds stale")
+        if ingested_at is None:
+            raise SourceBrokenError(
+                "tdx_realtime_quote envelope has no capture-completion timestamp")
+        local_ingested = ingested_at.astimezone(_EXCHANGE_TZ)
+        if retained_close_book and local_ingested.date() != session_day:
+            raise SourceBrokenError(
+                "tdx_realtime_quote retained close book was not captured on the "
+                "admitted exchange-session date")
+        if retained_close_book and local_ingested < local_instant:
+            raise SourceBrokenError(
+                "tdx_realtime_quote retained close book capture predates provider "
+                "servertime")
+    available_at = local_instant.astimezone(timezone.utc)
+
+    bids = tuple(
+        _finite_book_number(view, f"bid{i}", positive=True)
+        for i in range(1, 6)
+    )
+    asks = tuple(
+        _finite_book_number(view, f"ask{i}", positive=True)
+        for i in range(1, 6)
+    )
+    bid_volumes = tuple(
+        _finite_book_number(view, f"bid_vol{i}", positive=False)
+        for i in range(1, 6)
+    )
+    ask_volumes = tuple(
+        _finite_book_number(view, f"ask_vol{i}", positive=False)
+        for i in range(1, 6)
+    )
+    if any(left < right for left, right in zip(bids, bids[1:])):
+        raise SourceBrokenError(
+            "tdx_realtime_quote bid prices are not monotonically descending")
+    if any(left > right for left, right in zip(asks, asks[1:])):
+        raise SourceBrokenError(
+            "tdx_realtime_quote ask prices are not monotonically ascending")
+    if asks[0] < bids[0]:
+        raise SourceBrokenError(
+            "tdx_orderbook best ask is below best bid; crossed book refused")
+    mid = (asks[0] + bids[0]) / 2.0
+    spread_bp = (asks[0] - bids[0]) / mid * 10_000.0
+    bid_total = sum(bid_volumes)
+    ask_total = sum(ask_volumes)
+    depth_total = bid_total + ask_total
+    if depth_total <= 0.0:
+        raise SourceBrokenError(
+            "tdx_orderbook has zero total displayed depth; imbalance is undefined")
+    imbalance = (bid_total - ask_total) / depth_total
+
+    common = {
+        "effective_at": available_at,
+        "available_at": available_at,
+        "ingested_at": ingested_at,
+        "revision_id": (
+            POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX + local_instant.isoformat()
+            if retained_close_book else None
+        ),
+    }
+    return tuple(
+        RawRowCandidate.build(
+            raw_payload={
+                "symbol": symbol,
+                "indicator_id": indicator_id,
+                "value": value,
+            },
+            **common,
+        )
+        for indicator_id, value in (
+            ("l1_spread_bp", spread_bp),
+            ("bid_ask_imbalance", imbalance),
+        )
+    )
+
+
+def _validate_live_envelope(
+    envelope: Any,
+    *,
+    binding: ReviewedLiveBinding,
+    canonical: str,
+    method_id: str,
+) -> Mapping[str, Any]:
+    """Apply the adapter's one honest envelope classification.
+
+    Pre-capture and ordinary reads share this exact classifier so a run cannot
+    admit an envelope during capture that the normal adapter would have refused.
+    The run-injected binding is checked again here: resolver validation before
+    the probe and envelope validation after it are separate tripwires.
+    """
+    if binding.method_id != method_id or binding.source_id != canonical:
+        raise RoutingConfigurationError(
+            "live envelope validation binding does not match the exact "
+            f"method/source request ({method_id!r}, {canonical!r})"
+        )
+    if (
+        binding.requires_exact_resolver_match is not True
+        or binding.requires_source_echo is not True
+        or binding.requires_strict_provenance is not True
+        or binding.requires_network_used is not True
+        or binding.requires_closed_circuit is not True
+        or binding.allows_provider_fallback is not False
+    ):
+        raise RoutingConfigurationError(
+            "live envelope validation received a binding with unsafe semantics"
+        )
+    if not isinstance(envelope, Mapping):
+        raise SourceBrokenError(
+            f"live probe for source={canonical} method={method_id} returned a "
+            f"non-mapping envelope {type(envelope).__name__}; the result is void"
+        )
+
+    def _broken(detail: str) -> None:
+        raise SourceBrokenError(
+            f"live source {canonical!r} returned an invalid envelope "
+            f"(method={method_id}): {detail}"
+        )
+
+    # Status is a closed, exact state machine.  In particular, neither a legacy
+    # ``planned``/``error`` nor a new/unknown spelling can widen the router's
+    # narrow fallback taxonomy.  ``stale`` is NOT a general data status: the two
+    # method-scoped exceptions are (a) a verified snapshot reducible to its own
+    # prior-session settlement and (b) an indicators row provable as the
+    # immediately-prior session's retained close book.  Both require the exact
+    # ``stale_data`` attestation and are reduced later; no stale live value is
+    # admitted merely because its envelope passed this structural gate.
+    status = envelope.get("status")
+    data_statuses = frozenset({"ok", "empty", "not_available"})
+    transient_statuses = frozenset({"provider_busy", "rate_limited"})
+    stale_settled_snapshot = (
+        status == "stale" and method_id == _VERIFIED_SNAPSHOT_METHOD_ID
+    )
+    stale_retained_indicators = (
+        status == "stale" and method_id == _INDICATORS_METHOD_ID
+    )
+    stale_projectable = stale_settled_snapshot or stale_retained_indicators
+    if (
+        type(status) is not str
+        or (
+            status not in data_statuses | transient_statuses
+            and not stale_projectable
+        )
+    ):
+        _broken(f"unsupported exact status {status!r}")
+
+    items = envelope.get("items")
+    if not isinstance(items, list):
+        _broken("items must be a list")
+    if status in {"empty", "not_available"} and items:
+        _broken(f"status={status} requires an empty items list")
+    if stale_projectable:
+        if envelope.get("error_kind") != "stale_data":
+            _broken(
+                f"status=stale for {method_id} requires exact "
+                "error_kind='stale_data'"
+            )
+        if not items:
+            _broken(
+                f"status=stale for {method_id} requires a non-empty "
+                "items list"
+            )
+    if envelope.get("ok") is not True:
+        _broken(f"status={status} requires ok to be the boolean true")
+    if "schema_version" not in envelope:
+        _broken("schema_version is missing")
+    if envelope.get("schema_version") != binding.envelope_schema_version:
+        _broken(
+            f"schema_version must exactly equal "
+            f"{binding.envelope_schema_version!r}"
+        )
+
+    # Both production and injected probes are strict.  ``source_id`` is accepted
+    # only as an additional echo and can never contradict the required ``source``.
+    if "source" not in envelope:
+        _broken("source echo is missing")
+    source_echo = envelope.get("source")
+    if not isinstance(source_echo, str) or source_echo != canonical:
+        _broken(
+            f"source echo {source_echo!r} does not exactly match "
+            f"{canonical!r}"
+        )
+    if "source_id" in envelope:
+        source_id_echo = envelope.get("source_id")
+        if not isinstance(source_id_echo, str) or source_id_echo != canonical:
+            _broken(
+                f"source_id echo {source_id_echo!r} does not exactly match "
+                f"{canonical!r}"
+            )
+
+    expected_provider = binding.provider_id
+    for field in ("provider", "actual_provider"):
+        if field not in envelope:
+            _broken(f"{field} is missing")
+        value = envelope.get(field)
+        if not isinstance(value, str) or value != expected_provider:
+            _broken(
+                f"{field} {value!r} does not match reviewed provider "
+                f"{expected_provider!r}"
+            )
+
+    if "fallback_level" not in envelope:
+        _broken("fallback_level is missing")
+    fallback_level = envelope.get("fallback_level")
+    # ``bool`` is an ``int`` subclass and strings are coercible, but neither
+    # is an honest integer-zero attestation.
+    if type(fallback_level) is not int or fallback_level != 0:
+        _broken(
+            f"fallback_level must be the integer 0, got "
+            f"{fallback_level!r}"
+        )
+
+    if "attempted_sources" not in envelope:
+        _broken("attempted_sources is missing")
+    attempted_sources = envelope.get("attempted_sources")
+    if not isinstance(attempted_sources, list) or attempted_sources:
+        _broken(
+            "attempted_sources must be an empty list; internal provider "
+            "fallback is not attested"
+        )
+
+    if "cache_hit" not in envelope:
+        _broken("cache_hit is missing")
+    if envelope.get("cache_hit") is not False:
+        _broken("cache_hit must be the boolean false")
+    if "network_used" not in envelope:
+        _broken("network_used is missing")
+    if envelope.get("network_used") is not True:
+        _broken("network_used must be the boolean true")
+    if "circuit_state" not in envelope:
+        _broken("circuit_state is missing")
+    if envelope.get("circuit_state") != "closed":
+        _broken("circuit_state must exactly equal 'closed'")
+
+    if status in transient_statuses:
+        raise RateLimitError(
+            f"live source {canonical!r} is temporarily unavailable "
+            f"(status={status}; method={method_id})"
+        )
+    return envelope
+
+
+def build_precaptured_indicator_fetch(
+    request: DataRequest,
+    *,
+    envelope: Mapping[str, Any],
+    canonical_source: str,
+    source_ref: ContentRef,
+    capability_ref: Any,
+    calendar: TradingCalendar,
+    captured_at: datetime,
+    binding_snapshot: ReviewedLiveBindingSnapshot | None = None,
+) -> RawFetch:
+    """Seal one provider-timed book captured before the run context is exposed.
+
+    ``captured_at`` is the authoritative completion instant used to freeze the
+    run's ``DataContext``.  The row-owned ``servertime`` remains the evidence
+    availability; the completion instant is only ingestion/audit provenance.
+    """
+    if request.method_spec_ref.id != _INDICATORS_METHOD_ID:
+        raise RoutingConfigurationError(
+            "pre-captured indicator fetch requires the reviewed indicators method")
+    if captured_at.tzinfo is None or captured_at.utcoffset() is None:
+        raise RoutingConfigurationError(
+            "pre-captured indicator fetch needs an aware completion instant")
+    bindings = (
+        reviewed_live_binding_snapshot()
+        if binding_snapshot is None
+        else binding_snapshot
+    )
+    verify_code_approved_live_binding_snapshot(bindings)
+    binding = bindings.binding_for_method(_INDICATORS_METHOD_ID)
+    if request.method_spec_ref.content_digest != binding.method_spec_digest:
+        raise RoutingConfigurationError(
+            "pre-captured indicator request method spec is not the approved binding"
+        )
+    checked = _validate_live_envelope(
+        envelope, binding=binding, canonical=canonical_source,
+        method_id=_INDICATORS_METHOD_ID,
+    )
+    candidates = _indicator_candidates(
+        request,
+        checked.get("items") or (),
+        calendar,
+        captured_at,
+        stale_envelope=checked.get("status") == "stale",
+    )
+    return build_raw_fetch(
+        request_digest=request.request_digest,
+        source_ref=source_ref,
+        capability_ref=capability_ref,
+        candidates=candidates,
+        subsource=canonical_source,
+        fetched_at=captured_at,
+        provider_request_id=None,
+    )
+
+
+def register_precaptured_indicator_fetch(
+    *,
+    request_digest: str,
+    raw_fetch_ref: PayloadRef,
+    loader: Callable[[PayloadRef], Any],
+) -> None:
+    """Bind a deep request to its already-persisted exact ``RawFetch``.
+
+    The registry retains only a typed locator and loader.  Registration proves
+    the payload exists and matches the request before the ContextSnapshot can be
+    published.  A later adapter read loads the persisted bytes again and refuses
+    any drift; it never performs a second vendor probe.
+    """
+    raw = loader(raw_fetch_ref)
+    if not isinstance(raw, RawFetch):
+        raise SourceBrokenError(
+            "pre-captured indicator payload does not resolve RawFetch@1")
+    if raw.request_digest != request_digest:
+        raise SourceBrokenError(
+            "pre-captured indicator RawFetch names a different request digest")
+    if content_digest(raw) != raw_fetch_ref.content_digest:
+        raise SourceBrokenError(
+            "pre-captured indicator payload ref does not bind the RawFetch content")
+    with _PRECAPTURED_INDICATOR_LOCK:
+        prior = _PRECAPTURED_INDICATOR_FETCHES.get(request_digest)
+        if prior is not None and prior[0].content_digest != raw_fetch_ref.content_digest:
+            raise SourceBrokenError(
+                "one indicator request digest cannot be rebound to different capture bytes")
+        _PRECAPTURED_INDICATOR_FETCHES[request_digest] = (raw_fetch_ref, loader)
+        _PRECAPTURED_INDICATOR_FETCHES.move_to_end(request_digest)
+        while len(_PRECAPTURED_INDICATOR_FETCHES) > _PRECAPTURED_INDICATOR_MAX:
+            _PRECAPTURED_INDICATOR_FETCHES.popitem(last=False)
+
+
+def bind_precaptured_indicator_store_lookup(
+    lookup: Callable[
+        [str], tuple[PayloadRef, Callable[[PayloadRef], Any]] | None
+    ],
+) -> None:
+    """Install the process-start recovery index over persisted RawFetch@1 rows.
+
+    The in-memory LRU is only a latency aid.  A restarted production process
+    rebinds this resolver from its durable ``RuntimeStores`` and can rebuild the
+    request-digest -> typed-ref association on demand before any adapter read.
+    """
+    if not callable(lookup):
+        raise TypeError("pre-captured indicator store lookup must be callable")
+    global _PRECAPTURED_INDICATOR_DURABLE_LOOKUP
+    with _PRECAPTURED_INDICATOR_LOCK:
+        # A new production binding represents a process/store recovery boundary.
+        # Drop latency-only loaders so no prior RuntimeStores instance can leak
+        # into the newly bound process view; durable rows are rediscovered below.
+        _PRECAPTURED_INDICATOR_FETCHES.clear()
+        _PRECAPTURED_INDICATOR_DURABLE_LOOKUP = lookup
+
+
+def _load_precaptured_indicator_fetch(request: DataRequest) -> RawFetch:
+    with _PRECAPTURED_INDICATOR_LOCK:
+        bound = _PRECAPTURED_INDICATOR_FETCHES.get(request.request_digest)
+        if bound is not None:
+            _PRECAPTURED_INDICATOR_FETCHES.move_to_end(request.request_digest)
+        durable_lookup = _PRECAPTURED_INDICATOR_DURABLE_LOOKUP
+    if bound is None and durable_lookup is not None:
+        bound = durable_lookup(request.request_digest)
+        if bound is not None:
+            raw_fetch_ref, loader = bound
+            register_precaptured_indicator_fetch(
+                request_digest=request.request_digest,
+                raw_fetch_ref=raw_fetch_ref,
+                loader=loader,
+            )
+            with _PRECAPTURED_INDICATOR_LOCK:
+                bound = _PRECAPTURED_INDICATOR_FETCHES.get(
+                    request.request_digest)
+    if bound is None:
+        raise SourceBrokenError(
+            "deep indicator evidence has no persisted pre-capture binding; "
+            "refusing a post-freeze live probe")
+    raw_fetch_ref, loader = bound
+    raw = loader(raw_fetch_ref)
+    if not isinstance(raw, RawFetch):
+        raise SourceBrokenError(
+            "persisted deep indicator evidence no longer resolves RawFetch@1")
+    if raw.request_digest != request.request_digest:
+        raise SourceBrokenError(
+            "persisted deep indicator evidence names a different request")
+    if content_digest(raw) != raw_fetch_ref.content_digest:
+        raise SourceBrokenError(
+            "persisted deep indicator evidence digest drifted after capture")
+    return raw
+
+
 def _probe_args(method_id: str, params: Mapping[str, Any]) -> tuple[str, str, int]:
     """Derive ``(code, date, limit)`` for a facade probe from the validated params.
 
-    A per-code method (``news`` / ``verified_snapshot``) carries the requested
-    instrument as ``symbols[0]``; the market-wide tape (``ohlcv``) is a no-code
-    whole-market snapshot. ``date`` stays current ("") — ONLINE reads the live
-    boundary, never a historical date.
+    ``news`` / ``verified_snapshot`` carry the requested instrument as
+    ``symbols[0]``; ``ohlcv`` carries it as ``symbol`` and is routed to the
+    per-instrument ``tdx_kline`` source. ``date`` stays current ("") — ONLINE
+    reads the live boundary, never a caller-selected historical snapshot.
     """
     raw_limit = params.get("limit")
     limit = raw_limit if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else 20
-    if method_id == _OHLCV_METHOD_ID:
-        return ("", "", limit)  # market-wide tape snapshot — no per-code arg
+    if method_id in {_OHLCV_METHOD_ID, _INDICATORS_METHOD_ID}:
+        sym = params.get("symbol")
+        code = str(sym.get("code") or "").strip() if isinstance(sym, Mapping) else ""
+        if method_id == _OHLCV_METHOD_ID:
+            return (code, "", max(limit, _OHLCV_PROBE_LIMIT))
+        return (code, "", 1)
     syms = params.get("symbols") or ()
     code = ""
     if syms:
@@ -649,7 +1629,14 @@ class LiveClientSource:
     hit no real vendor.
     """
 
-    __slots__ = ("_probe_fn", "_catalog_fn", "_resolve_fn", "_known_fn", "_calendar")
+    __slots__ = (
+        "_probe_fn",
+        "_catalog_fn",
+        "_resolve_fn",
+        "_known_fn",
+        "_calendar",
+        "_binding_snapshot",
+    )
 
     def __init__(
         self,
@@ -659,6 +1646,7 @@ class LiveClientSource:
         resolve_source_fn: Callable[[str], str] | None = None,
         known_sources_fn: Callable[[], Any] | None = None,
         calendar: TradingCalendar | None = None,
+        binding_snapshot: ReviewedLiveBindingSnapshot | None = None,
     ) -> None:
         # The brief's __init__ lists probe_fn/catalog_fn; resolve_source_fn/
         # known_sources_fn are added (defaulting to the facade) so invariant 4
@@ -678,6 +1666,14 @@ class LiveClientSource:
         self._resolve_fn = resolve_source_fn
         self._known_fn = known_sources_fn
         self._calendar = calendar
+        self._binding_snapshot = (
+            reviewed_live_binding_snapshot()
+            if binding_snapshot is None
+            else binding_snapshot
+        )
+        # Structural self-sealing is not authorization.  Even an injected probe
+        # can run only under the exact code-owned production approval.
+        verify_code_approved_live_binding_snapshot(self._binding_snapshot)
 
     # -- lazy facade binders (defaults; tests inject) ----------------------- #
     def _probe(self, source: str, *, code: str, date: str, limit: int) -> Mapping[str, Any]:
@@ -714,9 +1710,48 @@ class LiveClientSource:
         """
         known = set(self._known())
         return tuple(
-            _METHOD_LIVE_SOURCE[mid]
-            for mid in sorted(_SUPPORTED_METHOD_IDS)
-            if _METHOD_LIVE_SOURCE[mid] in known
+            binding.source_id
+            for binding in sorted(
+                self._binding_snapshot.bindings,
+                key=lambda row: row.method_id,
+            )
+            if binding.source_id in known
+        )
+
+    @property
+    def binding_snapshot(self) -> ReviewedLiveBindingSnapshot:
+        """The exact code-approved physical binding frozen into this adapter."""
+        return self._binding_snapshot
+
+    def _resolve_binding(
+        self, method_id: str,
+    ) -> tuple[ReviewedLiveBinding, str]:
+        """Resolve one signed source and reject aliases/substitutes before I/O."""
+        binding = self._binding_snapshot.binding_for_method(method_id)
+        canonical = self._resolve(binding.source_id)
+        if not isinstance(canonical, str) or canonical != binding.source_id:
+            raise RoutingConfigurationError(
+                f"resolver result {canonical!r} does not exactly match the "
+                f"run-approved source {binding.source_id!r} for method "
+                f"{method_id!r}; no alias or silent substitute is allowed"
+            )
+        return binding, canonical
+
+    def capture_indicator_book(self, *, code: str) -> tuple[str, Mapping[str, Any]]:
+        """Pull one exact-code timed book before the deep context is frozen.
+
+        Projection intentionally happens later, after the caller records the
+        authoritative capture-completion instant and builds the request-bound
+        ONLINE context.  Runtime then replays the persisted projection and never
+        performs a second probe.
+        """
+        binding, canonical = self._resolve_binding(_INDICATORS_METHOD_ID)
+        envelope = self._probe(canonical, code=code, date="", limit=1)
+        return canonical, _validate_live_envelope(
+            envelope,
+            binding=binding,
+            canonical=canonical,
+            method_id=_INDICATORS_METHOD_ID,
         )
 
     # -- the DataSource protocol surface (read-only) ------------------------ #
@@ -727,67 +1762,134 @@ class LiveClientSource:
                 f"LiveClientSource serves only {sorted(_SUPPORTED_METHOD_IDS)}; "
                 f"method {method_id!r} is not bound to this source"
             )
-        live_source = _METHOD_LIVE_SOURCE[method_id]
-        # invariant 4: source ids are resolved through the facade's resolve_source;
-        # an unknown source fails loud (no silent substitute). A resolver that raises
-        # propagates unmasked.
-        canonical = self._resolve(live_source)
-        if not canonical:
+        binding, canonical = self._resolve_binding(method_id)
+        if request.method_spec_ref.content_digest != binding.method_spec_digest:
             raise RoutingConfigurationError(
-                f"live source {live_source!r} for method {method_id!r} is not "
-                "resolvable via the live_client facade (unknown source); no silent "
-                "substitute"
+                f"request method spec for {method_id!r} does not match the "
+                "run-approved live binding; method/schema drift requires review"
             )
+
+        entry = scope.frozen_route.entries[0]
+        if (
+            method_id == _INDICATORS_METHOD_ID
+            and str(getattr(request, "data_snapshot_id", "")).startswith(
+                _DEEP_CAPTURE_PREFIX)
+        ):
+            # The run's cutoff was frozen after this exact provider observation
+            # completed.  Reload the persisted RawFetch; probing here would be a
+            # different, post-freeze observation and is prohibited.
+            raw = _load_precaptured_indicator_fetch(request)
+            if raw.source_ref != entry.source_ref:
+                raise SourceBrokenError(
+                    "persisted deep indicator evidence names a different source")
+            if raw.capability_ref != entry.capability_ref:
+                raise SourceBrokenError(
+                    "persisted deep indicator evidence names a different capability")
+            if raw.subsource != canonical:
+                raise SourceBrokenError(
+                    "persisted deep indicator evidence names a different live subsource")
+            return raw
 
         code, date, limit = _probe_args(method_id, request.params)
         envelope = self._probe(canonical, code=code, date=date, limit=limit)
-        if not isinstance(envelope, Mapping):
-            raise SourceBrokenError(
-                f"live probe for source={canonical} method={method_id} returned a "
-                f"non-mapping envelope {type(envelope).__name__}; the result is void"
-            )
+        envelope = _validate_live_envelope(
+            envelope,
+            binding=binding,
+            canonical=canonical,
+            method_id=method_id,
+        )
 
-        # -- honest degradation red line (never fabricate, never silent swap) --- #
-        if not envelope.get("ok", False):
-            # ok:False = caller/mechanical fault → raise-bucket, loud, no advance.
-            raise RoutingConfigurationError(
-                f"live probe rejected the request (source={canonical} method={method_id}): "
-                f"{envelope.get('note') or 'ok:false'}"
-            )
-        status = str(envelope.get("status") or "")
-        if status == "planned":
-            # source registered but its probe is not implemented/available = not
-            # configured; the ONLY (with rate-limit) taxonomy error that advances the
-            # frozen chain, then exhausts an optional method to an honest UNAVAILABLE.
-            raise NotConfiguredError(
-                f"live source {canonical!r} is registered but its probe is not "
-                f"implemented (status=planned; method={method_id}): "
-                f"{envelope.get('note') or ''}"
-            )
-        if status == "error":
-            # upstream errored — surface loud, never a silent vendor swap.
-            raise SourceBrokenError(
-                f"live source {canonical!r} returned an upstream error "
-                f"(status=error; method={method_id}): "
-                f"{envelope.get('error') or envelope.get('note') or ''}"
-            )
-
-        # -- ok/data-bearing: wrap each row with ITS OWN availability ----------- #
-        avail = _online_availability(envelope.get("pulled_at"))
+        # -- data-bearing: wrap each row with ITS OWN availability --------------- #
         items = envelope.get("items") or ()
-        if method_id == _NEWS_METHOD_ID:
-            candidates = self._news_candidates(request, items, avail)
+        if envelope.get("status") == "stale":
+            if method_id == _VERIFIED_SNAPSHOT_METHOD_ID:
+                # A malformed stale quote must never fall through to an
+                # envelope-pulled live candidate whose price looks current.
+                candidates = self._stale_settled_candidates(request, items)
+            elif method_id == _INDICATORS_METHOD_ID:
+                candidates = _indicator_candidates(
+                    request,
+                    items,
+                    self._calendar,
+                    _online_availability(envelope.get("pulled_at")),
+                    stale_envelope=True,
+                )
+            else:  # the envelope classifier makes this unreachable
+                raise SourceBrokenError(
+                    f"status=stale is not projectable for method {method_id!r}")
         else:
-            candidates = tuple(
-                self._row_candidate(request, method_id, item, avail) for item in items
-            )
-        entry = scope.frozen_route.entries[0]
+            avail = _online_availability(envelope.get("pulled_at"))
+            if method_id == _NEWS_METHOD_ID:
+                candidates = self._news_candidates(request, items, avail)
+            elif method_id == _OHLCV_METHOD_ID:
+                candidates = self._ohlcv_candidates(request, items)
+            elif method_id == _INDICATORS_METHOD_ID:
+                candidates = _indicator_candidates(
+                    request, items, self._calendar, avail, stale_envelope=False)
+            else:
+                candidates = tuple(
+                    self._row_candidate(request, method_id, item, avail)
+                    for item in items
+                )
         # fetched_at is the FROZEN as-of (audit-only) — no wall-clock read exists here.
         return build_raw_fetch(
             request_digest=request.request_digest, source_ref=entry.source_ref,
             capability_ref=entry.capability_ref, candidates=candidates,
             subsource=canonical, fetched_at=request.as_of, provider_request_id=None,
         )
+
+    def _ohlcv_candidates(
+        self, request: DataRequest, items: Any
+    ) -> tuple[RawRowCandidate, ...]:
+        """Map TDX daily bars through a dedicated strict PIT projection.
+
+        This route deliberately never calls :func:`_row_payload`: a market-flow
+        row and an OHLCV bar may share words such as ``open``/``close`` but are
+        not interchangeable evidence.  Each accepted candidate is tied to the
+        requested symbol, carries only the five bar fields, maps TDX ``vol`` to
+        an exact non-negative integer ``volume``, and is stamped from the row's
+        own daily-bar session at the A-share close.  An unclosed current-session
+        bar is excluded (and counted) rather than letting the all-or-nothing PIT
+        guard reject the historical rows beside it.
+        """
+        out: list[RawRowCandidate] = []
+        excluded_future = 0
+        for item in items:
+            candidate = _ohlcv_candidate(request, item)
+            if candidate.available_at is not None and candidate.available_at > request.as_of:
+                excluded_future += 1
+                continue
+            out.append(candidate)
+        if excluded_future:
+            _LOG.warning(
+                "%s: %d unclosed/future daily bar(s) excluded after row-time "
+                "projection (frozen as_of %s; %d closed bar(s) remain)",
+                _OHLCV_METHOD_ID, excluded_future, request.as_of.isoformat(), len(out),
+            )
+        if len(out) < _OHLCV_MIN_BARS:
+            raise SourceBrokenError(
+                f"live tdx_kline returned only {len(out)} closed, valid PIT bar(s) "
+                f"for method={_OHLCV_METHOD_ID}; at least {_OHLCV_MIN_BARS} are "
+                "required for price-action geometry"
+            )
+        if self._calendar is not None:
+            expected = _latest_completed_session(self._calendar, request.as_of)
+            if expected is None:
+                raise SourceBrokenError(
+                    "the committed trading calendar cannot prove the latest "
+                    "completed OHLCV session for the frozen as_of"
+                )
+            latest = max(
+                c.available_at for c in out if c.available_at is not None
+            )
+            actual = latest.astimezone(_EXCHANGE_TZ).date()
+            if actual != expected:
+                raise SourceBrokenError(
+                    "live tdx_kline latest closed bar is not the exact latest "
+                    "completed session: "
+                    f"expected={expected.isoformat()} actual={actual.isoformat()}"
+                )
+        return tuple(out)
 
     def _news_candidates(
         self, request: DataRequest, items: Any, envelope_avail: datetime | None
@@ -895,6 +1997,40 @@ class LiveClientSource:
                 return settled
         return self._candidate(request, method_id, item, avail)
 
+    def _stale_settled_candidates(
+        self, request: DataRequest, items: Any
+    ) -> tuple[RawRowCandidate, ...]:
+        """Strictly reduce a stale verified snapshot to settled rows only.
+
+        ``status=stale`` describes the provider's current quote, so its ``price``
+        and envelope pull time are not admissible as current evidence.  Every row
+        must independently prove a readable settled close plus venue/session PIT
+        provenance through :meth:`_settled_candidate`.  One malformed row voids
+        the entire envelope; there is no live-candidate fallback on this path.
+        """
+        rows = tuple(items or ())
+        if not rows:
+            raise SourceBrokenError(
+                "stale verified_snapshot envelope has no rows to project as "
+                "settled evidence"
+            )
+        projected: list[RawRowCandidate] = []
+        for index, item in enumerate(rows):
+            if not isinstance(item, Mapping):
+                raise SourceBrokenError(
+                    "stale verified_snapshot item "
+                    f"{index} is not a mapping and cannot prove settled evidence"
+                )
+            settled = self._settled_candidate(request, item)
+            if settled is None:
+                raise SourceBrokenError(
+                    "stale verified_snapshot item "
+                    f"{index} has no usable settled evidence with a readable "
+                    "close and venue/session PIT provenance"
+                )
+            projected.append(settled)
+        return tuple(projected)
+
     def _settled_candidate(
         self, request: DataRequest, item: Mapping[str, Any]
     ) -> RawRowCandidate | None:
@@ -945,6 +2081,7 @@ class LiveClientSource:
         if calendar is None:
             return None
         view = _vendor_row_view(item)
+        _require_verified_snapshot_identity(request, item, view)
         close = _settled_close(view)
         if close is None:
             return None

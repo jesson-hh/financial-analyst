@@ -32,24 +32,47 @@ def _mcp_http_auth_error(scope) -> tuple[int, str] | None:
     return None
 
 
-def build_mcp_http_app(console_store=None) -> Starlette:
+def build_mcp_http_app(console_store=None, *, scope_required: bool = False) -> Starlette:
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
     from guanlan_v2.glmcp.server import build_server
 
-    server = build_server(console_store=console_store)
+    server = build_server(
+        console_store=console_store, scope_required=scope_required,
+    )
     manager = StreamableHTTPSessionManager(app=server)
 
     async def handle_mcp(scope, receive, send) -> None:
-        auth_error = _mcp_http_auth_error(scope)
-        if auth_error is not None:
-            status, message = auth_error
-            response = PlainTextResponse(
-                message, status_code=status,
-                headers={"WWW-Authenticate": "Bearer"} if status == 401 else None,
+        scope_token = None
+        if scope_required:
+            from guanlan_v2.glmcp.scope import (
+                CTX_CODEX_MCP_SCOPE,
+                resolve_codex_scope,
             )
-            await response(scope, receive, send)
-            return
-        await manager.handle_request(scope, receive, send)
+            supplied = Headers(scope=scope).get("x-guanlan-codex-scope", "")
+            codex_scope = resolve_codex_scope(supplied)
+            if codex_scope is None:
+                response = PlainTextResponse(
+                    "Missing or expired Codex MCP scope", status_code=403,
+                )
+                await response(scope, receive, send)
+                return
+            scope_token = CTX_CODEX_MCP_SCOPE.set(codex_scope)
+        else:
+            auth_error = _mcp_http_auth_error(scope)
+            if auth_error is not None:
+                status, message = auth_error
+                response = PlainTextResponse(
+                    message, status_code=status,
+                    headers={"WWW-Authenticate": "Bearer"}
+                    if status == 401 else None,
+                )
+                await response(scope, receive, send)
+                return
+        try:
+            await manager.handle_request(scope, receive, send)
+        finally:
+            if scope_token is not None:
+                CTX_CODEX_MCP_SCOPE.reset(scope_token)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:

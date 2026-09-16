@@ -1,0 +1,2 @@
+load_at_startup:
+  - "C:/Users/AI-PC2601018/.codex/worktrees/guanlan-release-v0.1.0/.pytest_tmp_security_fix/test_engine_entrypoint_import_0/probe_plugin.py"

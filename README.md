@@ -16,7 +16,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-Apache_2.0-yellow?style=flat" alt="License">
-  <img src="https://img.shields.io/badge/python-3.13-blue?style=flat&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=flat&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/frontend-no--build_React_18-61DAFB?style=flat&logo=react&logoColor=white" alt="Frontend">
   <br>
   <img src="https://img.shields.io/badge/agents-24-7C3AED?style=flat" alt="Agents">
@@ -34,7 +34,8 @@
   <a href="#-研究闭环--八模块">八模块</a> &nbsp;·&nbsp;
   <a href="#-快速开始">快速开始</a> &nbsp;·&nbsp;
   <a href="#-架构三层">架构</a> &nbsp;·&nbsp;
-  <a href="#-设计红线">设计红线</a>
+  <a href="#-设计红线">设计红线</a> &nbsp;·&nbsp;
+  <a href="LICENSE">许可证</a>
 </p>
 
 > ⚠️ **个人研究工作台,非开箱即用的产品**。运行需要一份本地 A 股数据(日线 / 新闻 / 因子),默认指向作者机器上的数据目录,需经 `config/loaders.yaml` 或环境变量改指到你自己的数据。引擎已 vendored 进仓库 `engine/`,**自包含**;仅数据外部、且不随仓库分发。
@@ -69,7 +70,7 @@
 > 以下截图全部来自本机真实运行(2026-07):真数据、真回测、真 agent 输出,没有一张摆拍 mock。
 
 **🎛 帷幄 —— 对观澜下令,agent 拆解执行**
-左栏任务计划逐项打勾,中间给出研判结论(因子 IC 分析 + v4 选股 Top10),右栏直接把选股界面开出来接着干活。
+左栏专注会话,本会话的任务计划收进对话右上角;因子 IC、v4 选股等工具结果在对话中直接预览,完整选股/工作流/落子页从全局顶栏进入。
 
 <p align="center">
   <img src="docs/screenshots/console.png" alt="帷幄 · agent 总控台" width="920">
@@ -166,13 +167,22 @@ AI 产业链 28 环节 × 7 驱动 × 15 传导边:行情 / 动量 / 温度实�
 
 ## ⚡ 快速开始
 
+当前正式支持的安装形态是**完整源码检出 + editable 安装**。服务运行时会从仓库读取
+`ui/`、`config/` 和 vendored `engine/`；请不要只复制 Python 包或把 wheel 当成完整应用分发包。
+
 ```bash
-# 需 Python 3.13
+# 需 Python 3.11+（推荐 3.13）
 git clone https://github.com/jesson-hh/financial-analyst.git
 cd financial-analyst
-pip install -e .                  # 装依赖(引擎已 vendored 在 engine/,运行期上 sys.path)
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .        # 从完整源码树安装依赖和 editable Python 包
 
-cp .env.example .env              # 填 DEEPSEEK_API_KEY(研报综述 / 经验卡精炼 / 盘中研判用)
+# Windows PowerShell: Copy-Item .env.example .env
+# macOS/Linux: cp .env.example .env
+# 然后在 .env 填 DEEPSEEK_API_KEY（研报综述 / 经验卡精炼 / 盘中研判用）
 # 数据目录:改 config/loaders.yaml 或设环境变量,指向你自己的 A 股数据(日线 / 新闻);
 # 默认指向作者本地路径,不改则数据相关端点不可用。
 
@@ -180,9 +190,14 @@ python -m guanlan_v2.server       # 起服务(自带服务静态前端)
 # 浏览器开 http://127.0.0.1:9999/ui/  → 帷幄总控台
 ```
 
+`python -m pip wheel --no-deps .` 可生成用于检查 Python 包内容的 wheel；该 wheel 不包含顶层
+`ui/`、`config/`、`memories/` 等源码部署资源，因此**不是可独立启动观澜的完整发行物**。正式发布与
+部署请使用 GitHub 源码归档或完整 `git clone`，并按上面的 editable 流程安装。
+
 - 引擎源默认 = 仓库内 `engine/`;配置默认 = 仓库内 `config/`(deepseek `llm.yaml` + `loaders.yaml`)。
 - 数据经单入口 `financial_analyst.data.paths.get_data_paths()` 解析(env > `loaders.yaml` > 本地 fallback);盘中实时行情走引擎内腾讯实时源。
 - `GUANLAN_FA_SRC` 可覆盖引擎源做 A/B。
+- 严格历史研究上线前运行 `python scripts/check_pit_preflight.py`；密钥轮换与可信时钟要求见 [PIT 生产部署预检](docs/pit_production_preflight.md)。
 
 ---
 

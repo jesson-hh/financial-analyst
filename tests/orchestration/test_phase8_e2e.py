@@ -249,12 +249,40 @@ class _LaneGateway:
         raise AssertionError(f"unexpected LLM worker {wid!r}")
 
 
+class _AsyncClientBridgeGateway(_LaneGateway):
+    """A sync gateway that safely bridges to an async provider client.
+
+    Production's provider facade has the same shape: ``invoke`` is synchronous,
+    while the underlying client's ``chat`` operation is asynchronous.  A v2 node
+    therefore must execute outside ``run_plan``'s active event loop.
+    """
+
+    def __init__(self, stores, catalog):
+        super().__init__(stores, catalog)
+        self.bridge_results: list[str] = []
+
+    @staticmethod
+    async def _async_chat_marker() -> str:
+        await asyncio.sleep(0)
+        return "async-client-completed"
+
+    def invoke(self, request, *, prompt_assembly_ref):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("v2 synchronous gateway executed on run_plan's active loop")
+        self.bridge_results.append(asyncio.run(self._async_chat_marker()))
+        return super().invoke(request, prompt_assembly_ref=prompt_assembly_ref)
+
+
 def _honesty_handler_factory(worker, resolved):
     def handler(*, node, input_snapshot, contributions, data_result_refs):
         rep = HonestyReport(worker_id="x.number_critic", node_id=node.id,
                             subject_content_digest=None, verdict="ok", issues=(), badges=())
         return W.ModelResult(payload=rep, rendered_text="honesty ok", number_anchors=(),
-                             input_tokens=0, output_tokens=1)
+                             input_tokens=0, output_tokens=0)
     return handler
 
 
@@ -443,7 +471,7 @@ def _build_env(*, run_id: str) -> _Env:
                 run_budget=run_budget, run_id=run_id, approvals={})
 
 
-def _draft(env, nodes, reducers, debates, *, budget_llm=24):
+def _draft(env, nodes, reducers, debates, *, budget_llm=28):
     return PlanDraft(
         id=f"plan.{env.run_id}", run_id=env.run_id, request_id=env.request.request_id,
         phase="main", source=PlanSource.DYNAMIC, goal="Lane D e2e", as_of=NOW, mode=DataMode.ONLINE,
@@ -527,7 +555,7 @@ def _run(env, service, plan, *, gateway, profile):
     return result, recorder, pool
 
 
-def _full_lane_run(tmp_path, *, run_id="run-full", fail_plan=None, budget_llm=24):
+def _full_lane_run(tmp_path, *, run_id="run-full", fail_plan=None, budget_llm=28):
     env = _build_env(run_id=run_id)
     draft = _draft(env, _lane_nodes(), _lane_reducers(env.red_ref),
                    (_BULLBEAR, _RISKDEBATE), budget_llm=budget_llm)
@@ -736,6 +764,35 @@ def test_schema_repair_twice_invalid_is_incomplete_no_artifact(tmp_path):
     assert run.pool.committed_output("bull-r1", "primary") is None
     bull_calls = [s for s in run.gateway.seen if s[0] == "bull-r1"]
     assert len(bull_calls) == 2                       # primary + one (exhausted) repair
+
+
+def test_v2_sync_gateway_runs_off_active_loop_and_can_bridge_async_client(tmp_path):
+    """Regression: v2 used to call ``_run_bounded_node`` on the active loop.
+
+    That made a synchronous model gateway's async-client bridge fail with
+    ``Cannot run the event loop while another loop is running``.  The pilot chain
+    also proves the fix preserves awaited, node-id/dependency ordering: all three
+    sequential LLM nodes finish before ``run_plan`` returns.
+    """
+    env = _build_env(run_id="run-v2-async-client-bridge")
+    profile = static_runtime_profile_v2()
+    # Keep the reviewed v2 retry/repair headroom; this regression exercises the
+    # execution thread boundary, not admission's worst-case budget calculation.
+    draft = _draft(env, _pilot_nodes(), (), (), budget_llm=28)
+    service = _admission(env, draft, profile=profile)
+    plan, _res = _admit(env, draft, service, tmp_path)
+    gateway = _AsyncClientBridgeGateway(env.stores, env.snapshot)
+
+    result, recorder, pool = _run(
+        env, service, plan, gateway=gateway, profile=profile)
+
+    assert result.terminal_status == "completed"
+    assert gateway.bridge_results == ["async-client-completed"] * 3
+    assert [node_id for node_id, _worker_id, _tier in gateway.seen] == [
+        "sentiment", "research-mgr", "pm"]
+    assert all(node_run.status in (NodeStatus.COMPLETED, NodeStatus.DEGRADED)
+               for node_run in recorder.node_runs)
+    assert pool.committed_output("pm", "primary") is not None
 
 
 # =========================================================================== #

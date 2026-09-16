@@ -137,11 +137,13 @@ def test_apply_missing_date_degrades(tmp_path):
     pd.testing.assert_series_equal(pred["score"], orig)
 
 
-def test_apply_missing_file_degrades():
+def test_apply_missing_file_degrades(tmp_path):
     """parquet 文件不存在 → 诚实退化纯 LGB,不抛。"""
     codes = _codes(60)
     pred = _make_pred(codes, np.random.RandomState(7).randn(60))
     orig = pred["score"].copy()
-    info = apply_fincast_ensemble(pred, pd.Timestamp("2026-03-10"), "G:/guanlan-v2/var/__no_such_fincast__.parquet")
+    info = apply_fincast_ensemble(
+        pred, pd.Timestamp("2026-03-10"), str(tmp_path / "missing-fincast.parquet")
+    )
     assert info["active"] is False
     pd.testing.assert_series_equal(pred["score"], orig)

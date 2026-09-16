@@ -11,7 +11,24 @@ from guanlan_v2.console.store import ConsoleStore
 
 WS_A = "rw_aaaaaaaaaaaa"
 WS_B = "rw_bbbbbbbbbbbb"
-GRAPH = {"nodes": [{"id": "n1", "type": "source"}], "edges": []}
+GRAPH = {
+    "nodes": [
+        {"id": "factor", "type": "formula", "params": {"expr": "rank(close)"}},
+        {"id": "analysis", "type": "analysis", "params": {}},
+    ],
+    "edges": [{"from": ["factor", "out"], "to": ["analysis", "factor"]}],
+}
+
+
+def _private_graph():
+    """A distinct graph that still satisfies the current complete-graph gate."""
+    return {
+        "nodes": [
+            {"id": "private", "type": "formula", "params": {"expr": "rank(open)"}},
+            {"id": "analysis", "type": "analysis", "params": {}},
+        ],
+        "edges": [{"from": ["private", "out"], "to": ["analysis", "factor"]}],
+    }
 
 
 def _workflow_client(tmp_path, monkeypatch):
@@ -101,7 +118,7 @@ def test_workflow_old_record_is_global_and_private_same_name_never_overwrites_it
 
     assert c.get("/workflow/get/wlegacy").json()["scope"] == "global"
     saved = c.post("/workflow/save", json={
-        "name": "旧模板", "graph": {"nodes": [{"id": "private"}], "edges": []},
+        "name": "旧模板", "graph": _private_graph(),
         "workspace_id": WS_A,
     }).json()
     assert saved["id"] != "wlegacy"

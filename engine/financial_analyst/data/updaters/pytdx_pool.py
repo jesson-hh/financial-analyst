@@ -28,6 +28,8 @@ from typing import Any, List, Tuple
 
 from pytdx.hq import TdxHq_API
 
+from financial_analyst.data.code_norm import is_bj_code
+
 log = logging.getLogger(__name__)
 
 
@@ -167,7 +169,7 @@ def qlib_code_to_pytdx(code: str) -> Tuple[int, str]:
     if code.isdigit() and len(code) == 6:
         if code[0] == "6": return 1, code        # 沪
         if code[0] in "03": return 0, code       # 深
-        if code[0] in "84": return 2, code       # 北
+        if is_bj_code(code): return 2, code      # 北：旧号段及 920 新号段
     raise ValueError(f"Unrecognized stock code: {code!r}")
 
 

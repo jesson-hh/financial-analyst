@@ -20,6 +20,8 @@
 """
 from __future__ import annotations
 
+import importlib
+from pathlib import Path
 from typing import Any, Dict, List
 
 
@@ -29,7 +31,20 @@ def _engine_fetch(limit: int) -> List[Dict[str, Any]]:
     late import:引擎仅在服务器运行时置于 sys.path(server 前插 engine/);
     单测 monkeypatch 本函数即可脱引擎,不触 opencli 子进程。抛错不吞,交由 caller。
     """
-    from financial_analyst.data.news_pulse import fetch_kuaixun as _f
+    try:
+        module = importlib.import_module("financial_analyst.data.news_pulse")
+    except ImportError:
+        import financial_analyst.data as data_package
+
+        bundled = Path(__file__).resolve().parents[2] / "engine" / "financial_analyst" / "data"
+        package_paths = getattr(data_package, "__path__", None)
+        if package_paths is None or not bundled.is_dir():
+            raise
+        bundled_text = str(bundled)
+        if bundled_text not in package_paths:
+            package_paths.append(bundled_text)
+        module = importlib.import_module("financial_analyst.data.news_pulse")
+    _f = module.fetch_kuaixun
     return _f(limit=limit)
 
 

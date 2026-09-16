@@ -157,16 +157,91 @@ def test_stock_basic_missing_when_no_paths(monkeypatch):
     assert h._item_pit_store()["status"] == "missing"
 
 
+def _market_tape_payload(pulled_at, content_date, *, core_status="ok"):
+    import guanlan_v2.datafeed.market_tape as mt
+
+    core_ids = [mt._canon(alias) for alias in mt._CORE_SOURCE_ALIASES]
+    sources = {
+        sid: {"status": core_status, "n": 0, "pulled_at": pulled_at,
+              "content_date": content_date, "last_attempt_status": core_status,
+              "note": "", "rows": []}
+        for sid in core_ids
+    }
+    return {"pulled_at": pulled_at, "core_pulled_at": pulled_at,
+            "refresh_attempted_at": pulled_at, "core_sources": core_ids,
+            "core_session_aligned": True, "core_content_date": content_date,
+            "board_date": content_date, "sources": sources, "derived": {}}
+
+
 def test_market_tape_health_fresh_stale_missing(monkeypatch, tmp_path):
     import guanlan_v2.datafeed.market_tape as mt
     p = tmp_path / "market_tape.json"
     monkeypatch.setattr(mt, "_CACHE_PATH", p)
+    session = "20260829"
+    monkeypatch.setattr(mt, "_market_clock", lambda now=None: {
+        "latest_session": session, "phase": "active", "active": True, "closed": False,
+    })
     assert h._item_market_tape()["status"] == "missing"        # 缺文件
     now = h.datetime.now().isoformat(timespec="seconds")
-    p.write_text('{"pulled_at": "%s"}' % now, encoding="utf-8")
+    p.write_text(json.dumps(_market_tape_payload(now, session)), encoding="utf-8")
     assert h._item_market_tape()["status"] == "fresh"          # 新鲜
-    p.write_text('{"pulled_at": "2020-01-01T00:00:00"}', encoding="utf-8")
+    p.write_text(json.dumps(_market_tape_payload("2020-01-01T00:00:00", session)),
+                 encoding="utf-8")
     assert h._item_market_tape()["status"] == "stale"          # 陈旧
+
+
+def test_market_tape_health_accepts_semantic_empty_core_legs(monkeypatch, tmp_path):
+    """核心池合法零行仍是完整快照，health 不得把 empty 误判为缺腿。"""
+    import guanlan_v2.datafeed.market_tape as mt
+
+    p = tmp_path / "market_tape-empty.json"
+    monkeypatch.setattr(mt, "_CACHE_PATH", p)
+    session = "20260829"
+    monkeypatch.setattr(mt, "_market_clock", lambda now=None: {
+        "latest_session": session, "phase": "active", "active": True, "closed": False,
+    })
+    now = h.datetime.now().isoformat(timespec="seconds")
+    p.write_text(json.dumps(_market_tape_payload(now, session, core_status="empty")),
+                 encoding="utf-8")
+    out = h._item_market_tape()
+    assert out["status"] == "fresh" and out["missing_core_sources"] == []
+    assert out["quality"] == "complete" and out["degraded_sources"] == []
+
+
+def test_market_tape_optional_old_source_is_warning_not_blocker(monkeypatch, tmp_path):
+    """行业榜等可选源旧，只产生 warning；核心四池新鲜时 overall 仍为 fresh。"""
+    import guanlan_v2.datafeed.market_tape as mt
+
+    p = tmp_path / "market_tape-optional-old.json"
+    monkeypatch.setattr(mt, "_CACHE_PATH", p)
+    session = "20260829"
+    monkeypatch.setattr(mt, "_market_clock", lambda now=None: {
+        "latest_session": session, "phase": "active", "active": True, "closed": False,
+    })
+    now = h.datetime.now().isoformat(timespec="seconds")
+    payload = _market_tape_payload(now, session)
+    payload["pulled_at"] = "2020-01-01T00:00:00"       # 兼容总锚仍诚实保留最老分量
+    payload["sources"]["eastmoney_industry_comparison"] = {
+        "status": "ok", "n": 100, "pulled_at": "2020-01-01T00:00:00",
+        "content_date": None, "last_attempt_status": "network_error",
+        "note": "(旧)|新失败:RemoteDisconnected", "rows": [{"name": "旧行业榜"}],
+    }
+    p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    item = h._item_market_tape()
+    assert item["status"] == "fresh" and item["quality"] == "degraded"
+    assert item["degraded_sources"] == ["eastmoney_industry_comparison"]
+    assert item["degraded_details"][0]["source"] == "eastmoney_industry_comparison"
+    assert "最近一次抓取失败" in item["note"]
+
+    monkeypatch.setattr(h, "_ITEMS", {
+        "market_tape": h._item_market_tape,
+        "required_data": lambda: {"status": "fresh"},
+    })
+    out = h.collect_data_health()
+    assert out["overall"]["status"] == "fresh"
+    assert out["overall"]["stale"] == [] and out["overall"]["missing"] == []
+    assert out["overall"]["warnings"] == ["market_tape"]
 
 
 def test_market_tape_in_items_and_overall(monkeypatch, tmp_path):
@@ -185,9 +260,21 @@ def test_newsradar_health_fresh_stale_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(nr, "_CACHE_PATH", p)
     assert h._item_newsradar()["status"] == "missing"
     now = h.datetime.now().isoformat(timespec="seconds")
-    p.write_text('{"pulled_at": "%s", "n_sources": 108, "items": []}' % now, encoding="utf-8")
+    p.write_text('{"pulled_at": "%s", "n_sources": 106, "items": []}' % now, encoding="utf-8")
     out = h._item_newsradar()
-    assert out["status"] == "fresh" and out["n_sources"] == 108
+    assert out["status"] == "fresh" and out["n_sources"] == 106
+    assert out["quality"] == "degraded" and out["sources_ok"] is None
+    assert "不能声称" in out["note"]
+    p.write_text(
+        '{"cache_schema":2,"pulled_at":"%s","n_sources":106,'
+        '"sources_tried":106,"sources_ok":104,"sources_failed":2,'
+        '"sources_with_items":90,"sources_empty":14,'
+        '"source_status":[{"status":"ok"},{"status":"error"}]}' % now,
+        encoding="utf-8",
+    )
+    out = h._item_newsradar()
+    assert out["status"] == "fresh" and out["quality"] == "degraded"
+    assert out["sources_failed"] == 2 and out["source_coverage_ratio"] == 0.9811
     p.write_text('{"pulled_at": "2020-01-01T00:00:00"}', encoding="utf-8")
     assert h._item_newsradar()["status"] == "stale"
 
@@ -273,6 +360,40 @@ def test_new_faces_registered_and_classified():
     assert {"newsradar", "macro_pulse", "overseas", "kuaixun"} <= set(h._ITEMS)
     assert {"newsradar", "overseas", "kuaixun"} <= h._OPS_ITEMS
     assert "macro_pulse" not in h._OPS_ITEMS
+
+
+def test_legacy_data_status_uses_data_health_as_canonical_truth(monkeypatch):
+    canonical = {
+        "ok": True,
+        "generated_at": "2026-09-04T23:00:00",
+        "overall": {
+            "status": "stale", "stale": ["v4_ranking"],
+            "missing": [], "warnings": [],
+        },
+        "items": {"v4_ranking": {"status": "stale"}},
+    }
+    monkeypatch.setattr(h, "collect_data_health", lambda: canonical)
+    legacy = [
+        {"type": "day", "age": "87d ago", "stale": True, "implemented": True},
+        {"type": "financials", "age": "never", "stale": True, "implemented": False},
+    ]
+
+    out = h.build_legacy_status_compat(legacy, market_session="closed")
+
+    assert out["schema_version"] == "data-status/v2"
+    assert out["source_of_truth"] == "/data/health"
+    assert out["overall"] == canonical["overall"]
+    assert out["data_health"] is canonical
+    assert out["canonical_any_stale"] is True
+    # Old UI compatibility stays intact but is no longer mislabeled as health.
+    assert out["items"] == legacy and out["stale_count"] == 1
+    assert out["refresh_tracker"] == {
+        "scope": "legacy_workspace_action_receipts",
+        "deprecated_for_health": True,
+        "stale_count": 1,
+        "any_stale": True,
+        "items": legacy,
+    }
 
 
 def test_ww_data_health_registered_and_formats(monkeypatch):

@@ -20,15 +20,23 @@ import pytest
 
 from guanlan_v2.orchestration import startup as st
 from guanlan_v2.orchestration.adapters import api as adapters_api
+from guanlan_v2.orchestration.pipeline import api as pipeline_api
 
 
 @pytest.fixture(autouse=True)
 def _isolate():
     """Never leave a process-level binding behind for a sibling suite."""
     before = adapters_api.process_adapters_router_deps()
+    pipeline_before = pipeline_api.process_pipeline_router_deps()
+    # A prior production-wiring suite may intentionally bind these module
+    # globals.  Each launcher test starts from the default-off process state it
+    # claims to exercise, then restores the caller's state after the test.
+    adapters_api.set_adapters_router_deps(adapters_api.AdaptersRouterDeps())
+    pipeline_api.set_pipeline_router_deps(pipeline_api.PipelineRouterDeps())
     st.reset_launcher_status_for_tests()
     yield
     adapters_api.set_adapters_router_deps(before)
+    pipeline_api.set_pipeline_router_deps(pipeline_before)
     st.reset_launcher_status_for_tests()
 
 
@@ -71,6 +79,28 @@ def test_enabled_binds_the_router_over_the_process_stores(monkeypatch, tmp_path)
     assert deps.replay_bindings is None
     assert record["replay_bindings"] is False
     assert any("replay_bindings" in note for note in record["notes"])
+    assert record["adapters_router_bound"] is True
+    assert record["replay_execution_ready"] is False
+
+
+def test_status_distinguishes_executable_pipeline_from_partial_replay_binding():
+    class _ApprovalSurface:
+        available = True
+
+    pipeline_api.set_pipeline_router_deps(pipeline_api.PipelineRouterDeps(
+        stores=object(), preset_registry=object(), catalog=object(),
+        schema_registry=object(), clock=object(), latest_snapshot_fn=lambda: None,
+        admission_factory=lambda **_: None, coordinator_factory=lambda **_: None,
+        planner_runner=lambda **_: None, request_store=object(),
+        plan_runner_factory=lambda **_: None, approval_surface=_ApprovalSurface(),
+    ))
+    record = st.orchestration_launcher_status()
+    assert record["pipeline_bound"] is True
+    assert record["dynamic_planner_ready"] is True
+    assert record["plan_executor_ready"] is True
+    assert record["approval_surface_ready"] is True
+    assert record["pipeline_execution_ready"] is True
+    assert record["replay_execution_ready"] is False
 
 
 def test_a_bound_store_really_serves_the_read_only_state_route(monkeypatch, tmp_path):

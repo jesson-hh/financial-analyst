@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 from pydantic import BaseModel
 from financial_analyst.agent.base import SubAgent
+from financial_analyst.data.pit import PitUnavailableError, is_historical_asof
 from financial_analyst.llm.client import LLMClient
 
 
@@ -62,6 +63,22 @@ class MorningBriefWriter(SubAgent[MorningBriefOutput]):
         overseas = inputs.get("overseas-market-scanner", {}) or {}
         catalyst = inputs.get("catalyst-extractor", {}) or {}
         rotation = inputs.get("sector-rotation-analyzer", {}) or {}
+        requested_asof = (
+            inputs.get("asof_date")
+            or scanner.get("asof_date")
+            or scanner.get("as_of")
+            or overseas.get("asof_date")
+            or overseas.get("as_of")
+            or rotation.get("asof_date")
+            or rotation.get("as_of")
+        )
+        requested_date = str(requested_asof)[:10] if requested_asof else None
+        if requested_date and is_historical_asof(requested_date):
+            raise PitUnavailableError(
+                "morning-brief-writer unavailable: current market synthesis "
+                f"cannot prove a point-in-time snapshot for {requested_date}"
+            )
+
         as_of = scanner.get("as_of") or overseas.get("as_of") or "unknown"
         out_dir = Path(inputs.get("out_dir", "./out"))
         out_dir.mkdir(parents=True, exist_ok=True)

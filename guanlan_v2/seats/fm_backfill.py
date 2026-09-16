@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """③b·phase2 离线批算:FM/combo 历史真因子 → 缓存 parquet(guanlan 自有)。
 
-**离线工具**,只在 conda ``stocks`` 环境手动跑(带 GPU + qlib + G:/stocks FM 源码)::
+**离线工具**,只在安装了 GPU、qlib 和 FM 源码依赖的环境手动跑::
 
-    D:/app/miniconda/envs/stocks/python.exe G:/guanlan-v2/guanlan_v2/seats/fm_backfill.py 2026-03-10 2026-04-20 --m 64
+    python -m guanlan_v2.seats.fm_backfill 2026-03-10 2026-04-20 --stocks-root /path/to/stocks --m 64
 
 对每个历史交易日 D:跑引擎 FM(walk-forward W11 ckpt,PIT、只读 ≤D)+ rev20 combo,
 跨簇拼接后做**当日全市场横截面 rank** → ``fm_pct`` / ``combo_pct``,写入缓存 parquet。
 单次 ``model.sample`` 同时出 fm 与 combo(省一半 GPU 时间,复用 ``predict.py`` 内部件)。
 
-落点(guanlan 自有、**不碰 G:/stocks**):``G:/guanlan-v2/var/seats_fm_backfill.parquet``
+落点(guanlan 自有、**不写 stocks 源码仓**):默认是本检出的
+``var/seats_fm_backfill.parquet``，可用 ``--cache`` 覆盖。
 列:``date``(YYYY-MM-DD)/ ``code``(SZ######)/ ``fm_cluster``(int 1..6)/ ``fm_score`` /
 ``fm_pct``(0-100)/ ``combo_pct``(0-100)。追加去重(按 date+code,keep=last)。
 
@@ -24,17 +25,27 @@ from __future__ import annotations
 import argparse
 import gc
 import os
+from pathlib import Path
 import sys
 import time
 
-CACHE_PATH = "G:/guanlan-v2/var/seats_fm_backfill.parquet"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CACHE_PATH = REPO_ROOT / "var" / "seats_fm_backfill.parquet"
 
 
-def _init() -> None:
-    """切到 G:/stocks、装 qlib(FM dataset 读 qlib 数据需要)。"""
-    os.chdir("G:/stocks")
-    if "G:/stocks" not in sys.path:
-        sys.path.insert(0, "G:/stocks")
+def _init(stocks_root: Path) -> None:
+    """切到显式配置的 FM 源码根并初始化 qlib。"""
+    stocks_root = stocks_root.expanduser().resolve()
+    if not stocks_root.is_dir():
+        raise FileNotFoundError(f"stocks root does not exist: {stocks_root}")
+    if not (stocks_root / "config.py").is_file():
+        raise FileNotFoundError(
+            f"stocks root is missing config.py required by FM backfill: {stocks_root}"
+        )
+    os.chdir(stocks_root)
+    root_text = str(stocks_root)
+    if root_text not in sys.path:
+        sys.path.insert(0, root_text)
     os.environ["NO_PROXY"] = "*"
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -105,20 +116,21 @@ def backfill_date(date: str, m_samples: int, device: str):
     return pd.DataFrame(rows)
 
 
-def _write_cache(df_new) -> int:
+def _write_cache(df_new, cache_path: Path) -> int:
     """追加去重写缓存 parquet(按 date+code,keep=last)。"""
     import pandas as pd
-    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
-    if os.path.exists(CACHE_PATH):
+    cache_path = cache_path.expanduser().resolve()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if cache_path.exists():
         try:
-            old = pd.read_parquet(CACHE_PATH)
+            old = pd.read_parquet(cache_path)
             df = pd.concat([old, df_new], ignore_index=True)
             df = df.drop_duplicates(subset=["date", "code"], keep="last")
         except Exception:  # noqa: BLE001 — 旧缓存坏就整盘重写
             df = df_new
     else:
         df = df_new
-    df.to_parquet(CACHE_PATH, index=False)
+    df.to_parquet(cache_path, index=False)
     return len(df)
 
 
@@ -126,9 +138,22 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="FM/combo 历史真因子离线批算 → 缓存 parquet")
     ap.add_argument("dates", nargs="+", help="历史交易日 YYYY-MM-DD(可多个)")
     ap.add_argument("--m", type=int, default=64, help="m_samples(默认 64 快;生产 256 稳)")
+    ap.add_argument(
+        "--stocks-root", type=Path,
+        default=(Path(os.environ["GUANLAN_STOCKS_ROOT"])
+                 if os.environ.get("GUANLAN_STOCKS_ROOT") else None),
+        help="FM/qlib 源码根；也可设置 GUANLAN_STOCKS_ROOT",
+    )
+    ap.add_argument(
+        "--cache", type=Path,
+        default=Path(os.environ.get("GUANLAN_FM_CACHE", str(DEFAULT_CACHE_PATH))),
+        help="输出 parquet（默认当前观澜检出的 var/）",
+    )
     args = ap.parse_args()
 
-    _init()
+    if args.stocks_root is None:
+        ap.error("--stocks-root is required (or set GUANLAN_STOCKS_ROOT)")
+    _init(args.stocks_root)
     import torch
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("DEVICE %s  M %d  DATES %s" % (device, args.m, ",".join(args.dates)), flush=True)
@@ -138,10 +163,10 @@ def main() -> None:
         if df.empty:
             print("DATE %s -> EMPTY (no clusters resolved)" % date, flush=True)
             continue
-        total = _write_cache(df)
+        total = _write_cache(df, args.cache)
         print("DATE %s -> rows=%d sec=%.1f cache_total=%d" % (
             date, len(df), time.time() - t0, total), flush=True)
-    print("BACKFILL_DONE cache=%s" % CACHE_PATH, flush=True)
+    print("BACKFILL_DONE cache=%s" % args.cache.expanduser().resolve(), flush=True)
 
 
 if __name__ == "__main__":

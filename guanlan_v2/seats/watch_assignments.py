@@ -23,9 +23,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-VAR = Path(__file__).resolve().parents[2] / "var"
+VAR = Path(os.environ.get("GUANLAN_SEATS_VAR_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var"
+))
 ASSIGNMENTS_PATH = VAR / "seats_watch_assignments.json"
-ARCHIVE_DIR = VAR / "archive"
+ARCHIVE_DIR = Path(os.environ.get("GUANLAN_ARCHIVE_DIR") or (VAR / "archive"))
 
 SCHEMA_VERSION = 1
 EVIDENCE_TFS = frozenset({"day", "30min", "5min", "1min"})

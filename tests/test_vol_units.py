@@ -3,15 +3,27 @@
 口径:vol 应为「股」、amount 应为「元」;r=(amount/close)/vol 自检:
 ≈1 正常不动;∈[50,200] vol=手 → ×100;∈[0.05,0.2] vol=手+amount=千元 → vol×100,amount×1000。
 """
+import os
+from pathlib import Path
 import subprocess
+import sys
 
-_PY = r"G:\financial-analyst\.venv\Scripts\python.exe"
+import pytest
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _run_script(script: str, *, timeout: int = 120):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(_ROOT / "engine") + os.pathsep + env.get("PYTHONPATH", "")
+    return subprocess.run(
+        [sys.executable, "-c", script], cwd=_ROOT, env=env,
+        capture_output=True, text=True, timeout=timeout,
+    )
 
 _SCRIPT = r'''
-import sys; sys.path.insert(0, r"G:/guanlan-v2/engine")
 import pandas as pd
 import financial_analyst.data.loaders.qlib_binary as qb
-assert "guanlan-v2" in qb.__file__.replace("\\", "/"), qb.__file__
 df = pd.DataFrame({
     "close":  [100.0, 100.0, 100.0, 100.0, float("nan"), 100.0],
     "vol":    [1_000_000.0, 10_000.0, 10_000.0, 0.0, 5.0, 1_050_000.0],
@@ -35,14 +47,15 @@ print("VOLNORM OK")
 
 
 def test_normalize_vol_units_subprocess():
-    r = subprocess.run([_PY, "-c", _SCRIPT], capture_output=True, text=True, timeout=120)
+    r = _run_script(_SCRIPT)
     assert "VOLNORM OK" in (r.stdout or ""), (r.stdout or "") + (r.stderr or "")
 
 
 def test_fetch_quote_pins_normalize():
     # 契约钉:fetch_quote 出口必须经 _normalize_vol_units + 分钟频交叉定标(防回退)
-    src = open(r"G:\guanlan-v2\engine\financial_analyst\data\loaders\qlib_binary.py",
-               encoding="utf-8").read()
+    src = (_ROOT / "engine/financial_analyst/data/loaders/qlib_binary.py").read_text(
+        encoding="utf-8"
+    )
     assert "def _normalize_vol_units" in src
     body = src.split("def fetch_quote")[1].split("\n    def ")[0]
     assert "_normalize_vol_units(" in body
@@ -50,10 +63,8 @@ def test_fetch_quote_pins_normalize():
 
 
 _XDAY_SCRIPT = r'''
-import sys; sys.path.insert(0, r"G:/guanlan-v2/engine")
 import pandas as pd
 import financial_analyst.data.loaders.qlib_binary as qb
-assert "guanlan-v2" in qb.__file__.replace("\\", "/"), qb.__file__
 
 # —— 合成单测:amount 整日全缺 → 用日线交叉定标 ——
 class _Stub(qb.QlibBinaryLoader):
@@ -83,27 +94,35 @@ df_amt = pd.DataFrame({
 assert ld._crosscheck_intraday_vol("TEST", df_amt.copy())["vol"].tolist() == [6_000.0]
 assert ld._crosscheck_intraday_vol("TEST", pd.DataFrame()) is not None
 print("XDAY OK")
-
-# —— 真数据集成:立昂微 5min(06-10/06-11 amount 全缺 + 手批次)——
-ld2 = qb.QlibBinaryLoader({"day": r"G:/stocks/stock_data/cn_data",
-                           "5min": r"G:/stocks/stock_data/cn_data_5min"})
-df = ld2.fetch_quote("SH605358", "2026-06-08", "2026-06-12", "5min")
-if len(df):
-    day = df["trade_date"].astype(str).str[:10]
-    ref = ld2.fetch_quote("SH605358", "2026-06-08", "2026-06-12", "day")
-    rv = {str(t)[:10]: float(v) for t, v in zip(ref["trade_date"], ref["vol"]) if v == v and v > 0}
-    for d, g in df.groupby(day):
-        s = float(g["vol"].sum()); dv = rv.get(d)
-        if dv and s > 0:
-            r = dv / s
-            assert 0.5 <= r <= 2.0, (d, r, s, dv)
-    print("XDAY REAL OK")
-else:
-    print("XDAY REAL SKIP(无5min数据)")
 '''
 
 
 def test_crosscheck_intraday_vol_subprocess():
-    r = subprocess.run([_PY, "-c", _XDAY_SCRIPT], capture_output=True, text=True, timeout=180)
+    r = _run_script(_XDAY_SCRIPT, timeout=180)
     assert "XDAY OK" in (r.stdout or ""), (r.stdout or "") + (r.stderr or "")
-    assert "XDAY REAL" in (r.stdout or ""), (r.stdout or "") + (r.stderr or "")
+
+
+@pytest.mark.realdata
+def test_crosscheck_intraday_vol_realdata():
+    from financial_analyst.data.loaders.qlib_binary import QlibBinaryLoader
+    from financial_analyst.data.paths import get_data_paths
+
+    paths = get_data_paths()
+    if paths.qlib_5min is None or not paths.qlib_day.exists() or not paths.qlib_5min.exists():
+        pytest.skip("configured day/5min Qlib roots are unavailable")
+    loader = QlibBinaryLoader({"day": str(paths.qlib_day), "5min": str(paths.qlib_5min)})
+    frame = loader.fetch_quote("SH605358", "2026-06-08", "2026-06-12", "5min")
+    if frame.empty:
+        pytest.skip("configured 5min dataset has no SH605358 sample")
+    day = frame["trade_date"].astype(str).str[:10]
+    reference = loader.fetch_quote("SH605358", "2026-06-08", "2026-06-12", "day")
+    ref_vol = {
+        str(ts)[:10]: float(vol)
+        for ts, vol in zip(reference["trade_date"], reference["vol"])
+        if vol == vol and vol > 0
+    }
+    for trade_day, group in frame.groupby(day):
+        intraday = float(group["vol"].sum())
+        daily = ref_vol.get(trade_day)
+        if daily and intraday > 0:
+            assert 0.5 <= daily / intraday <= 2.0

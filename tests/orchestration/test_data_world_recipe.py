@@ -23,9 +23,9 @@ Five test groups:
    must NOT do);
 3. policy resolution (elapsed surface policy + the ONE registered
    ``LimitRulePolicy`` naming ``cn_a_share`` + the committed material ref;
-   plus the RULING ADDENDUM's ADDITIONAL method-scoped SESSION policy for
-   ``verified_snapshot`` — ``max_trading_sessions=1`` over the committed
-   calendar, the six other methods unchanged on the elapsed default);
+   plus ADDITIONAL method-scoped SESSION policies for ``verified_snapshot``
+   and settled daily ``ohlcv`` over the committed calendar, the five other
+   methods unchanged on the elapsed default);
 4. calendar honesty (digest-verified committed material; 春节 2026-02-17 absent;
    a normal Tuesday present; tamper raises);
 5. cross-process determinism (subprocess digest triple == in-process) + the NEW
@@ -75,6 +75,8 @@ from guanlan_v2.orchestration.adapters import live_data
 from guanlan_v2.orchestration.adapters.data_world import (
     PRODUCTION_CALENDAR_MATERIAL_PATH,
     PRODUCTION_DATA_REGISTRY_VERSION,
+    PRODUCTION_INDICATORS_FRESHNESS_POLICY_ID,
+    PRODUCTION_OHLCV_FRESHNESS_POLICY_ID,
     PRODUCTION_ROUTING_AUDIT_ID,
     PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID,
     ProductionDataWorldRecipe,
@@ -127,7 +129,7 @@ _SEVEN = (
 #: byte pin of the PRE-EXISTING Task-6-fixture golden — this plan adds a NEW
 #: additive golden and must leave this one byte-identical (Global Constraints).
 _EXISTING_SOURCE_MANIFEST_SHA256 = (
-    "86af7be7e3d6da02602ded2cb8d4b8f1049c2c30bfacf061b2b55fce76ed7503"
+    "f67cc3d036dea0a94bf9a5be500596866683286d69637ed0e0997418209f47c9"
 )
 
 
@@ -251,12 +253,49 @@ class TestPolicyResolution:
         assert resolved.calendar_id == "cn_a_share"
         assert resolved.calendar_material_ref == recipe.calendar.material_ref
 
+    def test_ohlcv_resolves_latest_completed_session_policy(self, recipe):
+        """Daily bars stay current across non-session days without admitting an
+        older completed session merely because it is less than N wall-clock hours
+        old."""
+        surf = phase3_data_surface()
+        spec = surf.spec_by_method["ohlcv"]
+        assert spec.freshness_policy_ref == surf.freshness_ref
+        resolved = recipe.policy_resolver.resolve_method(
+            spec, ctx=P.pilot_data_context(as_of=AS_OF))
+        policy = resolved.freshness_policy
+        assert policy.policy_id == PRODUCTION_OHLCV_FRESHNESS_POLICY_ID
+        assert policy.is_session_based is True
+        assert policy.max_trading_sessions == 1
+        assert policy.method_or_category == "ohlcv"
+        assert policy.calendar_id == recipe.calendar.calendar_id
+        assert policy.calendar_material_ref == recipe.calendar.material_ref
+
+    def test_indicators_resolves_retained_book_session_policy(self, recipe):
+        """The approved TDX indicator route keeps prior-close evidence current
+        across non-session days, but admits zero elapsed trading sessions."""
+        surf = phase3_data_surface()
+        spec = surf.spec_by_method["indicators"]
+        assert spec.freshness_policy_ref == surf.freshness_ref
+        resolved = recipe.policy_resolver.resolve_method(
+            spec, ctx=P.pilot_data_context(as_of=AS_OF))
+        policy = resolved.freshness_policy
+        assert policy.policy_id == PRODUCTION_INDICATORS_FRESHNESS_POLICY_ID
+        assert policy.is_session_based is True
+        assert policy.max_trading_sessions == 0
+        assert policy.method_or_category == "indicators"
+        assert policy.calendar_id == recipe.calendar.calendar_id
+        assert policy.calendar_material_ref == recipe.calendar.material_ref
+
     @pytest.mark.parametrize(
-        "method_id", [m for m in _SEVEN if m != "verified_snapshot"])
+        "method_id", [
+            m for m in _SEVEN
+            if m not in {"verified_snapshot", "ohlcv", "indicators"}
+        ])
     def test_every_other_method_stays_on_the_default_elapsed_policy(
             self, recipe, method_id):
         """The METHOD-SCOPING pin: the session policy is scoped to
-        ``verified_snapshot`` ONLY — the other six keep the default elapsed
+        ``verified_snapshot``, ``ohlcv`` and ``indicators`` ONLY — the other four
+        keep the default elapsed
         policy (and, per gate D-B, its bound limit policy). Mutation m2
         (register the session policy under a different method scope) reddens
         here and at the verified_snapshot arm above."""
@@ -272,9 +311,9 @@ class TestPolicyResolution:
         assert resolved.calendar_id == "cn_a_share"
         assert resolved.calendar_material_ref == recipe.calendar.material_ref
 
-    def test_both_freshness_policies_are_registered_in_the_sealed_snapshot(self, recipe):
-        """Both policies are registry MATERIAL — the session policy is
-        ADDITIONAL, the surface default is untouched. ``freshness_policies`` is
+    def test_all_freshness_policies_are_registered_in_the_sealed_snapshot(self, recipe):
+        """All policies are registry MATERIAL — the session policies are
+        ADDITIONAL and the surface default is untouched. ``freshness_policies`` is
         a sealed snapshot field (``data/source.py``), which is exactly why this
         addendum MOVES ``source_registry_digest`` (a conscious re-freeze)."""
         snap = recipe.registry.snapshot()
@@ -282,6 +321,8 @@ class TestPolicyResolution:
         assert set(by_id) == {
             "policy.freshness.default-elapsed",
             PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID,
+            PRODUCTION_OHLCV_FRESHNESS_POLICY_ID,
+            PRODUCTION_INDICATORS_FRESHNESS_POLICY_ID,
         }
         assert by_id["policy.freshness.default-elapsed"] == \
             phase3_data_surface().freshness_policy
@@ -289,6 +330,14 @@ class TestPolicyResolution:
         assert session.max_trading_sessions == 1
         assert session.max_elapsed_seconds is None
         assert session.calendar_material_ref == recipe.calendar.material_ref
+        ohlcv = by_id[PRODUCTION_OHLCV_FRESHNESS_POLICY_ID]
+        assert ohlcv.max_trading_sessions == 1
+        assert ohlcv.max_elapsed_seconds is None
+        assert ohlcv.calendar_material_ref == recipe.calendar.material_ref
+        indicators = by_id[PRODUCTION_INDICATORS_FRESHNESS_POLICY_ID]
+        assert indicators.max_trading_sessions == 0
+        assert indicators.max_elapsed_seconds is None
+        assert indicators.calendar_material_ref == recipe.calendar.material_ref
 
     def test_the_weekly_monday_hole_is_what_the_session_policy_closes(self, recipe):
         """Why the addendum exists, stated as arithmetic over the COMMITTED
@@ -599,6 +648,12 @@ def _token(evidence: int) -> ExecutionEvidenceOrdinalToken:
 
 def _ok_envelope(price: float) -> dict:
     return {"ok": True, "status": "ok",
+            "source": "tencent_realtime_quote",
+            "provider": "tencent", "actual_provider": "tencent",
+            "fallback_level": 0, "attempted_sources": [],
+            "cache_hit": False, "network_used": True,
+            "circuit_state": "closed",
+            "schema_version": "guanlan.live-source-result.v2",
             "items": [{"name": "贵州茅台", "price": price}],
             "n": 1, "error": "", "note": "",
             "pulled_at": "2026-07-16T15:00:00"}
@@ -718,7 +773,6 @@ class TestBackendEchoGroupB:
         adapter: stage a source_ref that differs from the scope's frozen-route
         entry — ``LiveClientSource`` echoes the route entry, and the INHERITED
         ``invoke`` verification refuses the mismatched echo."""
-        surf = phase3_data_surface()
         spec, req = _sealed_request(p3_registry, request_id="req-l2b-t2-mism")
         foreign = ContentRef(id="guanlan.datafeed", version="1",
                              content_digest="f" * 64)
@@ -736,11 +790,11 @@ class TestBackendEchoGroupB:
 
 class TestSupportedSetGroupC:
     def test_unsupported_method_refuses_through_production_staging(self, recipe):
-        """(c) ``indicators`` staged with ITS recipe-frozen route on the real
+        """(c) ``fundamentals`` staged with ITS recipe-frozen route on the real
         backend still refuses loudly in the REAL adapter, before any probe."""
         surf = phase3_data_surface()
-        spec = surf.spec_by_method["indicators"]
-        route = recipe.registry.default_route("indicators")
+        spec = surf.spec_by_method["fundamentals"]
+        route = recipe.registry.default_route("fundamentals")
         scope = _scope(route, registry_digest="c" * 64)
         backend = ThreadConfinedDataBackend(
             {surf.source_ref.id: LiveClientSource(
@@ -755,10 +809,10 @@ class TestSupportedSetGroupC:
     def test_every_granted_prefetch_row_is_within_the_supported_set(self):
         """The chartered closure of Task-1 review Minor #4: the recipe's
         ``method_selections`` claims ``guanlan.datafeed`` for all seven method
-        ids while ``LiveClientSource`` serves only three — the honest guard is
+        ids while ``LiveClientSource`` serves only the reviewed subset — the guard is
         HERE: every method id granted a ROW in the sealed prefetch binding
         must be within the adapter's supported set, so a future L3 grant of an
-        unsupported method (e.g. ``indicators``) fails THIS test first, and
+        unsupported method (e.g. ``fundamentals``) fails THIS test first, and
         forces the adapter to grow BEFORE the grant goes live."""
         surf = phase3_data_surface()
         granted = {row.method_ref.id
@@ -771,9 +825,9 @@ class TestSupportedSetGroupC:
         # text.news/news and text.policy/news. The guard did exactly its job:
         # both newly granted method ids were INSIDE the adapter's supported set
         # before the grants went live, which is why no adapter had to grow.
-        assert granted == {"verified_snapshot", "news"}
+        assert granted == {"verified_snapshot", "news", "ohlcv", "indicators"}
         assert live_data._SUPPORTED_METHOD_IDS == frozenset(
-            {"verified_snapshot", "news", "ohlcv"})
+            {"verified_snapshot", "news", "ohlcv", "indicators"})
 
 
 class TestInterleavePinGroupD:

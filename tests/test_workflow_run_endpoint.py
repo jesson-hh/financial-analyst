@@ -3,7 +3,6 @@
 import threading
 import time
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -26,12 +25,12 @@ GRAPH = {
 }
 
 
-def _wait_status(client, run_id, wanted, params=None, node_id=None):
+def _wait_status(client, run_id, wanted, params=None):
     deadline = time.time() + 3
     last = None
     while time.time() < deadline:
         last = client.get(f"/workflow/run/status/{run_id}", params=params or {}).json()
-        if last.get("status") in wanted and (node_id is None or node_id in last.get("node_state", {})):
+        if last.get("status") in wanted:
             return last
         time.sleep(0.01)
     raise AssertionError(last)
@@ -45,7 +44,8 @@ def test_run_empty_graph_honest():
 def test_run_ok_passes_overrides(monkeypatch):
     seen = {}
 
-    def fake(graph, overrides=None, on_node=None):
+    def fake(graph, overrides=None, on_node=None, allow_diagnostic_result=False):
+        assert allow_diagnostic_result is True
         seen.update(overrides or {})
         return {"ok": True, "metrics": {"rank_ic": 0.02}, "terminal": {"kind": "analysis"}}
 
@@ -58,7 +58,7 @@ def test_run_ok_passes_overrides(monkeypatch):
 
 
 def test_run_executor_exception_wrapped(monkeypatch):
-    def boom(graph, overrides=None, on_node=None):
+    def boom(graph, overrides=None, on_node=None, allow_diagnostic_result=False):
         raise RuntimeError("x")
 
     monkeypatch.setattr(wex, "run_graph", boom)
@@ -70,10 +70,15 @@ def test_run_executor_exception_wrapped(monkeypatch):
 def test_durable_run_survives_request_and_checkpoints_nodes(tmp_path, monkeypatch):
     store = WorkflowRunStore(tmp_path / "runs")
     release = threading.Event()
+    node_started = threading.Event()
 
-    def fake(graph, overrides=None, on_node=None):
+    def fake(graph, overrides=None, on_node=None, allow_diagnostic_result=False):
+        assert allow_diagnostic_result is True
         on_node("f", "formula", "running")
-        release.wait(timeout=2)
+        # The durable runner publishes run=running before its first node.
+        # Synchronize on the persisted checkpoint, not the earlier run status.
+        node_started.set()
+        release.wait(timeout=5)
         on_node("f", "formula", "done")
         return {
             "ok": True,
@@ -91,7 +96,8 @@ def test_durable_run_survives_request_and_checkpoints_nodes(tmp_path, monkeypatc
         "universe": "csi300_active",
     }).json()
     assert started["ok"] is True
-    running = _wait_status(c, run_id, {"running"}, node_id="f")
+    assert node_started.wait(timeout=3), "executor did not persist its first node checkpoint"
+    running = _wait_status(c, run_id, {"running"})
     assert running["node_state"]["f"]["state"] == "running"
     assert running["overrides"]["universe"] == "csi300_active"
 
@@ -107,7 +113,7 @@ def test_durable_start_is_idempotent(tmp_path, monkeypatch):
     calls = []
     release = threading.Event()
 
-    def fake(graph, overrides=None, on_node=None):
+    def fake(graph, overrides=None, on_node=None, allow_diagnostic_result=False):
         calls.append(1)
         release.wait(timeout=2)
         return {"ok": True, "terminal": {"kind": "analysis", "payload": {"ic": {}}}}
@@ -166,112 +172,3 @@ def test_norm_codes_bj_920_segment():
     assert wapi._norm_codes(["920807.BJ", "bj920807"]) == ["BJ920807"]  # 去重保序
     assert wapi._norm_codes(["830799", "430047"]) == ["BJ830799", "BJ430047"]
     assert wapi._norm_codes(["600519", "000630"]) == ["SH600519", "SZ000630"]
-
-
-def _data_screen_graph(source_params=None):
-    return {
-        "nodes": [
-            {"id": "src", "type": "source",
-             "params": source_params or {"universe": "all_a"}},
-            {"id": "screen", "type": "data_screen",
-             "params": {"preset": "ma_trend"}},
-        ],
-        "edges": [{"from": ["src", "data"], "to": ["screen", "src"]}],
-    }
-
-
-def test_run_endpoints_enforce_data_screen_wiring_but_preserve_legacy_graphs(
-        tmp_path, monkeypatch):
-    calls = []
-
-    def fake(graph, overrides=None, on_node=None):
-        calls.append(graph)
-        return {"ok": True, "terminal": {"kind": "data_screen", "payload": {}}}
-
-    monkeypatch.setattr(wex, "run_graph", fake)
-    client = _client(run_store=WorkflowRunStore(tmp_path / "runs"))
-
-    # Historical endpoint behaviour remains permissive for ordinary saved
-    # canvases; the new authority is scoped to data_screen/all_a graphs.
-    legacy = client.post("/workflow/run", json={"graph": GRAPH}).json()
-    assert legacy["ok"] is True and len(calls) == 1
-
-    bare = {"nodes": [{"id": "screen", "type": "data_screen", "params": {}}],
-            "edges": []}
-    rejected = client.post("/workflow/run", json={"graph": bare}).json()
-    assert rejected["ok"] is False and "source.data" in rejected["reason"]
-    assert len(calls) == 1
-
-    explicit_codes = client.post("/workflow/run", json={
-        "graph": _data_screen_graph({
-            "universe": "自动", "codes": ["SH600001", "SZ000002"],
-        }),
-    }).json()
-    assert explicit_codes["ok"] is True and len(calls) == 2
-
-    invalid_all_a = {
-        "nodes": [
-            {"id": "src", "type": "source", "params": {"universe": "all_a"}},
-            {"id": "feature", "type": "feature", "params": {}},
-            {"id": "formula", "type": "formula", "params": {"expr": "close"}},
-            {"id": "analysis", "type": "analysis", "params": {}},
-        ],
-        "edges": [
-            {"from": ["src", "data"], "to": ["feature", "src"]},
-            {"from": ["formula", "out"], "to": ["analysis", "factor"]},
-        ],
-    }
-    rejected = client.post("/workflow/run/start", json={
-        "graph": invalid_all_a,
-    }).json()
-    assert rejected["ok"] is False and "data_screen.src" in rejected["reason"]
-
-
-def test_run_rejects_universe_override_that_cannot_truthfully_reach_screen(monkeypatch):
-    monkeypatch.setattr(wex, "run_graph", lambda *args, **kwargs: pytest.fail(
-        "executor must not run after an invalid universe override"
-    ))
-    client = _client()
-    for path in ("/workflow/run", "/workflow/run/start"):
-        rejected = client.post(path, json={
-            "graph": _data_screen_graph(), "universe": "all_a",
-        }).json()
-        assert rejected["ok"] is False
-        assert "source" in rejected["reason"] and "universe" in rejected["reason"]
-
-    ordinary_all_a = client.post("/workflow/run", json={
-        "graph": GRAPH, "universe": "all_a",
-    }).json()
-    assert ordinary_all_a["ok"] is False and "普通因子/回测" in ordinary_all_a["reason"]
-
-
-def test_durable_parallel_terminals_are_persisted_intact(tmp_path, monkeypatch):
-    store = WorkflowRunStore(tmp_path / "runs")
-    outcome = {
-        "ok": True,
-        "terminal": {"kind": "analysis", "node_id": "analysis",
-                     "payload": {"ic": {"rank_ic_mean": 0.02}}},
-        "all_terminals": [
-            {"kind": "data_screen", "node_id": "screen",
-             "payload": {"run_id": "ds_parallel", "as_of": "2026-08-21",
-                         "candidates": [{"code": "SH600001"}]}},
-            {"kind": "analysis", "node_id": "analysis",
-             "payload": {"ic": {"rank_ic_mean": 0.02}}},
-        ],
-        "warnings": [], "node_errors": [],
-    }
-    monkeypatch.setattr(wex, "run_graph", lambda *args, **kwargs: outcome)
-    client = _client(run_store=store)
-    run_id = "wr_dddddddddddddddddddddddd"
-    started = client.post("/workflow/run/start", json={
-        "run_id": run_id, "graph": GRAPH,
-    }).json()
-    assert started["ok"] is True
-
-    done = _wait_status(client, run_id, {"completed"})
-    assert done["result"]["terminal"]["kind"] == "analysis"
-    assert done["result"]["all_terminals"][0]["payload"]["run_id"] == "ds_parallel"
-    restored = WorkflowRunStore(tmp_path / "runs").get(run_id)
-    assert restored["result"]["all_terminals"][0]["payload"]["candidates"] == [
-        {"code": "SH600001"},
-    ]

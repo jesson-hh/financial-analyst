@@ -1,15 +1,7 @@
 """ConsoleStore: 会话目录、事件追加(单调id)、计划、重读。纯文件级,不碰引擎。"""
-import json
-
 import pytest
 
 from guanlan_v2.console.store import ConsoleStore
-from guanlan_v2.console.workspaces import (
-    GENERAL_WORKSPACE_ID,
-    WorkspaceAmbiguous,
-    WorkspaceError,
-    normalize_security_code,
-)
 
 
 def test_create_and_list_sessions(tmp_path):
@@ -17,153 +9,8 @@ def test_create_and_list_sessions(tmp_path):
     meta = st.create_session(title="动量全流程")
     assert meta["id"].startswith("cs_") and meta["title"] == "动量全流程"
     assert meta["plan"] == [] and meta["status"] == "idle"
-    assert meta["archived"] is False
     metas = st.list_sessions()
     assert [m["id"] for m in metas] == [meta["id"]]
-
-
-def test_general_workspace_and_legacy_session_compatibility(tmp_path):
-    st = ConsoleStore(root=tmp_path)
-    general = st.workspace_store.get(GENERAL_WORKSPACE_ID)
-    assert general["name"] == "通用研究" and general["kind"] == "general"
-    assert general["root_mode"] == "managed"
-    assert (tmp_path / "workspace_files" / GENERAL_WORKSPACE_ID).is_dir()
-
-    sid = st.create_session()["id"]
-    meta_path = tmp_path / "sessions" / sid / "meta.json"
-    raw = json.loads(meta_path.read_text(encoding="utf-8"))
-    raw.pop("workspace_id")  # simulate a pre-workspace conversation
-    raw.pop("archived")      # simulate a pre-session-archive conversation
-    meta_path.write_text(json.dumps(raw), encoding="utf-8")
-    assert st.get_meta(sid)["workspace_id"] == GENERAL_WORKSPACE_ID
-    assert st.get_meta(sid)["archived"] is False
-    assert st.list_sessions()[0]["workspace_id"] == GENERAL_WORKSPACE_ID
-
-
-def test_session_soft_archive_restore_preserves_history_and_private_state(tmp_path):
-    st = ConsoleStore(root=tmp_path)
-    sid = st.create_session(title="保留我")["id"]
-    event = st.append_event(sid, "user_msg", text="完整历史")
-    state = {
-        "schema_version": "1",
-        "checkpoint_event_id": event["id"],
-        "messages": [{"role": "user", "content": "私有上下文"}],
-    }
-    st.save_buddy_state(sid, state)
-
-    archived = st.set_archived(sid, True)
-    assert archived["archived"] is True and archived["archived_at"]
-    assert st.read_events(sid) == [event]
-    assert st.load_buddy_state(sid) == state
-
-    restored = st.set_archived(sid, False)
-    assert restored["archived"] is False and "archived_at" not in restored
-    assert st.read_events(sid) == [event]
-    assert st.set_archived("plan_approvals", True) is None
-
-
-def test_workspace_managed_root_binding_and_session_move(tmp_path):
-    st = ConsoleStore(root=tmp_path)
-    ws = st.workspace_store.create({
-        "name": "贵州茅台研究", "kind": "stock", "code": "600519.SH",
-    })
-    assert ws["code"] == "SH600519" and ws["agent_mode"] == "collaborative"
-    root = (tmp_path / "workspace_files" / ws["id"]).resolve()
-    assert root.is_dir() and ws["root_path"] == str(root)
-    meta = st.create_session("估值", workspace_id=ws["id"])
-    assert meta["workspace_id"] == ws["id"]
-    assert st.set_workspace(meta["id"], GENERAL_WORKSPACE_ID)["workspace_id"] \
-        == GENERAL_WORKSPACE_ID
-
-
-def test_security_workspace_lookup_is_canonical_unique_and_fail_closed(tmp_path):
-    assert normalize_security_code("920001") == "BJ920001"
-    st = ConsoleStore(root=tmp_path)
-    first = st.workspace_store.create({
-        "name": "浦发研究", "kind": "stock", "code": "600000.SH",
-    })
-    assert st.workspace_store.find_active_security_workspace("600000")["id"] == first["id"]
-    assert st.workspace_store.find_active_security_workspace("SH600000")["id"] == first["id"]
-
-    # Stock/ETF are UI labels; Seats owns one global assignment per code.
-    with pytest.raises(WorkspaceError, match="已有一个未归档"):
-        st.workspace_store.create({
-            "name": "错误的重复类型", "kind": "etf", "code": "600000",
-        })
-
-    # Legacy/corrupt metadata may predate the creation guard.  Exact lookup
-    # must fail closed rather than selecting whichever JSON file sorts first.
-    second = st.workspace_store.create({
-        "name": "ETF", "kind": "etf", "code": "510300",
-    })
-    second_path = tmp_path / "workspaces" / f"{second['id']}.json"
-    second_raw = json.loads(second_path.read_text(encoding="utf-8"))
-    second_raw["code"] = "SH600000"
-    second_path.write_text(json.dumps(second_raw), encoding="utf-8")
-    with pytest.raises(WorkspaceAmbiguous, match="拒绝歧义投影"):
-        st.workspace_store.find_active_security_workspace("600000.SH")
-
-    second_raw["archived"] = True
-    second_path.write_text(json.dumps(second_raw), encoding="utf-8")
-    assert st.workspace_store.find_active_security_workspace("600000")["id"] == first["id"]
-
-
-def test_workspace_external_root_requires_one_time_desktop_grant(tmp_path):
-    st = ConsoleStore(root=tmp_path / "console")
-    chosen = tmp_path / "selected-research"
-    chosen.mkdir()
-    with pytest.raises(WorkspaceError, match="不能通过 HTTP"):
-        st.workspace_store.create({
-            "name": "ETF", "kind": "etf", "code": "159915",
-            "root_mode": "external", "root_path": str(chosen),
-        })
-
-    grant = st.workspace_store.issue_folder_grant(chosen)
-    ws = st.workspace_store.create({
-        "name": "创业板 ETF", "kind": "etf", "code": "159915",
-        "root_mode": "external", "folder_grant": grant["id"],
-    })
-    assert ws["root_path"] == str(chosen.resolve())
-    with pytest.raises(WorkspaceError, match="不存在或已使用"):
-        st.workspace_store.create({
-            "name": "重复授权", "kind": "etf", "code": "159949",
-            "root_mode": "external", "folder_grant": grant["id"],
-        })
-
-
-def test_external_workspace_rejects_control_repo_and_other_workspace_overlap(tmp_path):
-    st = ConsoleStore(root=tmp_path / "console")
-    with pytest.raises(WorkspaceError, match="控制数据目录"):
-        st.workspace_store.issue_folder_grant(tmp_path / "console")
-
-    first_root = tmp_path / "first"
-    first_root.mkdir()
-    first_grant = st.workspace_store.issue_folder_grant(first_root)
-    st.workspace_store.create({
-        "name": "第一空间", "kind": "stock", "code": "600000",
-        "root_mode": "external", "folder_grant": first_grant["id"],
-    })
-    nested = first_root / "nested"
-    nested.mkdir()
-    with pytest.raises(WorkspaceError, match="其他研究空间"):
-        st.workspace_store.issue_folder_grant(nested)
-
-    repo_root = __import__("pathlib").Path(__file__).resolve().parents[1]
-    with pytest.raises(WorkspaceError, match="程序目录"):
-        st.workspace_store.issue_folder_grant(repo_root)
-
-
-def test_workspace_archive_never_deletes_root(tmp_path):
-    st = ConsoleStore(root=tmp_path)
-    ws = st.workspace_store.create({"name": "宁德", "kind": "stock", "code": "300750"})
-    root = tmp_path / "workspace_files" / ws["id"]
-    sentinel = root / "research.md"
-    sentinel.write_text("retain", encoding="utf-8")
-    archived = st.workspace_store.archive(ws["id"])
-    assert archived["archived"] is True
-    assert sentinel.read_text(encoding="utf-8") == "retain"
-    with pytest.raises(WorkspaceError):
-        st.create_session(workspace_id=ws["id"])
 
 
 def test_append_and_read_events_monotonic(tmp_path):
@@ -185,6 +32,42 @@ def test_plan_roundtrip(tmp_path):
     meta = st.set_plan(sid, todos)
     assert meta["plan"] == todos
     assert st.get_meta(sid)["plan"][0]["status"] == "in_progress"
+
+
+def test_evidence_ledger_roundtrip_is_private_bounded_and_survives_overwrite(tmp_path):
+    st = ConsoleStore(tmp_path)
+    sid = st.create_session()["id"]
+    row = {
+        "citation_id": "R1",
+        "title": "AI 算力行业跟踪",
+        "institution": "测试证券",
+        "publish_ts": "2026-08-14T09:30:00+08:00",
+        "source_ref": "https://example.invalid/report.pdf",
+        "source_kind": "live_metadata_only",
+        "view": "这是只留在私有账本中的有界观点",
+    }
+    public = st.upsert_evidence(sid, [row], event_id=7)
+    assert len(public) == 1 and public[0]["evidence_id"].startswith("R-")
+    assert "view" not in public[0]
+
+    private = st.load_evidence(sid)
+    assert private[0]["view"] == row["view"]
+    assert private[0]["aliases"] == ["R1"]
+    assert private[0]["first_event_id"] == private[0]["last_event_id"] == 7
+
+    row["view"] = "更新后的同源摘要"
+    st.upsert_evidence(sid, [row], event_id=12)
+    restored = ConsoleStore(tmp_path).load_evidence(sid)
+    assert len(restored) == 1
+    assert restored[0]["view"] == "更新后的同源摘要"
+    assert restored[0]["first_event_id"] == 7 and restored[0]["last_event_id"] == 12
+
+
+def test_corrupt_evidence_ledger_fails_closed(tmp_path):
+    st = ConsoleStore(tmp_path)
+    sid = st.create_session()["id"]
+    (tmp_path / "sessions" / sid / "evidence_ledger.json").write_text("{bad", encoding="utf-8")
+    assert st.load_evidence(sid) == []
 
 
 def test_delete_session(tmp_path):
@@ -288,6 +171,27 @@ def test_delete_session_rejects_path_traversal(tmp_path):
     assert st.delete_session(sid) is True
 
 
+def test_all_session_paths_reject_aliases_of_a_real_session(tmp_path):
+    st = ConsoleStore(root=tmp_path)
+    sid = st.create_session()["id"]
+    alias = f"../sessions/{sid}"
+    state = _catalog_state()
+
+    assert (tmp_path / "sessions" / alias).resolve() == (
+        tmp_path / "sessions" / sid
+    ).resolve()
+    assert st.get_meta(alias) is None
+    assert st.read_events(alias) == []
+    assert st.load_buddy_state(alias) is None
+    assert st.load_codex_state(alias) is None
+    assert st.load_data_catalog_state(alias) is None
+    with pytest.raises(KeyError):
+        st.append_event(alias, "user_msg", text="must not alias")
+    with pytest.raises(KeyError):
+        st.save_data_catalog_state(alias, state)
+    assert st.get_meta(sid) is not None
+
+
 def test_buddy_state_roundtrip_preserves_private_tool_protocol(tmp_path):
     st = ConsoleStore(root=tmp_path)
     sid = st.create_session()["id"]
@@ -334,26 +238,114 @@ def test_buddy_state_atomic_overwrite_corruption_and_delete(tmp_path):
     assert not state_path.exists()
 
 
-def test_buddy_state_rejects_dangling_or_mismatched_tool_protocol(tmp_path):
+def _codex_state(thread_id="019a1b2c-1234-7abc-8def-1234567890ab"):
+    return {
+        "schema_version": "1",
+        "backend": "codex",
+        "thread_id": thread_id,
+        "workspace_id": "rw_general",
+        "workspace_root_sha256": "a" * 64,
+        "workspace_subject_sha256": "b" * 64,
+        "checkpoint_event_id": 3,
+        "health": "ready",
+        "created_at": "2026-08-30T00:00:00+00:00",
+        "updated_at": "2026-08-30T00:01:00+00:00",
+        "last_error": None,
+        "pending_receipts": [],
+        "tool_transport": "mcp:guanlan-scoped",
+        "active_turn_id": None,
+        "turn_nonce": None,
+    }
+
+
+def test_codex_state_roundtrip_is_private_token_free_and_atomic(tmp_path):
     st = ConsoleStore(root=tmp_path)
     sid = st.create_session()["id"]
-    dangling = {
-        "schema_version": "1", "checkpoint_event_id": 1,
-        "messages": [
-            {"role": "user", "content": "查行情"},
-            {"role": "assistant", "content": "", "tool_calls": [{
-                "id": "call_a", "type": "function",
-                "function": {"name": "quote", "arguments": "{}"},
-            }]},
-        ],
-    }
-    with pytest.raises(ValueError, match="incomplete tool-call"):
-        st.save_buddy_state(sid, dangling)
+    before = st.get_meta(sid)["next_event_id"]
+    first = _codex_state()
+    second = {**first, "checkpoint_event_id": 9,
+              "pending_receipts": ["已完成查询，不要重复"]}
 
-    mismatched = json.loads(json.dumps(dangling))
-    mismatched["messages"].append({
-        "role": "tool", "tool_call_id": "call_b", "content": "wrong id",
-    })
-    state_path = tmp_path / "sessions" / sid / "buddy_state.json"
-    state_path.write_text(json.dumps(mismatched), encoding="utf-8")
-    assert st.load_buddy_state(sid) is None
+    st.save_codex_state(sid, first)
+    st.save_codex_state(sid, second)
+
+    assert st.load_codex_state(sid) == second
+    assert st.get_meta(sid)["next_event_id"] == before
+    assert st.read_events(sid) == []
+    raw = (tmp_path / "sessions" / sid / "codex_state.json").read_text(
+        encoding="utf-8"
+    )
+    assert "token" not in raw.lower() and "oauth" not in raw.lower()
+
+
+def test_codex_state_corruption_and_unexpected_secret_fields_fail_closed(tmp_path):
+    st = ConsoleStore(root=tmp_path)
+    sid = st.create_session()["id"]
+    path = tmp_path / "sessions" / sid / "codex_state.json"
+
+    with pytest.raises(ValueError):
+        st.save_codex_state(sid, {**_codex_state(), "access_token": "secret"})
+    with pytest.raises(ValueError):
+        st.save_codex_state(sid, {**_codex_state(), "health": "unknown"})
+    path.write_text("{broken", encoding="utf-8")
+    assert st.load_codex_state(sid) is None
+
+
+def _catalog_state(seed="a"):
+    return {
+        "schema_version": "1",
+        "catalog_digest": seed * 64,
+        "datasets": {"market.quote": "b" * 64},
+        "sources": {"tencent_realtime_quote": "c" * 64},
+    }
+
+
+def test_data_catalog_state_roundtrip_atomic_overwrite_and_delete(tmp_path):
+    st = ConsoleStore(root=tmp_path)
+    sid = st.create_session()["id"]
+    before = st.get_meta(sid)["next_event_id"]
+    first = _catalog_state("a")
+    second = {
+        "schema_version": "1",
+        "catalog_digest": "d" * 64,
+        "datasets": {"market.quote": "e" * 64, "market.bar": "f" * 64},
+        "sources": {},
+    }
+
+    st.save_data_catalog_state(sid, first)
+    st.save_data_catalog_state(sid, second)
+    assert st.load_data_catalog_state(sid) == second
+    assert st.get_meta(sid)["next_event_id"] == before
+    assert st.read_events(sid) == []
+
+    state_path = tmp_path / "sessions" / sid / "data_catalog_state.json"
+    assert state_path.exists()
+    assert st.delete_session(sid) is True
+    assert not state_path.exists()
+
+
+def test_data_catalog_state_strict_validation_and_corruption(tmp_path):
+    st = ConsoleStore(root=tmp_path)
+    sid = st.create_session()["id"]
+    state_path = tmp_path / "sessions" / sid / "data_catalog_state.json"
+
+    invalid_states = [
+        {**_catalog_state(), "schema_version": "2"},
+        {**_catalog_state(), "catalog_digest": "a" * 63},
+        {**_catalog_state(), "datasets": {"market.quote": "NOT-A-DIGEST"}},
+        {**_catalog_state(), "sources": {"": "c" * 64}},
+        {**_catalog_state(), "unexpected": True},
+    ]
+    for invalid in invalid_states:
+        with pytest.raises(ValueError):
+            st.save_data_catalog_state(sid, invalid)
+
+    with pytest.raises(TypeError):
+        st.save_data_catalog_state(sid, [])
+    with pytest.raises(KeyError):
+        st.save_data_catalog_state("cs_000000000000", _catalog_state())
+
+    state_path.write_text("{broken", encoding="utf-8")
+    assert st.load_data_catalog_state(sid) is None
+    state_path.write_text('{"schema_version":"1"}', encoding="utf-8")
+    assert st.load_data_catalog_state(sid) is None

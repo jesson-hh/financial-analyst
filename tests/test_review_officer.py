@@ -142,3 +142,13 @@ def test_read_report_latest_and_missing(tmp_path, monkeypatch):
     assert r["json"]["date"] == "2026-07-11"
     r2 = RO.read_report("2026-07-10")
     assert r2["ok"] and r2["md"] == "旧报" and r2["json"] is None   # 无同名 json 诚实返 None
+
+
+def test_read_report_rejects_path_like_and_invalid_dates(tmp_path, monkeypatch):
+    monkeypatch.setattr(RO, "REPORTS_DIR", tmp_path / "reports")
+    RO.REPORTS_DIR.mkdir(parents=True)
+    (RO.REPORTS_DIR / "2026-08-31.md").write_text("日报", encoding="utf-8")
+
+    assert RO.read_report("../../outside")["ok"] is False
+    assert RO.read_report("2026-02-30")["ok"] is False
+    assert RO.read_report("2026-08-31")["md"] == "日报"

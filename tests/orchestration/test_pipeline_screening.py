@@ -204,7 +204,7 @@ GOOD_CRED = "good-cred"
 #: The golden record digest of the sealed screening-lane preset. ANY graph edit
 #: (node, dependency, debate, reducer, sink, budget, description) moves it.
 SCREENING_LANE_RECORD_DIGEST = (
-    "f739f7fcce79939d23e282f6b7819a43cf5d56038825cfaf189df221e4c535ec"
+    "2547fb2bba598e5091f449d0b15948eaef0d640a5877e51e1a0e26f7e44bdda3"
 )
 #: The Phase-7 baseline record digest — must stay byte-identical after Phase 10
 #: adds a SECOND committed v2 preset ("Phase 7 preset golden byte-identical").
@@ -838,10 +838,8 @@ class TestValidationAndRuntimeSupport:
         assert support.supported is True, [
             (i.code, i.node_id, i.explanation) for i in support.issues]
 
-    def test_the_llm_budget_equals_the_analyzers_exact_requirement(self, built, env):
-        """``analyze_debates``' pre-reservation rule: ``budget_request_llm_invocations
-        >= expanded seats + non-debate LLM nodes``. Pinned to EQUALITY — an
-        over-request passes the analyzer while reserving budget nobody can spend."""
+    def test_the_llm_budget_equals_the_v2_retry_repair_upper_bound(self, built, env):
+        """Six primary seats plus one bounded schema repair for each seat."""
         draft = built.lanes[0].draft
         workers = {w.id: w for w in env["snapshot"].workers}
         seats = sum(1 for n in draft.nodes if n.debate_id is not None)
@@ -850,7 +848,10 @@ class TestValidationAndRuntimeSupport:
             if n.debate_id is None
             and workers[n.worker_id].execution.kind is ExecutionKind.LLM)
         assert (seats, non_debate_llm) == (2, 4)
-        assert draft.budget_request_llm_invocations == seats + non_debate_llm == 6
+        primary_llm = seats + non_debate_llm
+        assert primary_llm == 6
+        assert draft.budget_request_llm_invocations == primary_llm * 2 == 12
+        assert draft.budget_request_tokens == 12 * W.DEFAULT_LLM_ATTEMPT_TOKEN_RESERVATION
 
 
 # =========================================================================== #
@@ -1058,19 +1059,17 @@ class TestSubjectParamsStamp:
         worker ever gains a reviewed grant (L3), this pin flips CONSCIOUSLY
         there — and the already-stamped path starts serving it."
 
-        That day is today. Ruling D-1 granted ``text.news`` — one of this lane's
-        nine workers — a reviewed row, so the subject-params stamp is no longer
-        vacuous on the A-line: every screening run binds that row's params from
-        the stamp. The pin is kept (never deleted) and re-pointed at the fact
-        that replaced it, both directions: the lane DOES intersect the reviewed
-        row set, and it intersects it in exactly one worker.
+        The current surface grants both ``text.news`` and ``pv.price_action``
+        from this lane, so the stamp is exercised by two real data readers.
         """
         import guanlan_v2.orchestration.data.catalog as dcat
         surface = dcat.phase3_data_surface()
         targeted = {op.worker_id for op in surface.prefetch_binding.operations}
-        assert targeted == {"dec.pm", "pv.technical", "text.news", "text.policy"}
+        assert targeted == {
+            "dec.pm", "pv.microstructure", "pv.price_action", "pv.technical",
+            "text.news", "text.policy"}
         on_lane = targeted & set(SCREENING_LANE_WORKER_IDS)
-        assert on_lane == {"text.news"}, (
+        assert on_lane == {"pv.price_action", "text.news"}, (
             "the screening lane's reviewed-row membership changed; the runner "
             "thread's cost and outage profile must be re-measured (ledger §11.2)")
 
@@ -1207,7 +1206,7 @@ class TestCostPreview:
             lane.draft.budget_request_tokens for lane in built.lanes)
         assert preview.total_budget_llm_invocations == sum(
             lane.draft.budget_request_llm_invocations for lane in built.lanes)
-        assert preview.per_lane_budget_llm_invocations == 6
+        assert preview.per_lane_budget_llm_invocations == 12
         assert preview.per_lane_max_concurrency == 4
 
     def test_the_preview_declares_that_the_evidence_is_unwired(self, built):
@@ -1420,7 +1419,7 @@ class TestTheSourceIsForced:
 # =========================================================================== #
 class TestAdmitScreeningBatch:
     def test_an_active_lease_admits_every_candidate_in_its_envelope(self, admit_env):
-        lease = _issue_lease(admit_env, max_admissions=3, budget_cap=18)
+        lease = _issue_lease(admit_env, max_admissions=3, budget_cap=36)
         outcomes = _admit(admit_env)
         assert len(outcomes) == 3
         assert all(isinstance(o, LeaseAdmissionOutcome) for o in outcomes)
@@ -1471,7 +1470,7 @@ class TestAdmitScreeningBatch:
         assert {p.candidate_plan_digest for p in still_pending} == pending
 
     def test_budget_cap_exhaustion_also_falls_back_to_pending(self, admit_env):
-        _issue_lease(admit_env, max_admissions=9, budget_cap=13)  # 2 lanes = 12
+        _issue_lease(admit_env, max_admissions=9, budget_cap=25)  # 2 lanes = 24
         outcomes = _admit(admit_env)
         assert [o.outcome for o in outcomes] == [
             "lease_admitted", "lease_admitted", "pending_human"]
@@ -1501,7 +1500,7 @@ class TestAdmitScreeningBatch:
             assert entry.code in card.request_id
             assert card.node_count == 9
             assert card.worker_ids == tuple(sorted(SCREENING_LANE_WORKER_IDS))
-            assert card.budget_request_llm_invocations == 6
+            assert card.budget_request_llm_invocations == 12
             assert card.rendered_md.strip()
 
     def test_admission_stops_at_admission(self, admit_env):
@@ -1526,7 +1525,7 @@ class TestAdmitScreeningBatch:
         assert "decision" not in _journal_kinds(admit_env.journal)
 
     def test_re_admission_is_idempotent(self, admit_env):
-        _issue_lease(admit_env, max_admissions=3, budget_cap=18)
+        _issue_lease(admit_env, max_admissions=3, budget_cap=36)
         first = _admit(admit_env)
         rows = _journal_kinds(admit_env.journal)
         second = _admit(admit_env)

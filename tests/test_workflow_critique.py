@@ -23,10 +23,7 @@ def _capture_llm(monkeypatch, seen):
     monkeypatch.setattr(wapi, "_llm_complete", fake)
 
 
-_G = {"nodes": [{"id": "s", "type": "source", "params": {"universe": "csi300"}},
-                {"id": "f", "type": "formula", "params": {"expr": "rank(close)"}},
-                {"id": "a", "type": "analysis", "params": {"context_source_id": "s"}}],
-      "edges": [{"from": ["f", "out"], "to": ["a", "factor"]}]}
+_G = {"nodes": [{"id": "f", "type": "formula", "params": {"expr": "rank(close)"}}], "edges": []}
 
 
 def test_critique_constraints_in_prompt(monkeypatch):
@@ -35,7 +32,12 @@ def test_critique_constraints_in_prompt(monkeypatch):
     r = _client().post("/workflow/critique",
                        json={"goal": "g", "graph": _G, "metrics": {"rank_ic": -0.01},
                              "constraints": "求值只读 formula.expr,改方向必须改写表达式"})
-    assert r.status_code == 200 and r.json()["ok"] is True          # 规则兜底,不断闭环
+    # Prompt forwarding survives LLM failure, but an orphan formula is not
+    # a runnable workflow and the rule fallback must not claim otherwise.
+    assert r.status_code == 200 and r.json()["ok"] is False
+    assert any("缺终端节点" in error for error in r.json()["errors"])
+    assert r.json()["requires_fresh_evaluation"] is True
+    assert r.json()["graph"]["nodes"][0]["params"]["expr"] == "rank(close)"
     assert "求值环境约束" in seen["user"]
     assert "求值只读 formula.expr" in seen["user"]
 

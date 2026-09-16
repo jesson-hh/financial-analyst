@@ -24,12 +24,23 @@ Zero-token: pytdx connects directly to broker quote hosts (招商证券 / 东兴
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Union
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+from financial_analyst.data.code_norm import is_bj_code
+
+from financial_analyst.data.trusted_receipts import (
+    F10_ACQUISITION_DOMAIN,
+    sign_payload,
+)
 
 
 # Five high-value F10 categories — covers ~80% of analyst-relevant events
@@ -42,6 +53,9 @@ ALL_CATEGORIES = [
     "业内点评", "行业分析", "公司大事", "研究报告", "经营分析", "主力追踪",
     "分红扩股", "高层治理", "龙虎榜单",
 ]
+
+_HONG_KONG = ZoneInfo("Asia/Hong_Kong")
+_ACQUISITION_SCHEMA = "f10-acquisition-receipt/v1"
 
 
 # ──────────────────────── pytdx helpers ────────────────────────
@@ -120,6 +134,63 @@ def fetch_f10_one(api, code: str, categories: Optional[List[str]] = None) -> dic
     return result
 
 
+def write_f10_acquisition_receipt(
+    path: Path, *, code: str, category: str, pulled_at: Optional[str] = None,
+) -> Optional[Path]:
+    """Write an externally authenticated acquisition sidecar when configured.
+
+    The HMAC key is obtained only through ``GL_PIT_HMAC_KEY_ID`` and
+    ``GL_PIT_HMAC_KEY`` by :mod:`financial_analyst.data.trusted_receipts`.
+    Without that credential this helper returns ``None`` and does not create a
+    receipt; current F10 ingestion remains usable while historical reads fail
+    closed.
+    """
+    content_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    acquired = datetime.now(_HONG_KONG)
+    provider_pulled = acquired
+    if pulled_at not in (None, ""):
+        try:
+            parsed = datetime.fromisoformat(str(pulled_at).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        provider_pulled = parsed.replace(tzinfo=_HONG_KONG) if parsed.tzinfo is None \
+            else parsed.astimezone(_HONG_KONG)
+    receipt = {
+        "schema_version": _ACQUISITION_SCHEMA,
+        "receipt_id": f"f10r-{uuid4().hex}",
+        "source": f"f10:{category}",
+        "code": str(code).strip().upper(),
+        "category": category,
+        "snapshot_file": path.name,
+        # ``pulled_at`` is provider metadata.  ``acquired_at`` is the signing
+        # process's own clock and cannot be backdated through this API.
+        "pulled_at": provider_pulled.isoformat(timespec="seconds"),
+        "acquired_at": acquired.isoformat(timespec="seconds"),
+        "snapshot_version": f"sha256:{content_sha}",
+        "snapshot_asof": acquired.date().isoformat(),
+        "snapshot_immutable": True,
+        "content_sha256": content_sha,
+    }
+    auth = sign_payload(F10_ACQUISITION_DOMAIN, receipt)
+    if auth is None:
+        return None
+    receipt.update(auth)
+    sidecar = path.with_suffix(path.suffix + ".receipt.json")
+    temporary = sidecar.with_name(f".{sidecar.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temporary, sidecar)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return sidecar
+
+
 def _save_f10(code: str, f10: dict, f10_dir: Path, save_date: str) -> List[dict]:
     """Write each category's text to ``{f10_dir}/{code.lower()}/{cat}_{date}.txt``
     and return index rows (hash, length, path)."""
@@ -132,6 +203,10 @@ def _save_f10(code: str, f10: dict, f10_dir: Path, save_date: str) -> List[dict]
         safe_cat = category.replace("/", "_").replace("\\", "_")
         path = stock_dir / f"{safe_cat}_{save_date}.txt"
         path.write_text(text, encoding="utf-8")
+        updated_at = datetime.now(_HONG_KONG).isoformat(timespec="seconds")
+        receipt_path = write_f10_acquisition_receipt(
+            path, code=code, category=category, pulled_at=updated_at,
+        )
         rows.append(
             {
                 "code": code,
@@ -140,7 +215,8 @@ def _save_f10(code: str, f10: dict, f10_dir: Path, save_date: str) -> List[dict]
                 "length": len(text),
                 "hash": hashlib.md5(text.encode("utf-8")).hexdigest(),
                 "content_path": str(path),
-                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                "updated_at": updated_at,
+                "receipt_signed": receipt_path is not None,
             }
         )
     return rows
@@ -197,7 +273,7 @@ def update_f10(
         ``{total, ok, skipped, failed, new_rows, index_path}``. Matches
         the shape of ``pytdx_kline.update_daily_batch`` for CLI uniformity.
     """
-    save_date = save_date or datetime.now().strftime("%Y%m%d")
+    save_date = save_date or datetime.now(_HONG_KONG).strftime("%Y%m%d")
     news_data_root = Path(news_data_root)
     parquet_root = Path(parquet_root)
     f10_dir = news_data_root / "tdx_f10"
@@ -236,7 +312,7 @@ def update_f10(
                 scanned_today.add(r["code"])
 
     if progress:
-        print(f"[F10] connecting to TDX...", flush=True)
+        print("[F10] connecting to TDX...", flush=True)
     api = _connect_tdx()
     if progress:
         print(f"[F10] connected, fetching {len(codes)} codes", flush=True)
@@ -351,7 +427,7 @@ def _prefix_code(code: str) -> str:
         return "SH" + digits
     if digits[0] in ("0", "3"):
         return "SZ" + digits
-    if digits[0] in ("4", "8"):
+    if is_bj_code(digits):
         return "BJ" + digits
     return c
 

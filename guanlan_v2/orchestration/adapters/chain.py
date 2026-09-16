@@ -317,13 +317,14 @@ _ONLINE_HANDLER_BYTES = (
     b"Trusted ONLINE raw data-source adapter handler (guanlan datafeed live_client).\n"
     b"Reads the live portal at the run's start-frozen as_of; every row is forwarded to\n"
     b"the Phase-3 dispatch PitGuard (a pulled_at after run start is refused). Bound\n"
-    b"behind the existing verified_snapshot/news/ohlcv method ids; ONLINE-only, LIVE\n"
+    b"behind existing verified_snapshot/news/ohlcv/indicators method ids; ONLINE-only, LIVE\n"
     b"backend. Registers no order/signal write capability.\n"
 )
 
 #: the existing Phase-3 method ids each adapter binds (no new id is ever minted).
 _PIT_REPLAY_METHOD_IDS = frozenset({"ohlcv", "news"})
-_ONLINE_METHOD_IDS = frozenset({"verified_snapshot", "news", "ohlcv"})
+_ONLINE_METHOD_IDS = frozenset(
+    {"verified_snapshot", "news", "ohlcv", "indicators"})
 
 
 def serialize_source_descriptor(descriptor: DataSourceDescriptor) -> bytes:

@@ -9,10 +9,29 @@
 # Launch form is `-m guanlan_v2.desktop`, NOT a script path: running a file
 # inside the package puts the PACKAGE dir on sys.path[0] and leaves the repo
 # root off it. That is exactly how 9999 was brought down on 2026-07-26.
+param(
+    [string]$RepoRoot = $env:GUANLAN_REPO_ROOT,
+    [string]$PythonwPath = $env:GUANLAN_PYTHONW
+)
+
 $ErrorActionPreference = 'Stop'
 
-$Repo    = 'G:\guanlan-v2'
-$Pythonw = 'G:\financial-analyst\.venv\Scripts\pythonw.exe'
+$Repo = if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+} else {
+    (Resolve-Path -LiteralPath $RepoRoot).Path
+}
+$PythonwCandidates = @(
+    $PythonwPath,
+    $(if ($env:VIRTUAL_ENV) { Join-Path $env:VIRTUAL_ENV 'Scripts\pythonw.exe' }),
+    (Join-Path $Repo '.venv\Scripts\pythonw.exe'),
+    $(try { (Get-Command pythonw.exe -ErrorAction Stop).Source } catch { $null })
+) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+$Pythonw = $PythonwCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $Pythonw) {
+    throw 'No pythonw.exe found. Pass -PythonwPath or set GUANLAN_PYTHONW/VIRTUAL_ENV.'
+}
+$Pythonw = (Resolve-Path -LiteralPath $Pythonw).Path
 $Icon    = Join-Path $Repo 'guanlan_v2\desktop\guanlan.ico'
 $Name    = '观澜.lnk'
 

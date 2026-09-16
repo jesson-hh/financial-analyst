@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Production planner :class:`ModelGateway` on the pinned ``planner`` seat.
+"""Production planner gateway with a pinned deep seat and JSON-only repair seat.
 
 This is the *only* concrete, network-capable :class:`~guanlan_v2.orchestration.
 worker.ModelGateway` in the orchestration kernel. It is the service port the
@@ -25,10 +25,11 @@ What ``invoke`` does, in order
    would silently shadow the planner seat with a stale/foreign config; passing the
    explicit repo path is what defeats that shadow. This mirrors the
    ``guanlan_v2/screen/llm.py`` precedent verbatim.
-3. **Exactly one single-shot completion (invariant 3).** It requests JSON output
-   (``response_format={"type": "json_object"}``) on the ``planner`` seat and
-   returns the provider text + usage in the Phase-2 :class:`ModelResult` shape.
-   There is no tool loop, no second invocation and no detached-prompt entry point.
+3. **Exactly one single-shot completion per attempt (invariant 3).** It requests
+   JSON output (``response_format={"type": "json_object"}``) on the ``planner``
+   seat. Only a later attempt carrying a digest-bound prior JSON-format issue may
+   use the reviewed ``orchestration-fast`` non-thinking seat; goal text cannot
+   select it. There is no tool loop or detached-prompt entry point.
    A provider failure raises the typed :class:`PlannerModelInvocationError` (its
    ``__cause__`` preserved) which the loop maps to ``model_error`` — never a
    fabricated ``ModelResult``.
@@ -77,9 +78,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from guanlan_v2.orchestration.digest import content_digest
 from guanlan_v2.orchestration.refs import TypedPayloadRef
 from guanlan_v2.orchestration.worker import (
     AssembledModelRequest,
@@ -88,6 +92,8 @@ from guanlan_v2.orchestration.worker import (
 )
 
 __all__ = ["PlannerLLMModelGateway", "PlannerModelInvocationError"]
+
+_LOGGER = logging.getLogger(__name__)
 
 #: The repo-pinned deepseek config. Explicit path defeats the engine's workspace
 #: ``find_config`` shadow (see module docstring + ``guanlan_v2/screen/llm.py``).
@@ -101,6 +107,32 @@ _PLANNER_TEMPERATURE = 0.2
 #: Outer-wait buffer (seconds) over ``timeout_sec`` so the engine transport's own
 #: per-request timeout fires first with an accurate message (mirrors screen/llm.py).
 _OUTER_WAIT_BUFFER_SEC = 5.0
+
+#: A format-only repair uses the already reviewed Phase-8 ``fast`` tier seat:
+#: DeepSeek V4-Flash with thinking disabled.  It may be selected only when the
+#: exact, digest-bound previous issue code says the provider did not return one
+#: JSON object; arbitrary goal text containing the same words cannot switch it.
+_JSON_REPAIR_SEAT = "orchestration-fast"
+_JSON_REPAIR_MAX_TOKENS = 8192
+_JSON_FORMAT_REPAIR_CODES = frozenset(
+    {
+        "planner_output_not_json",
+        "planner_output_not_single_object",
+        "planner_output_not_object",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _PlannerCompletionDiagnostic:
+    """Safe per-completion diagnostics; provider text is deliberately absent."""
+
+    seat: str
+    provider: str | None
+    model: str | None
+    finish_reason: str | None
+    content_length: int
+    reasoning_content_length: int
 
 
 class PlannerModelInvocationError(Exception):
@@ -167,8 +199,66 @@ def _extract_content(response: Any) -> str:
     return content if isinstance(content, str) else ""
 
 
+def _completion_lengths(response: Any) -> tuple[str | None, int, int]:
+    """Return safe response metadata without retaining provider-authored bytes."""
+    try:
+        choice = response["choices"][0]
+        message = choice["message"]
+    except (KeyError, IndexError, TypeError):
+        return None, 0, 0
+    finish_reason = choice.get("finish_reason")
+    if not isinstance(finish_reason, str):
+        finish_reason = None
+    content = message.get("content")
+    reasoning = message.get("reasoning_content")
+    return (
+        finish_reason,
+        len(content) if isinstance(content, str) else 0,
+        len(reasoning) if isinstance(reasoning, str) else 0,
+    )
+
+
+def _bound_prior_issue_codes(request: AssembledModelRequest) -> tuple[str, ...]:
+    """Read only the digest-bound ``prior_issue_codes`` trusted value.
+
+    The prompt bytes alone are insufficient authority: the value must also have
+    one matching named digest in the persisted ``PromptAssemblyRecord``.  This
+    prevents a goal or other narrative containing a repair-code string from
+    selecting a different provider seat.
+    """
+    try:
+        channel = json.loads(request.canonical_request_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, TypeError):
+        return ()
+    if not isinstance(channel, dict):
+        return ()
+    rows = channel.get("trusted_input_values")
+    if not isinstance(rows, list):
+        return ()
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, dict) and row.get("name") == "prior_issue_codes"
+    ]
+    if len(matches) != 1:
+        return ()
+    value = matches[0].get("value")
+    if not isinstance(value, list) or not value or not all(
+        isinstance(code, str) and code for code in value
+    ):
+        return ()
+    named = [
+        item
+        for item in request.prompt_record.trusted_input_digests
+        if item.name == "prior_issue_codes"
+    ]
+    if len(named) != 1 or named[0].digest != content_digest(value):
+        return ()
+    return tuple(value)
+
+
 class PlannerLLMModelGateway:
-    """The production single-shot planner gateway (see module docstring).
+    """The production per-attempt planner gateway (see module docstring).
 
     Conforms to the :class:`~guanlan_v2.orchestration.worker.ModelGateway` protocol
     (``invoke(request, *, prompt_assembly_ref) -> ModelResult``) so ``run_planner``
@@ -188,6 +278,12 @@ class PlannerLLMModelGateway:
         self._config_path = Path(config_path) if config_path is not None else REPO_LLM_CONFIG_PATH
         self._timeout_sec = float(timeout_sec)
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._diagnostics: list[_PlannerCompletionDiagnostic] = []
+
+    @property
+    def diagnostics(self) -> tuple[_PlannerCompletionDiagnostic, ...]:
+        """Safe completion metadata accumulated by this run-scoped gateway."""
+        return tuple(self._diagnostics)
 
     # -- lifecycle ---------------------------------------------------------- #
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
@@ -224,25 +320,39 @@ class PlannerLLMModelGateway:
 
         # (2) build provider messages from the exact authorized canonical bytes.
         messages = _messages_from_canonical(request.canonical_request_bytes)
+        prior_codes = _bound_prior_issue_codes(request)
+        repair_json = bool(_JSON_FORMAT_REPAIR_CODES.intersection(prior_codes))
+        selected_seat = _JSON_REPAIR_SEAT if repair_json else self._seat
 
         # (3) resolve the engine client on the EXPLICIT repo config path (never the
         #     workspace find_config shadow). Imported lazily so this module loads in
         #     envs without the engine and so monkeypatching for_agent stays effective.
         from financial_analyst.llm.client import LLMClient
 
-        client = LLMClient.for_agent(self._seat, config_path=self._config_path)
+        client = LLMClient.for_agent(selected_seat, config_path=self._config_path)
 
         # (4) exactly one single-shot completion, JSON requested, bounded. The hard
         #     per-request deadline lives in the engine transport (seat timeout: 300);
         #     the outer wait_for is a total-wall-clock backstop.
         loop = self._ensure_loop()
         try:
+            chat_kwargs: dict[str, Any] = {}
+            if repair_json:
+                # The format repair is intentionally non-thinking and output-bounded.
+                # It still sees the exact same bound goal/roster/guardrails plus the
+                # prior issue code; only the provider reasoning mode changes.
+                chat_kwargs.update(
+                    max_tokens=_JSON_REPAIR_MAX_TOKENS,
+                    timeout=self._timeout_sec,
+                    thinking=False,
+                )
             response = loop.run_until_complete(
                 asyncio.wait_for(
                     client.chat(
                         messages,
                         response_format={"type": "json_object"},
                         temperature=_PLANNER_TEMPERATURE,
+                        **chat_kwargs,
                     ),
                     timeout=self._timeout_sec + _OUTER_WAIT_BUFFER_SEC,
                 )
@@ -253,6 +363,27 @@ class PlannerLLMModelGateway:
             ) from exc
 
         rendered_text = _extract_content(response)
+        finish_reason, content_length, reasoning_length = _completion_lengths(response)
+        diagnostic = _PlannerCompletionDiagnostic(
+            seat=selected_seat,
+            provider=getattr(client, "provider", None),
+            model=getattr(client, "model", None),
+            finish_reason=finish_reason,
+            content_length=content_length,
+            reasoning_content_length=reasoning_length,
+        )
+        self._diagnostics.append(diagnostic)
+        log_completion = _LOGGER.warning if repair_json else _LOGGER.info
+        log_completion(
+            "planner completion seat=%s provider=%s model=%s finish_reason=%s "
+            "content_length=%d reasoning_content_length=%d",
+            diagnostic.seat,
+            diagnostic.provider,
+            diagnostic.model,
+            diagnostic.finish_reason,
+            diagnostic.content_length,
+            diagnostic.reasoning_content_length,
+        )
         return ModelResult(
             payload=None,
             rendered_text=rendered_text,

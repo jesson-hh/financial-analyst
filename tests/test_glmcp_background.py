@@ -33,7 +33,7 @@ def test_spawn_detached_report_builds_cli(monkeypatch):
     assert calls["cmd"][1:3] == ["report", "SH600000"]         # financial-analyst report <code>
     assert "--asof" not in calls["cmd"]
     assert calls["kw"]["creationflags"] & 0x00000008           # DETACHED_PROCESS
-    assert str(calls["kw"]["cwd"]).lower().endswith("guanlan-v2")
+    assert Path(calls["kw"]["cwd"]).resolve() == Path(G.__file__).resolve().parents[2]
 
 
 def test_spawn_detached_report_with_asof(monkeypatch):

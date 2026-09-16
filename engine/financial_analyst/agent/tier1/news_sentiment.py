@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from financial_analyst.agent.base import SubAgent
 from financial_analyst.data import news_pulse
 from financial_analyst.data import f10_corpus
+from financial_analyst.data.pit import is_historical_asof
 from financial_analyst.llm.client import LLMClient
 
 
@@ -30,6 +31,24 @@ class NewsSentiment(SubAgent[NewsSentimentOutput]):
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         code = inputs["code"]
         asof = inputs["asof_date"]
+
+        if is_historical_asof(asof):
+            return {
+                "code": code,
+                "asof_date": asof,
+                "as_of": None,
+                "source": "",
+                "market_read": None,
+                "market_tilt": None,
+                "stock_tilt": None,
+                "stock_read": None,
+                "evidence": [],
+                "covered": False,
+                "honest_note": (
+                    "unavailable: realtime news sentiment has no provable "
+                    f"point-in-time snapshot for {asof}"
+                ),
+            }
 
         try:
             market = news_pulse.fetch_kuaixun(limit=200)

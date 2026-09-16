@@ -75,7 +75,9 @@ from guanlan_v2.orchestration.admission import AdmissionRejected
 from guanlan_v2.orchestration.approval import admit_after_approval
 from guanlan_v2.orchestration.context import RunBudget, RunContext
 from guanlan_v2.orchestration.pipeline.contracts import RecommendationSlate, RunSubject
-from guanlan_v2.orchestration.pipeline.live_decide import SubjectPromptAssembler
+from guanlan_v2.orchestration.pipeline.live_decide import (
+    ScreeningSubjectPromptAssembler,
+)
 from guanlan_v2.orchestration.pipeline.screening import (
     RECOMMENDATION_ADVISORY_BANNER,
     MaterializedScreeningBatch,
@@ -423,7 +425,7 @@ def _execute_lane(
         idempotency_key=f"screening-freeze:{batch.batch_id}:{lane.code}")
 
     subject = _run_subject_of(lane, as_of=batch.as_of)
-    assembler = SubjectPromptAssembler(
+    assembler = ScreeningSubjectPromptAssembler(
         subject=subject, subject_ref=lane.subject_ref)
     binding = LaneExecutionBinding(
         lane="main", candidate_plan_digest=lane.candidate_plan_digest,

@@ -15,7 +15,7 @@ catalog_version: "phase2-pilot-v1"
 # Pinned attestation over the whole resolved catalog (sha256+cjson-v1 semantic
 # digest of the sealed WorkerCatalogSnapshot). Regenerate only through a reviewed
 # change to the materials or worker specs below.
-catalog_digest: "21a2197c24b7ed946fe53e87340890f062911b4eca7e3ad2ddcafcaae23394e2"
+catalog_digest: "3c216bed0d111ef8b76d559663dabd8fad5e37be0c3fe7eb008d3be8d3c89d11"
 
 materials:
   prompts:

@@ -7,7 +7,7 @@ overseas ~25s(批量改造后 ~2s)/ newsradar 最坏 ~1min),本模块等于替�
 
 红线:fire-and-forget daemon 线程,绝不阻塞 lifespan/事件循环;预热失败静默(各面
 自己的 note/stale 显形),绝不伪造新鲜;newsradar 靠 read_radar_swr 的 TTL 条件触发
-(磁盘缓存 30min 内秒回不重抓 108 外源);fundflow 有缓存且盘外时 frozen 短路秒回
+(磁盘缓存 30min 内秒回；外源数量以运行时 catalog 为准);fundflow 有缓存且盘外时 frozen 短路秒回
 不触网,**缓存缺失的冷启动会真做一次首拉建仓**(一次性成本,换切页秒回)。
 GUANLAN_DATAFEED_PREWARM=0 可整体禁用。
 """
@@ -48,7 +48,7 @@ def _run() -> None:
 
     def _radar() -> None:
         from guanlan_v2.datafeed import newsradar
-        newsradar.read_radar_swr()              # TTL 条件触发:缓存 30min 内不重抓 108 源
+        newsradar.read_radar_swr()              # TTL 条件触发:缓存 30min 内不重抓；源数取运行时 catalog
 
     _step(_tape)
     _step(_overseas)

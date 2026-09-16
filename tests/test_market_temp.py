@@ -67,14 +67,14 @@ def _patch_all_ok(monkeypatch):
             "temps": {"fed": 48.2, "china": None, "crypto_risk": 57.8},
             "astock_temp": 62.3}
     monkeypatch.setattr(macro_pulse, "_read_snapshots", lambda p: [snap])
-    monkeypatch.setattr(market_tape, "read_tape", lambda: {
+    monkeypatch.setattr(market_tape, "read_tape", lambda **_kw: {
         "warming": False,
         "derived": {"zt_count": 47, "zb_count": 12, "break_rate": 0.2034,
                     "promotion_rate": 0.31},
         "freshness": {"overall_age_s": 120}})
     monkeypatch.setattr(ff_pulse, "_load_live_cache", lambda kind, cache_dir=None: {"ok": True})
     monkeypatch.setattr(ff_pulse, "_trigger_live_refresh", lambda *a, **k: False)
-    monkeypatch.setattr(ff_pulse, "read_live", lambda kind: {
+    monkeypatch.setattr(ff_pulse, "read_live", lambda kind, **_kw: {
         "market": {"main_net": -39791411200.0, "super_net": -29097578496.0},
         "pulled_at": "2026-07-11T14:22:30"})
     monkeypatch.setattr(dfs, "latest_market", lambda: {
@@ -136,10 +136,10 @@ def test_all_blocks_down_gate_none(monkeypatch):
 def test_empty_sources_honest_none(monkeypatch):
     # 空值(非异常)同样诚实 None:无快照 / tape 预热中 / market 空 / 今日无判读
     monkeypatch.setattr(macro_pulse, "_read_snapshots", lambda p: [])
-    monkeypatch.setattr(market_tape, "read_tape", lambda: {"warming": True})
+    monkeypatch.setattr(market_tape, "read_tape", lambda **_kw: {"warming": True})
     monkeypatch.setattr(ff_pulse, "_load_live_cache", lambda kind, cache_dir=None: {"ok": True})
     monkeypatch.setattr(ff_pulse, "_trigger_live_refresh", lambda *a, **k: False)
-    monkeypatch.setattr(ff_pulse, "read_live", lambda kind: {"market": {}, "pulled_at": "x"})
+    monkeypatch.setattr(ff_pulse, "read_live", lambda kind, **_kw: {"market": {}, "pulled_at": "x"})
     monkeypatch.setattr(dfs, "latest_market", lambda: {
         "market_read": None, "market_tilt": None, "as_of": None, "ts": None})
     out = build_market_temp()
@@ -164,6 +164,28 @@ def test_flow_no_cache_never_blocks(monkeypatch):
     assert not any("flow 块异常" in n for n in out["notes"])   # read_live 从未被触到
     # 其余块不受影响,gate 按余下信号走(astock_temp 62.3 → neutral)
     assert out["board"] is not None and out["gate"]["level"] == "neutral"
+
+
+def test_query_only_market_temp_never_refreshes(monkeypatch):
+    """Codex 选股预览只消费现存快照，不创建盘口或资金流后台任务。"""
+    _patch_all_ok(monkeypatch)
+    calls = {"tape_allow": None, "flow_allow": None}
+
+    def _tape(*, allow_refresh=True):
+        calls["tape_allow"] = allow_refresh
+        return {"warming": True}
+
+    def _flow(kind, *, allow_refresh=True, **_kw):
+        calls["flow_allow"] = allow_refresh
+        return {"market": {}, "pulled_at": None}
+
+    monkeypatch.setattr(market_tape, "read_tape", _tape)
+    monkeypatch.setattr(ff_pulse, "read_live", _flow)
+    monkeypatch.setattr(ff_pulse, "_trigger_live_refresh", _boom)
+    out = build_market_temp(allow_refresh=False)
+    assert calls == {"tape_allow": False, "flow_allow": False}
+    assert out["board"] is None and out["flow"] is None
+    assert any("只读模式" in note for note in out["notes"])
 
 
 # ── converge(market_temp=…) · 护盾 v4.4 ────────────────────────────────────

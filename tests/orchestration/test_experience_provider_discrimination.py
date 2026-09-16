@@ -64,7 +64,7 @@ from guanlan_v2.orchestration.eventstore import (
     RuntimeStores,
     SchemaRegistryResolver,
 )
-from guanlan_v2.orchestration.refs import PayloadRef, SchemaRef, TypedPayloadRef
+from guanlan_v2.orchestration.refs import PayloadRef, TypedPayloadRef
 from guanlan_v2.orchestration.runtime_support import (
     STATIC_RUNTIME_PROFILE_V2,
     check_runtime_support,
@@ -80,9 +80,10 @@ from guanlan_v2.orchestration.pipeline.assembly import (
     load_phase10_preset_registry,
     production_bridge_view,
 )
-from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 from guanlan_v2.orchestration.pipeline.deep_decide import (
+    DeepRunSubject,
     REDUCED_DEEP_DECIDE_PRESET_ID,
+    RUN_SUBJECT_SCHEMA_REF,
     materialize_deep_decide_draft,
 )
 
@@ -170,12 +171,12 @@ def view(bundle):
 
 
 def _subject_ref(code: str = "300308") -> TypedPayloadRef:
-    subject = RunSubject(code=code, as_of=NOW)
+    subject = DeepRunSubject(code=code, as_of=NOW, evidence_tf="day")
     return TypedPayloadRef(
         payload_ref=PayloadRef(
             namespace="main", object_id=f"subject-{code}",
             content_digest=subject.semantic_digest()),
-        schema_ref=SchemaRef(name="RunSubject", version="1"))
+        schema_ref=RUN_SUBJECT_SCHEMA_REF)
 
 
 @pytest.fixture(scope="module")

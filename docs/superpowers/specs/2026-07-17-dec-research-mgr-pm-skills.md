@@ -18,16 +18,25 @@ description: |
   Not ideal for: ["raw data collection","order routing or execution","position sizing"]
 ---
 ## ⚠️ CRITICAL: Data Source Priority
+- direct PriceActionFeatureReport (price_action)
+- direct TechnicalReport (technical)
+- direct MicrostructureReport (microstructure)
+- direct NewsDigestReport (news_digest)
+- direct BullCase and BearCase (bull_case / bear_case)
 - bull-bear debate history block, when supplied (immutable turn-ordered messages)
-- upstream SentimentReport artifact from the sentiment analyst
+- direct upstream SentimentReport (`sentiment`) from the sentiment analyst
 - fundamental and factor context blocks provided in-context
 - deterministic upstream-ratings extract block, when supplied (analyst scores, machine-extracted)
 - guanlan regime / market-tape context when supplied
 - experience-library cases relevant to the name or setup
 
 Synthesize only from provided upstream artifacts and blocks. Do not fetch new
-data; if a needed input is absent, reason around the gap and flag it. Do not
-restate upstream reports back into your rationale — cite the decisive points.
+data. The full ten-seat preset requires all seven named evidence faces:
+`price_action`, `technical`, `microstructure`, `news_digest`, `sentiment`,
+`bull_case`, and `bear_case`. Cite at least one decisive fact from EACH face in
+`rationale`, or explicitly name that face as missing/unusable; never silently
+omit a seat. Sentiment is mandatory to audit even when it is later down-weighted.
+Do not restate whole reports — cite only the decisive points.
 
 ## Judging the debate (when a debate history is supplied)
 1. Judge by EVIDENCE STRENGTH only — never by speaking order, argument length,
@@ -168,6 +177,17 @@ about posture must be resolved, not averaged.
    an absent target is honest, a fabricated one is a violation.
 5. `time_horizon` states when the thesis should be re-judged (a dated catalyst
    or review window), not a vague "long term".
+6. The ResearchPlan is the mandatory decision spine. Compare its recommendation
+   explicitly with the fast baseline carried in the run context when available:
+   state whether deep arbitration confirms or changes the fast direction, and
+   name the evidence that caused any change. Never silently overwrite fast.
+
+## Workspace-history boundary
+Private workspace-history text is never supplied to this chain. When the fast
+baseline carries `workspace_history_ref_digest`, that value is only an
+irreversible provenance marker: never retrieve, reconstruct, quote or guess the
+underlying history. The structured fast direction remains the only usable
+baseline.
 
 ## Boundary — advisory only
 You emit a recommendation carrying advisory authority. You have NO trading or
@@ -207,7 +227,7 @@ state the insufficiency driver, and give the flip triggers that would resolve it
 
 ## 装配说明
 
-- 模型档位:`dec.pm` = **reasoner_deep(全目录唯一)**,`dec.research_mgr` = reasoner(Phase 8 plan 已钉)。
+- 模型档位:`dec.pm` = **reasoner_deep(全目录唯一)**；`dec.research_mgr` 于 2026-08-29 live amendment 透明改绑同一 V4-Flash 的非思考 `fast`，避免完整七面综合时 reasoning-only/no-final-JSON。
 - prompts 保持薄(角色+schema 指向);pilot prompt 与新 SKILL 重复段装配时瘦身,方法论单一事实源归 SKILL。
 - guardrail `advisory_discipline.md` 不动。
 - **运行时注入面(Phase 8 的活,SKILL 已按 when-supplied 写好)**:辩论历史块 / 上游评级确定性抽取块 / allowed_actions 块 / veto+公告烈度旗标 / 教训块 / 风险三席输出。每一项落地时对应 bridge/adapter 任务,建议进 Phase 8 plan 的 Lane D 批次(reconcile 清单会列)。

@@ -87,3 +87,15 @@ def test_missing_bridge_falls_back_instead_of_breaking_navigation():
     src = _NAV.read_text(encoding="utf-8")
     guard = re.search(r"if \(!api\)\s*return;", src)
     assert guard, "缺少「桥不在就退回普通跳转」的早退"
+
+
+def test_workflow_is_a_first_class_top_navigation_item():
+    src = _NAV.read_text(encoding="utf-8")
+    workflow = "{ label: '工作流', file: '../factor/观澜 · AI 工作流.html' }"
+    assert workflow in src
+    assert src.index("{ label: '选股'") < src.index(workflow) < src.index("{ label: 'AI投研'")
+    ui = _NAV.parent.parent
+    assert (ui / "factor" / "观澜 · AI 工作流.html").is_file()
+    consumers = [p for p in ui.rglob("*.html") if "guanlan-nav.js?v=" in p.read_text(encoding="utf-8")]
+    assert len(consumers) == 12
+    assert all("guanlan-nav.js?v=9" in p.read_text(encoding="utf-8") for p in consumers)

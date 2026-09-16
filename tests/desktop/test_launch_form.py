@@ -43,17 +43,27 @@ def test_shortcut_uses_pythonw_so_no_console_window_flashes():
 
 
 def test_shortcut_working_directory_is_the_repo_root():
-    """不只检查 "WorkingDirectory" 和 "guanlan-v2" 这两个子串各自出现在文件
-    某处(那样两处互不相干的巧合也能骗过去)——而是断言两者真的被接在一起:
-    `$lnk.WorkingDirectory` 被赋值成 `$Repo`,且 `$Repo` 这个变量本身被赋值成
-    一条含 "guanlan-v2" 的字面路径。"""
+    """The shortcut resolves the checkout containing this installer.
+
+    A machine-specific literal used to make this test green while breaking every
+    other checkout.  Keep the assignment chain explicit instead: the shortcut
+    consumes ``$Repo`` and its default is the parent of ``$PSScriptRoot``.  An
+    explicit ``-RepoRoot`` override is resolved before use as well.
+    """
     src = _PS1.read_text(encoding="utf-8-sig")
     assert re.search(r"\$lnk\.WorkingDirectory\s*=\s*\$Repo\b", src), (
         "WorkingDirectory must be assigned from $Repo, not some other value"
     )
-    repo_assignment = re.search(r"\$Repo\s*=\s*'([^']*)'", src)
-    assert repo_assignment is not None, "$Repo must be assigned a literal path"
-    assert "guanlan-v2" in repo_assignment.group(1)
+    assert re.search(r"\$Repo\s*=\s*if\s*\(", src), (
+        "$Repo must be assigned through the validated default/override branch"
+    )
+    assert re.search(
+        r"Resolve-Path\s+-LiteralPath\s+\(Join-Path\s+\$PSScriptRoot\s+'\.\.'\)",
+        src,
+    ), "default repository root must be the installer's parent directory"
+    assert re.search(r"Resolve-Path\s+-LiteralPath\s+\$RepoRoot", src), (
+        "an explicit repository override must be resolved before use"
+    )
 
 
 def test_ps1_saved_as_utf8_with_bom():

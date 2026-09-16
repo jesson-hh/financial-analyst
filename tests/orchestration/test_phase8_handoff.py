@@ -103,13 +103,10 @@ name-authoritative, never line-authoritative):
   and mints ``profile_version="2"`` (``STATIC_RUNTIME_PROFILE_V2``); v1 + BOOTSTRAP
   constants are never edited. ``bootstrap-runtime`` is a ``profile_id`` distinct
   from ``static-runtime``, so ``"2"`` is free.
-* **(g) llm.yaml values.** ``config/llm.yaml`` at implementation time has the sole
-  live provider ``deepseek`` (default ``deepseek``/``deepseek-chat``; ``deepseek-reasoner``
-  the reasoning model); ``kimi`` is domestic-only, ``anthropic``/``openai`` are
-  dormant (no key, no override). Task 3's ``orchestration-fast/-reasoner/
-  -reasoner-deep`` aliases therefore bind ``deepseek``/``deepseek-chat`` (fast) and
-  ``deepseek``/``deepseek-reasoner`` (reasoner + reasoner-deep) — never a vendor
-  absent from the file.
+* **(g) llm.yaml values.** ``config/llm.yaml`` has the sole live provider
+  ``deepseek``. The orchestration aliases bind fast/reasoner to
+  ``deepseek-v4-flash`` and reasoner-deep to ``deepseek-v4-pro`` with explicit
+  thinking budgets; dormant providers are never selected by an alias.
 * **(h) Legacy pure functions.** ``compute_pa_features`` lives in
   ``guanlan_v2.seats.price_action`` with only ``import math`` at module top and a
   ``(df, code="", name="") -> dict`` signature; it is import-safe and
@@ -129,6 +126,7 @@ import typing
 from pathlib import Path
 
 import pytest
+import yaml
 
 # -- Phase 1 (amended) contract layer --------------------------------------- #
 import guanlan_v2.orchestration as orch_pkg
@@ -225,7 +223,7 @@ PHASE3_FULL_REGISTRY_DIGEST = (
     "ff2a56d283499e347dcdbf4c2f5c5977710fd5575afbc94ee34819b2b531e49d"
 )
 PHASE3_FULL_CATALOG_DIGEST = (
-    "0601eef771be221dbc203c56849f357b277d213a6b00274ee94aeaf70725b231"
+    "04ce0696e26d65f4acbde3e33a54be6b2171e87ad16951d008ffe36b8fa3fb5c"
 )
 
 # Cumulative registry chain digests (order-independent, sealed per node).
@@ -244,14 +242,14 @@ PHASE7_REGISTRY_DIGEST = (
 
 # Cumulative catalog chain digests (P6 is the identity node: P6 == P5).
 PHASE4_CATALOG_DIGEST = (
-    "8aea7bc0cb543a8bed8ea4505caa2f4a7f2cce9636762ad690b624d14de1e0f9"
+    "1391592e178aac8fcf96064779851178a79e6bdb96eecb3355cc2ce2a6760b50"
 )
 PHASE5_CATALOG_DIGEST = (
-    "af064cbaaa1e9b0cdea7b23ced1cffb103f6605fbcda476598b5762651df0b8d"
+    "720491678e6e57ce262152e648c417f6b9740f715205864242e93b3efc8e8203"
 )
 PHASE6_CATALOG_DIGEST = PHASE5_CATALOG_DIGEST
 PHASE7_CATALOG_DIGEST = (
-    "b78b63e476bfd5bf0c303524244dbc9a23a585ccc924c8230dcfe906f1b07750"
+    "1efbd76c76ed06cbe8bed602d385ebbcbe744c60eb4fa196b1eb203f0d08ac80"
 )
 
 #: The Phase-7 cumulative registry entry count (Phase 8 additively grows it).
@@ -260,8 +258,8 @@ PHASE7_REGISTRY_ENTRY_COUNT = 164
 #: point 2 / clause (d): the SEVEN Phase-7 ``catalog_role="final"`` workers and
 #: their exact WorkerSpec semantic digests — the pre-update Phase-8 baseline.
 FINAL_WORKER_DIGESTS: dict[str, str] = {
-    "dec.pm": "5557bd4a351eaa7bebc93c5d08b4b8d18f35072915acd5ff9de22c224a1c9797",
-    "dec.research_mgr": "8a8d49b4bf9151eb234a911849797497a2b26b87aa46a4d36aaf7c194546964e",
+    "dec.pm": "133c32b5de03d11e68be6cab38a80e613b353055fc9cae42e1c417bf35ca63c3",
+    "dec.research_mgr": "c324026dfd17aa6dc178ff9db8b9e523e4cb07f9c787e220367e87640942af1c",
     "market.factor": "c20c62f9cd90e0963b126b1b992d42689674675dc2aef5a4634e9f2999ff5148",
     "market.factor_miner": "e0da877ba6f3a0458f431a280684b5a173bd2e3f3b7dd4c6465995c0ebd8828b",
     "market.regime": "813fe36ee5e40a8f600de0073e6e54116ee9114cf79ffea83090770764c27ea9",
@@ -743,9 +741,11 @@ def test_clause_e_lane0_skill_sources_are_at_the_pre_relocation_location():
 # =========================================================================== #
 def test_clause_g_llm_yaml_live_provider_is_deepseek():
     assert LLM_YAML.is_file()
-    text = LLM_YAML.read_text(encoding="utf-8")
-    assert "default_provider: deepseek" in text
-    assert "deepseek-chat" in text and "deepseek-reasoner" in text
+    cfg = yaml.safe_load(LLM_YAML.read_text(encoding="utf-8"))
+    assert cfg["default_provider"] == "deepseek"
+    assert set(cfg["providers"]["deepseek"]["models"]) == {
+        "deepseek-v4-flash", "deepseek-v4-pro",
+    }
 
 
 # =========================================================================== #

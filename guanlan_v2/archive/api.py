@@ -17,13 +17,16 @@ put/patch/remove 对三类型 fire-and-forget 上推。
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 
-_DIR = Path(__file__).resolve().parent.parent.parent / "var" / "archive"
+_DIR = Path(os.environ.get("GUANLAN_ARCHIVE_DIR") or (
+    Path(__file__).resolve().parent.parent.parent / "var" / "archive"
+))
 _ID_RE = re.compile(r"^[A-Za-z0-9_\-\.]{1,80}$")
 _TYPES = {"strategy", "research", "decision"}
 

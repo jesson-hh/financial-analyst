@@ -4,23 +4,13 @@
 # - 交易日盘中门(09:30-11:30 / 13:00-15:00;引擎日历失败回退周一~五)
 # - 节流:per-code 10min 硬地板 + decisionFreq hourly≥1h / daily 当日一次
 # - tick:enabled+盘中+预算余 → 逐 code(quote fresh → 节流 → decide);预算截断;source='watcher'
-# - watching_codes:assignment 为运行真相；首次从旧 bind 确定性迁移，坏/缺策略 fail closed
+# - watching_codes:读 var/archive/strat_*.json 的 bind 非空并集,坏 json 跳过
 # - refs best-effort 服务端解析(卡→cards、因子→recipe_factors,查不到跳过)
 # - _decide_impl 提取:payload 带 source → _persist_decision 落盘可见;不带 → 键不落(旧形状不变)
 # 全桩,零网络零 LLM。
 import json
-from datetime import datetime
-import pytest
+from datetime import date, datetime, timezone
 from guanlan_v2.seats import watcher
-
-
-@pytest.fixture(autouse=True)
-def _isolated_assignment_store(tmp_path, monkeypatch):
-    """Never let assignment migration read/write the developer's real var/."""
-    archive = tmp_path / "archive"
-    archive.mkdir(exist_ok=True)
-    monkeypatch.setattr(watcher, "ASSIGNMENTS_PATH", tmp_path / "assignments.json")
-    monkeypatch.setattr(watcher, "ARCHIVE_DIR", archive)
 
 def test_state_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(watcher, "STATE_PATH", tmp_path / "w.json")
@@ -34,6 +24,49 @@ def test_market_open_gate():
     assert watcher._is_market_open(datetime(2026, 7, 10, 12, 0)) is False   # 午休
     assert watcher._is_market_open(datetime(2026, 7, 11, 10, 0)) is False   # 周六
     assert watcher._is_market_open(datetime(2026, 7, 10, 15, 30)) is False  # 收盘后
+
+
+def test_market_session_boundaries_and_aware_clock(monkeypatch):
+    monkeypatch.setattr(watcher, "_calendar_dates", lambda: {date(2026, 7, 10)})
+    cases = [
+        ((9, 29, 59), "preopen", False),
+        ((9, 30, 0), "open", True),
+        ((11, 29, 59), "open", True),
+        ((11, 30, 0), "lunch_break", False),
+        ((12, 59, 59), "lunch_break", False),
+        ((13, 0, 0), "open", True),
+        ((14, 59, 59), "open", True),
+        ((15, 0, 0), "closed", False),
+    ]
+    for (h, m, s), phase, is_open in cases:
+        out = watcher.market_session_state(datetime(2026, 7, 10, h, m, s))
+        assert (out["market_phase"], out["market_open"]) == (phase, is_open)
+
+    # The same instant supplied in UTC is normalized to Shanghai time (10:00).
+    aware = watcher.market_session_state(datetime(2026, 7, 10, 2, 0, tzinfo=timezone.utc))
+    assert aware["market_phase"] == "open" and aware["market_open"] is True
+
+
+def test_quote_freshness_requires_open_session_same_day_and_recent(monkeypatch):
+    monkeypatch.setattr(watcher, "_calendar_dates", lambda: {date(2026, 8, 14)})
+
+    live = watcher.quote_session_state(
+        "20260814100000", datetime(2026, 8, 14, 10, 0, 20))
+    assert live["fresh"] is True and live["quote_state"] == "live"
+
+    stale = watcher.quote_session_state(
+        "20260814095500", datetime(2026, 8, 14, 10, 0, 20))
+    assert stale["fresh"] is False and stale["quote_state"] == "stale"
+
+    after_close = watcher.quote_session_state(
+        "20260814161400", datetime(2026, 8, 14, 16, 20))
+    assert after_close["fresh"] is False
+    assert after_close["market_phase"] == "closed"
+
+    weekend = watcher.quote_session_state(
+        "20260814161400", datetime(2026, 8, 15, 10, 0))
+    assert weekend["fresh"] is False
+    assert weekend["market_phase"] == "non_trading_day"
 
 def test_throttle_floor_and_freq():
     now = datetime(2026, 7, 10, 10, 30)
@@ -79,8 +112,7 @@ def test_tick_skips_stale_quote_and_disabled(tmp_path, monkeypatch):
 
 # ───────── 以下为补充测试(只增不删:watching_codes 数据源 / refs 桩解析 / source 落盘 / 路由)─────────
 
-def test_watching_codes_reads_bind_and_skips_bad_json(tmp_path, monkeypatch):
-    from guanlan_v2.seats import watch_assignments as assignments
+def test_watching_codes_migrates_legacy_bind_once_and_skips_bad_json(tmp_path, monkeypatch):
     monkeypatch.setattr(watcher, "ARCHIVE_DIR", tmp_path)
     monkeypatch.setattr(watcher, "ASSIGNMENTS_PATH", tmp_path / "assignments.json")
     (tmp_path / "strat_a.json").write_text(json.dumps({
@@ -90,10 +122,8 @@ def test_watching_codes_reads_bind_and_skips_bad_json(tmp_path, monkeypatch):
     (tmp_path / "strat_b.json").write_text(json.dumps({
         "id": "s_b", "name": "空绑不盯", "bind": []}, ensure_ascii=False), encoding="utf-8")
     (tmp_path / "strat_bad.json").write_text("{oops", encoding="utf-8")   # 坏 json 跳过
-    # Ordinary watcher/status reads no longer freeze a partially hydrated
-    # archive; the UI archiveReady handshake performs this explicit migration.
-    assert watcher.watching_codes() == []
-    assignments.migrate_legacy_assignments(
+    from guanlan_v2.seats import watch_assignments as _wa
+    _wa.migrate_legacy_assignments(
         path=watcher.ASSIGNMENTS_PATH, archive_dir=watcher.ARCHIVE_DIR)
     rows = watcher.watching_codes()
     assert [r["code"] for r in rows] == ["300750", "600519"]
@@ -102,6 +132,10 @@ def test_watching_codes_reads_bind_and_skips_bad_json(tmp_path, monkeypatch):
     assert r0["clock"]["decisionFreq"] == "daily" and r0["creed"] == "突破加仓"
     assert r0["w"] == 0.2 and r0["pa"] is True and r0["pa_method"] == "看长做短"
     assert r0["refs"] == ["EV-001"]
+    assert r0["requested_evidence_tf"] == "day"
+    assert r0["effective_evidence_tf"] == "day"
+    assert r0["thinking_mode"] == "fast"
+    assert r0["assignment_revision"] == 1
 
 def test_resolve_refs_best_effort_with_stubs(monkeypatch):
     """refs 服务端 best-effort 解析:卡 id → cards(decide 既有字段名)、因子 id →
@@ -126,6 +160,183 @@ def test_resolve_refs_card_falls_back_to_verdict_insight(monkeypatch):
     assert factors == [] and cards[0]["insight"] == "存疑" and cards[0]["ic"] is None
 
 
+def test_resolve_refs_diagnostics_distinguish_missing_and_store_errors(monkeypatch):
+    """旧的 cards/factors 二元返回保持兼容;可观测模式额外记住
+    已解析、未解析与存储故障,不再把它们静默压成两个空数组。"""
+    def card(rid):
+        if rid == "EV-OK":
+            return {"title": "卡", "insight": "有效", "verdict": "通过"}
+        if rid == "BROKEN":
+            raise OSError("card store unavailable")
+        return None
+
+    def factor(rid):
+        if rid == "FAC-OK":
+            return {"name": "FAC-OK", "expr": "close/open"}
+        if rid == "BROKEN":
+            raise RuntimeError("factor store unavailable")
+        return None
+
+    monkeypatch.setattr(watcher, "_lookup_card", card)
+    monkeypatch.setattr(watcher, "_lookup_factor", factor)
+
+    # Default remains the exact two-item compatibility seam.
+    compat = watcher._resolve_refs(["EV-OK", "FAC-OK"])
+    assert len(compat) == 2
+
+    cards, factors, diag = watcher._resolve_refs(
+        ["EV-OK", "FAC-OK", "MISSING", "BROKEN"], include_diagnostics=True)
+    assert [x["name"] for x in cards] == ["卡"]
+    assert [x["name"] for x in factors] == ["FAC-OK"]
+    assert diag["requested"] == ["EV-OK", "FAC-OK", "MISSING", "BROKEN"]
+    assert diag["resolved"] == [
+        {"ref": "EV-OK", "kind": "card"},
+        {"ref": "FAC-OK", "kind": "factor"},
+    ]
+    assert diag["unresolved"] == ["MISSING", "BROKEN"]
+    assert [(e["ref"], e["stage"], e["error_type"]) for e in diag["errors"]] == [
+        ("BROKEN", "card", "OSError"),
+        ("BROKEN", "factor", "RuntimeError"),
+    ]
+    assert diag["status"] == "resolved_partial"
+
+
+def test_tick_forwards_allowlisted_fresh_quote_and_unresolved_ref_diagnostic(
+        tmp_path, monkeypatch):
+    """通过 fresh 门的 quote 以最小结构化证据进 decide;上游附加字段不泄漏。
+
+    策略宣言 ref 但 0 解析时不消耗前就崩掉(独立行情仍可研判),
+    但 payload 必须显式 ``unresolved_all``，不能冒充「未配置 refs」。
+    """
+    monkeypatch.setattr(watcher, "STATE_PATH", tmp_path / "watch.json")
+    watcher.save_state({"enabled": True, "daily_budget": 3, "counts": {}})
+    monkeypatch.setattr(watcher, "watching_codes", lambda: [{
+        "code": "300750", "strategy_id": "s_quote", "name": "短线",
+        "clock": {"decisionFreq": "hourly"}, "creed": "x", "w": 0,
+        "pa": False, "pa_method": "", "refs": ["GHOST-REF"],
+        "requested_evidence_tf": "5min", "effective_evidence_tf": "5min",
+        "decision_cadence": "60min", "thinking_mode": "fast",
+        "assignment_revision": 1,
+    }])
+    monkeypatch.setattr(watcher, "_lookup_card", lambda _rid: None)
+    monkeypatch.setattr(watcher, "_lookup_factor", lambda _rid: None)
+    monkeypatch.setattr(watcher, "_positions_for_payload", lambda: {})
+    monkeypatch.setattr(watcher, "_industry_for", lambda _code: "")
+    captured = []
+    quote = {
+        "fresh": True, "name": "宁德时代", "price": 364.71,
+        "open": 366.60, "high": 367.33, "low": 357.30,
+        "asof": "20260831144700", "volume": 851300.0,
+        "amount": 3081234.5, "turnover_rate": 0.55, "vol_ratio": 0.89,
+        "source": "fixture", "transport_secret": "must-not-pass",
+    }
+    out = watcher.tick(
+        now=datetime(2026, 8, 31, 14, 47),
+        decide_fn=lambda payload: captured.append(payload) or {"ok": True},
+        quote_fn=lambda _code: quote,
+        decisions_tail_fn=lambda _code: None,
+    )
+    assert out["judged"] == ["300750"]
+    # Keep the decision anchor at second precision: a quote from this same
+    # second is not misclassified as future evidence downstream.
+    assert captured[0]["date"] == "2026-08-31T14:47:00"
+    assert datetime.strptime(captured[0]["quote"]["asof"], "%Y%m%d%H%M%S") \
+        <= datetime.fromisoformat(captured[0]["date"])
+    assert captured[0]["quote"] == {
+        "price": 364.71, "open": 366.60, "high": 367.33, "low": 357.30,
+        "asof": "20260831144700", "volume": 851300.0, "amount": 3081234.5,
+        "turnover": 0.55, "vol_ratio": 0.89, "source": "fixture", "fresh": True,
+    }
+    assert "transport_secret" not in captured[0]["quote"]
+    assert captured[0]["ref_resolution"] == {
+        "requested": ["GHOST-REF"], "resolved": [],
+        "unresolved": ["GHOST-REF"], "errors": [], "status": "unresolved_all",
+    }
+    assert captured[0]["cards"] == [] and captured[0]["recipe_factors"] == []
+    assert watcher.load_state()["counts"]["2026-08-31"] == 1
+
+
+def test_production_tick_anchors_payload_after_quote_without_moving_tick_clock(
+        tmp_path, monkeypatch):
+    """生产 tick 的 payload 锚点在取 quote 后读取，避免 provider 延迟竞态。
+
+    预算日期、盘中门和节流仍使用 quote 前捕获的 tick 时钟；这里只验证
+    payload 的证据锚点不早于 quote.asof。显式 ``now`` 的回放路径见上一个
+    测试，保持固定不变。
+    """
+    monkeypatch.setattr(watcher, "STATE_PATH", tmp_path / "watch.json")
+    watcher.save_state({"enabled": True, "daily_budget": 3, "counts": {}})
+    monkeypatch.setattr(watcher, "_is_market_open", lambda _now: True)
+    monkeypatch.setattr(watcher, "watching_codes", lambda: [{
+        "code": "300750", "strategy_id": "s_anchor", "name": "短线",
+        "clock": {"decisionFreq": "hourly"}, "creed": "x", "w": 0,
+        "pa": False, "pa_method": "", "refs": [],
+        "requested_evidence_tf": "5min", "effective_evidence_tf": "5min",
+        "decision_cadence": "60min", "thinking_mode": "fast",
+        "assignment_revision": 1,
+    }])
+    monkeypatch.setattr(watcher, "orchestrated_codes", lambda: set())
+    monkeypatch.setattr(watcher, "_positions_for_payload", lambda: {})
+    monkeypatch.setattr(watcher, "_industry_for", lambda _code: "")
+    monkeypatch.setattr(watcher, "_hold_entry_for", lambda _code: None)
+
+    # The first read is the stable tick clock.  The quote provider completes
+    # just after that instant; the second read is the post-quote anchor.
+    clock = iter((datetime(2026, 8, 31, 14, 47, 0),
+                  datetime(2026, 8, 31, 14, 47, 1)))
+    monkeypatch.setattr(watcher, "_server_now", lambda: next(clock))
+    captured = []
+    quote = {"fresh": True, "asof": "20260831144701", "price": 364.71}
+    out = watcher.tick(
+        decide_fn=lambda payload: captured.append(payload) or {"ok": True},
+        quote_fn=lambda _code: quote,
+        decisions_tail_fn=lambda _code: None,
+    )
+
+    assert out["judged"] == ["300750"]
+    assert datetime.fromisoformat(captured[0]["date"]) >= datetime.strptime(
+        quote["asof"], "%Y%m%d%H%M%S")
+    assert watcher.load_state()["counts"]["2026-08-31"] == 1
+
+
+def test_quote_for_payload_requires_fresh_and_never_guesses_source():
+    assert watcher._quote_for_payload({"fresh": False, "price": 1}) is None
+    evidence = watcher._quote_for_payload({"fresh": True, "price": 1})
+    assert evidence is not None
+    assert evidence["source"] == ""
+    assert set(evidence) == {
+        "price", "open", "high", "low", "asof", "volume", "amount",
+        "turnover", "vol_ratio", "source", "fresh",
+    }
+
+
+def test_quote_production_keeps_full_minimal_market_snapshot(monkeypatch):
+    from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
+
+    raw = {
+        "name": "宁德时代", "price": 364.71, "open": 366.60,
+        "high": 367.33, "low": 357.30, "asof": "20260831144700",
+        "volume": 851300.0, "amount": 3081234.5,
+        "turnover_rate": 0.55, "vol_ratio": 0.89,
+    }
+    monkeypatch.setattr(TencentQuoteCollector, "fetch",
+                        lambda _self, _codes: {"SZ300750": raw})
+    monkeypatch.setattr(watcher, "_market_now",
+                        lambda: watcher._market_local(datetime(2026, 8, 31, 14, 47, 20)))
+    monkeypatch.setattr(watcher, "_calendar_dates", lambda: {date(2026, 8, 31)})
+    q = watcher._quote_production("300750")
+    assert q["fresh"] is True
+    assert {k: q[k] for k in (
+        "price", "open", "high", "low", "asof", "volume", "amount",
+        "turnover", "vol_ratio", "source",
+    )} == {
+        "price": 364.71, "open": 366.60, "high": 367.33, "low": 357.30,
+        "asof": "20260831144700", "volume": 851300.0, "amount": 3081234.5,
+        "turnover": 0.55, "vol_ratio": 0.89,
+        "source": "tencent_realtime_quote",
+    }
+
+
 class _FakeLLM:
     provider = "deepseek"
     model = "deepseek-chat"
@@ -146,9 +357,13 @@ class _FakeLLM:
 class _DayLoader:
     def fetch_quote(self, code, start, end, freq):
         import pandas as pd
-        ts = pd.date_range("2026-04-01", periods=80, freq="D")
-        return pd.DataFrame({"trade_date": ts, "open": 50.0, "high": 51.0, "low": 49.0,
-                             "close": [50 + i * 0.1 for i in range(80)], "vol": 1000.0})
+        ts = pd.date_range(end=str(end)[:10], periods=80, freq="B")
+        close = [50 + i * 0.1 for i in range(len(ts))]
+        return pd.DataFrame({
+            "trade_date": ts, "open": close,
+            "high": [x + 0.5 for x in close], "low": [x - 0.5 for x in close],
+            "close": close, "vol": 1000.0, "amount": [x * 1000 for x in close],
+        })
 
 
 def _patch_decide_deps(tmp_path, monkeypatch):
@@ -168,17 +383,10 @@ def test_decide_impl_persists_source(tmp_path, monkeypatch):
     seats_api = _patch_decide_deps(tmp_path, monkeypatch)
     res = asyncio.run(seats_api._decide_impl({
         "code": "SZ300750", "name": "宁德时代", "date": "2026-07-10",
-        "seat_cn": "动量 · 默认", "creed": "x", "mode": "fast", "source": "watcher",
-        "strategy_id": "s1", "requested_evidence_tf": "day",
-        "effective_evidence_tf": "day", "decision_cadence": "60min",
-        "assignment_revision": 7}))
+        "seat_cn": "动量 · 默认", "creed": "x", "mode": "fast", "source": "watcher"}))
     assert res["ok"] is True
     rec = json.loads((tmp_path / "dec.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert rec.get("kind") == "decide" and rec.get("source") == "watcher"
-    assert rec["requested_evidence_tf"] == rec["effective_evidence_tf"] == "day"
-    assert rec["data_asof"] == rec["asof"]
-    assert rec["strategy_id"] == "s1" and rec["decision_cadence"] == "60min"
-    assert rec["assignment_revision"] == 7
     res2 = asyncio.run(seats_api._decide_impl({
         "code": "SZ300750", "date": "2026-07-10", "mode": "fast"}))
     assert res2["ok"] is True

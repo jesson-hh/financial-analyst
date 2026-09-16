@@ -186,6 +186,11 @@ class FakePromptAssembler:
         return AssembledModelRequest(
             canonical_request_bytes=canonical, request_digest=digest, prompt_record=record)
 
+    def assemble_with_trusted_values(self, *, trusted_input_values, **kwargs):
+        request = self.assemble(**kwargs)
+        self.calls[-1]["trusted_values"] = dict(trusted_input_values)
+        return request
+
 
 class ScriptedGateway:
     """A scripted single-shot ``ModelGateway``: per-attempt rendered text, optional
@@ -508,6 +513,14 @@ def test_first_attempt_success_is_candidate_ready():
     assert rec.final_candidate_plan_digest == result.report.candidate_plan_digest
     # only one attempt was ever generated: unused attempts are never consumed.
     assert result._gateway._i == 1
+    trusted = result._assembler.calls[0]["trusted_values"]
+    assert trusted["goal"] == pieces.request.goal
+    assert trusted["worker_roster"]
+    assert any("distinct writes_slot" in rule
+               for rule in trusted["plan_shape_constraints"])
+    assert any("A-share six-digit" in rule
+               for rule in trusted["plan_shape_constraints"])
+    assert trusted["planner_output_template"]["sink_node_ids"] == ["unique-node-id"]
 
 
 def test_success_on_attempt_two_after_parse_rejected():
@@ -518,6 +531,34 @@ def test_success_on_attempt_two_after_parse_rejected():
     assert [a.outcome for a in rec.attempts] == ["parse_rejected", "draft_admissible"]
     assert rec.attempts[0].issue_codes  # non-empty parser codes
     assert rec.attempts[1].candidate_plan_digest == rec.final_candidate_plan_digest
+
+
+def test_empty_sink_is_shape_rejected_and_retried_instead_of_raising():
+    pieces = _build_pieces()
+    malformed = {**_valid_output_obj(), "sink_node_ids": []}
+    result = _run(pieces, outputs=[json.dumps(malformed), _valid_output()])
+    rec = result.record
+    assert rec.terminal_outcome == "candidate_ready"
+    assert [a.outcome for a in rec.attempts] == [
+        "shape_rejected", "draft_admissible",
+    ]
+    assert rec.attempts[0].issue_codes == (
+        "planner_empty_sink_node_ids", "planner_unreachable_node",
+    )
+
+
+def test_unreduced_multi_write_is_shape_rejected_and_retried():
+    pieces = _build_pieces()
+    malformed = _valid_output_obj()
+    malformed["nodes"][1]["writes_slot"] = "slot-sentiment"
+    result = _run(pieces, outputs=[json.dumps(malformed), _valid_output()])
+    rec = result.record
+    assert [a.outcome for a in rec.attempts] == [
+        "shape_rejected", "draft_admissible",
+    ]
+    assert rec.attempts[0].issue_codes == (
+        "planner_artifact_slot_mismatch", "planner_unreduced_multi_write",
+    )
 
 
 # =========================================================================== #

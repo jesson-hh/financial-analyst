@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import time
+import zipfile
 from contextlib import contextmanager
 
 import pytest
@@ -102,6 +104,164 @@ def test_bound_tool_publishes_opaque_media_artifact_and_persistent_metadata(tmp_
     metadata, data = MediaStore(store).load(payload["media_id"])
     assert data == _PNG and metadata["workspace_id"] == ws["id"]
     assert "source_path" not in metadata and "root_path" not in metadata
+    assert payload["media_id"] in result["content"]
+    assert "ww_telegram_publish" in result["content"]
+
+
+def test_load_for_session_requires_exact_durable_owner_but_allows_archive(tmp_path):
+    store = ConsoleStore(root=tmp_path / "console")
+    ws, owner_sid = _workspace(store, "600667")
+    other_sid = store.create_session("其他对话", workspace_id=ws["id"])["id"]
+    image = tmp_path / "console" / "workspace_files" / ws["id"] / "owned.png"
+    image.write_bytes(_PNG)
+    with _bound(store, owner_sid):
+        media_id = wt.workspace_publish_image_impl("owned.png")["media"]["media_id"]
+
+    media_store = MediaStore(store)
+    metadata, data = media_store.load_for_session(media_id, owner_sid)
+    assert metadata["session_id"] == owner_sid
+    assert data == _PNG
+    with pytest.raises(media.MediaNotFound):
+        media_store.load_for_session(media_id, other_sid)
+    with pytest.raises(media.MediaNotFound):
+        media_store.load_for_session(media_id, "")
+
+    # Archival blocks new Channel publication at Runtime's writable gate, but
+    # must not strand an image that was already placed in the durable Outbox.
+    store.set_archived(owner_sid, True)
+    assert media_store.load_for_session(media_id, owner_sid)[1] == _PNG
+
+
+def test_load_for_session_rejects_ownerless_legacy_metadata(tmp_path):
+    store = ConsoleStore(root=tmp_path / "console")
+    ws, sid = _workspace(store, "601318")
+    image = tmp_path / "console" / "workspace_files" / ws["id"] / "legacy.png"
+    image.write_bytes(_PNG)
+    with _bound(store, sid):
+        media_id = wt.workspace_publish_image_impl("legacy.png")["media"]["media_id"]
+
+    media_store = MediaStore(store)
+    metadata_path = media_store._metadata_path(media_id)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["session_id"] = ""
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False), encoding="utf-8",
+    )
+
+    # The ordinary historic image endpoint remains compatible, while the
+    # stronger outbound-channel ownership read fails closed.
+    assert media_store.load(media_id)[1] == _PNG
+    with pytest.raises(media.MediaNotFound):
+        media_store.load_for_session(media_id, sid)
+
+
+def test_document_publication_is_opaque_owned_and_download_only(tmp_path):
+    store = ConsoleStore(root=tmp_path / "console")
+    workspace, owner_sid = _workspace(store, "600667")
+    other_sid = store.create_session("其他对话", workspace_id=workspace["id"])["id"]
+    report = (
+        tmp_path / "console" / "workspace_files" / workspace["id"]
+        / "output" / "summary.csv"
+    )
+    report.parent.mkdir()
+    report.write_text("metric,value\nalpha,0.03\nbeta,1.12\n", encoding="utf-8")
+
+    with _bound(store, owner_sid):
+        result = wt.workspace_publish_document_impl(
+            "output/summary.csv", title="Alpha/Beta 统计",
+        )
+
+    assert result["ok"] is True
+    artifact = result["artifact"]
+    assert artifact["kind"] == "file_document"
+    payload = artifact["payload"]
+    assert set(payload) == {
+        "document_id", "name", "mime", "size", "title", "workspace_id",
+    }
+    assert media._DOCUMENT_ID_RE.fullmatch(payload["document_id"])
+    assert payload["name"] == "summary.csv"
+    assert payload["mime"] == "text/csv"
+    assert str(report) not in json.dumps(result, ensure_ascii=False)
+
+    media_store = MediaStore(store)
+    metadata, body = media_store.load_document_for_session(
+        payload["document_id"], owner_sid,
+    )
+    assert metadata["kind"] == "document" and body == report.read_bytes()
+    with pytest.raises(media.MediaNotFound):
+        media_store.load_document_for_session(payload["document_id"], other_sid)
+    with pytest.raises(media.MediaNotFound):
+        media_store.load_for_session(payload["document_id"], owner_sid)
+
+    response = _client(store).get(f"/console/media/{payload['document_id']}")
+    assert response.status_code == 200 and response.content == body
+    assert response.headers["content-type"].startswith("text/csv")
+    assert response.headers["content-disposition"].startswith(
+        "attachment; filename*=UTF-8''summary.csv"
+    )
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_document_validation_rejects_disguised_pdf_and_telegram_token(tmp_path):
+    store = ConsoleStore(root=tmp_path / "console")
+    workspace, sid = _workspace(store, "601318")
+    root = tmp_path / "console" / "workspace_files" / workspace["id"]
+    (root / "fake.pdf").write_text("not a pdf", encoding="utf-8")
+    (root / "secret.md").write_text(
+        "bot token: 123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+        encoding="utf-8",
+    )
+    (root / "formula.csv").write_text(
+        "metric,value\nalpha,=1+1\n", encoding="utf-8",
+    )
+    (root / "nan.json").write_text('{"alpha":NaN}', encoding="utf-8")
+
+    with _bound(store, sid):
+        fake = wt.workspace_publish_document_impl("fake.pdf")
+        secret = wt.workspace_publish_document_impl("secret.md")
+        formula = wt.workspace_publish_document_impl("formula.csv")
+        nan_json = wt.workspace_publish_document_impl("nan.json")
+
+    assert fake["ok"] is False and "PDF" in fake["content"]
+    assert secret["ok"] is False and "Telegram" in secret["content"]
+    assert formula["ok"] is False and "公式" in formula["content"]
+    assert nan_json["ok"] is False and "JSON" in nan_json["content"]
+    assert media.inspect_document(b"metric,value\nloss,-1.25\n", ".csv") == "text/csv"
+
+
+def test_active_pdf_and_office_relationships_or_formulas_are_rejected():
+    from pypdf import PdfWriter
+
+    pdf = io.BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.add_js("app.alert('no')")
+    writer.write(pdf)
+    with pytest.raises(media.MediaError, match="脚本|启动动作|嵌入"):
+        media.inspect_document(pdf.getvalue(), ".pdf")
+
+    xlsx = io.BytesIO()
+    with zipfile.ZipFile(xlsx, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("xl/workbook.xml", "<workbook/>")
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            '<worksheet><sheetData><c><f>1+1</f></c></sheetData></worksheet>',
+        )
+    with pytest.raises(media.MediaError, match="公式"):
+        media.inspect_document(xlsx.getvalue(), ".xlsx")
+
+    docx = io.BytesIO()
+    with zipfile.ZipFile(docx, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", "<document/>")
+        archive.writestr(
+            "word/_rels/document.xml.rels",
+            '<Relationships><Relationship TargetMode="External" '
+            'Target="https://example.invalid/template"/></Relationships>',
+        )
+    with pytest.raises(media.MediaError, match="外部关系|远程模板"):
+        media.inspect_document(docx.getvalue(), ".docx")
 
 
 def test_cross_workspace_traversal_non_image_mismatch_and_oversize_are_rejected(

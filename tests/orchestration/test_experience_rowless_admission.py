@@ -186,7 +186,8 @@ def dynamic_plan(env):
         catalog_digest=env["snapshot"].catalog_digest,
         schema_registry_digest=env["registry"].registry_digest,
         approval_policy=ApprovalPolicy.REQUIRED,
-        budget_request_tokens=2_000_000, budget_request_llm_invocations=2,
+        # Both LLM nodes reserve one primary plus one bounded schema repair.
+        budget_request_tokens=2_000_000, budget_request_llm_invocations=4,
         max_concurrency=2, stop_condition_refs=(), legacy_source_schema=None,
         legacy_source_config_digest=None, legacy_mapping_digest=None)
     return SimpleNamespace(request=request, draft=draft)

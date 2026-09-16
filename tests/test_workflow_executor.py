@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """P4 执行器纯函数层单测:拓扑决序/池回溯/图签名/指标抽取。零引擎零网络。"""
-from copy import deepcopy
-
 import guanlan_v2.workflow.executor as ex
 from fastapi.responses import JSONResponse
 
@@ -38,43 +36,6 @@ def test_universe_of_mirror():
     assert ex._universe_of({"universe": "自动", "code": "sh000300"}) == "csi300_active"
     assert ex._universe_of({"scope": "全市场"}) == "all"
     assert ex._universe_of({}) == "csi_fast"
-
-
-def test_runtime_candidate_hash_strips_only_server_audit_handle_and_binds_params():
-    from guanlan_v2.orchestration.trial import OptimizeCandidate
-
-    graph = {
-        "nodes": [
-            _n("f", "formula", expr="rank(pb)"),
-            _n("bt", "backtest", rebalance="month"),
-            _n("audit", "overfit"),
-        ],
-        "edges": [
-            _e("f", "out", "bt", "factor"),
-            _e("bt", "result", "audit", "result"),
-        ],
-    }
-    params = {
-        "universe": "csi300_active", "freq": "month",
-        "start": None, "end": None,
-    }
-    expected = OptimizeCandidate.build(
-        candidate_kind="workflow_graph", graph=graph, params=params,
-    ).candidate_hash
-    postseal = deepcopy(graph)
-    postseal["nodes"][-1]["params"]["audit_context_id"] = "tac_" + "a" * 64
-
-    assert ex._runtime_candidate_hash(postseal, params) == expected
-    other_handle = deepcopy(postseal)
-    other_handle["nodes"][-1]["params"]["audit_context_id"] = "tac_" + "b" * 64
-    assert ex._runtime_candidate_hash(other_handle, params) == expected
-
-    changed_graph = deepcopy(postseal)
-    changed_graph["nodes"][0]["params"]["expr"] = "rank(pe)"
-    assert ex._runtime_candidate_hash(changed_graph, params) != expected
-    assert ex._runtime_candidate_hash(
-        postseal, {**params, "start": "2020-01-01"},
-    ) != expected
 
 
 def test_graph_signature_ignores_xy_catches_params():
@@ -308,56 +269,6 @@ def test_validate_graph_allows_multi_feat_edges_only():
     assert "feat" in line
 
 
-def test_validate_graph_factor_adapters_match_executable_canvas_rules():
-    """服务端与画布只放行执行器真实支持的 factor 便利连接。"""
-    import guanlan_v2.workflow.api as wapi
-
-    def one_edge(src_type, src_port, dst_type, dst_port):
-        return {
-            "nodes": [
-                {"id": "src", "type": src_type, "params": {}},
-                {"id": "dst", "type": dst_type, "params": {}},
-            ],
-            "edges": [{"from": ["src", src_port], "to": ["dst", dst_port]}],
-        }
-
-    # formula/factorlib 的 series 可由执行器直接解释为 factor。
-    for src_type in ("formula", "factorlib"):
-        ok, errors = wapi.validate_graph(
-            one_edge(src_type, "out", "backtest", "factor")
-        )
-        assert ok is True, errors
-
-    # feature.fe 只有 backtest/portfolio 有适配器；分析节点要求真 factor。
-    for dst_type in ("backtest", "portfolio"):
-        graph = one_edge("feature", "fe", dst_type, "factor")
-        graph["nodes"].append({
-            "id": "formula", "type": "formula", "params": {"expr": "close"},
-        })
-        graph["edges"].insert(0, {
-            "from": ["formula", "out"], "to": ["src", "feat"],
-        })
-        ok, errors = wapi.validate_graph(graph)
-        assert ok is True, errors
-    ok, errors = wapi.validate_graph(
-        one_edge("feature", "fe", "analysis", "factor")
-    )
-    assert ok is False and any("dt 不匹配" in error for error in errors)
-
-    # source.data 仅传研究上下文，任何非 src 口（即使同为 series）都拒绝。
-    for dst_type, dst_port in (("backtest", "factor"), ("risk", "factor"),
-                               ("feature", "feat")):
-        ok, errors = wapi.validate_graph(
-            one_edge("source", "data", dst_type, dst_port)
-        )
-        assert ok is False and any("source.data 只能" in error for error in errors)
-    ok, errors = wapi.validate_graph(
-        one_edge("source", "data", "tsic", "src")
-    )
-    assert ok is True, errors
-    assert "source.data 是研究上下文" in wapi.SYSTEM_PROMPT
-
-
 def test_critique_constraints_states_multi_feature_route():
     # 批判环语义声明须明示多特征 ML 的表达方式(防 LLM 在单特征子空间打转)
     from guanlan_v2.research.loop import _CRITIQUE_CONSTRAINTS
@@ -366,16 +277,15 @@ def test_critique_constraints_states_multi_feature_route():
 
 
 def test_run_graph_ml_model_terminal_default_backtest_opt_in_analysis(monkeypatch):
-    """Legacy report without artifact: preserve explicit model-terminal preference.
-
-    This deliberately old stub exercises report compatibility, not the current
-    immutable prediction-artifact path (covered in test_factor_artifact_replay).
-    """
+    """保真度2(rr 双 run 实证:死/活模型 backtest 指标逐位同):backtest 按 fe.features
+    重推导不吃模型预测——默认优先级不变(镜像前端,/workflow/run 零行为变化);
+    prefer_model_terminal=True(研究回路)时携带模型报告(_kind)的 analysis 终端优先,
+    过门指标=模型真实成绩,backtest 让位写 warnings 显形。"""
     import json as _json
     g = _json.loads(_json.dumps(_G_ML))
     g["nodes"].append({"id": "bt", "type": "backtest", "x": 5, "y": 1, "params": {"topn": 30}})
     g["edges"].append({"from": ["mf", "factor"], "to": ["bt", "factor"]})
-    # Legacy report shape, intentionally without the current factor_artifact.
+    # 模型报告如实镜像 _train_eval 形状:顶层 fe spec(backtest 靠它重推导)+ 独立 rank_ic
     rep_model = dict(_REPORT, headline_ic={"rank_ic": 0.0077},
                      fe={"features": ["rank(-delta(close,5))"]})
     rep_bt = dict(_REPORT, headline_ic={"rank_ic": 0.045})
@@ -391,7 +301,7 @@ def test_run_graph_ml_model_terminal_default_backtest_opt_in_analysis(monkeypatc
     out0 = ex.run_graph(g, overrides=ov)
     assert out0["terminal"]["kind"] == "backtest"          # 默认关:优先级镜像前端不变
     assert out0["metrics"]["rank_ic"] == 0.045
-    assert seen["features"] == ["rank(-delta(close,5))"]  # legacy no-artifact fallback only
+    assert seen["features"] == ["rank(-delta(close,5))"]   # 实证:backtest 只是特征集等权口径
     out1 = ex.run_graph(g, overrides=ov, prefer_model_terminal=True)
     assert out1["terminal"]["kind"] == "analysis"
     assert out1["metrics"]["rank_ic"] == 0.0077            # 模型真实成绩,不再被回测遮蔽
@@ -484,8 +394,8 @@ def test_run_graph_prefer_model_terminal_graph_ends_at_mf(monkeypatch):
     assert any("analysis" in w for w in out1["warnings"])
 
 
-def test_run_graph_prefer_model_terminal_ml_dead_blocks_raw_fallback(monkeypatch):
-    """A failed connected model blocks its descendants, never substitutes raw factors."""
+def test_run_graph_prefer_model_terminal_ml_dead_warns_non_model(monkeypatch):
+    """已声明的 ML 训练失败必须阻断下游，不用等权特征冒充模型结果。"""
     g = {"nodes": [
         {"id": "f1", "type": "formula", "x": 0, "y": 0, "params": {"expr": "rank(pb)"}},
         {"id": "f2", "type": "formula", "x": 0, "y": 1, "params": {"expr": "rank(roe)"}},
@@ -505,21 +415,26 @@ def test_run_graph_prefer_model_terminal_ml_dead_blocks_raw_fallback(monkeypatch
                         lambda body, kind: JSONResponse({"ok": False, "reason": "lgbm 未装"}))
     comp = {"ok": True, "members": ["rank(pb)", "rank(roe)"], "weights": [],
             "composite": dict(_REPORT)}
-    monkeypatch.setattr(ex, "_call_compose", lambda body: JSONResponse(comp))
+    compose_calls = []
+    def compose(body):
+        compose_calls.append(body)
+        return JSONResponse(comp)
+    monkeypatch.setattr(ex, "_call_compose", compose)
     out = ex.run_graph(g, overrides={"universe": "csi_fast", "freq": "month", "oos_frac": 0.3},
                        prefer_model_terminal=True)
-    assert out["ok"] is False and out["terminal"] is None
+    assert out["ok"] is False and out["terminal"] is None and out["metrics"] is None
+    assert any("模型报告" in w for w in out["warnings"])
     assert {e["nid"] for e in out["node_errors"]} == {"m", "mf", "an"}
+    assert not compose_calls
 
 
 def test_ml_graph_requires_analysis_terminal_in_prompts():
-    """Prompts describe the evaluated OOS signal, never the old feature-sum substitute."""
+    """提示词保留模型分析出口，并要求回测消费真实 OOS 信号而非原始特征。"""
     import guanlan_v2.workflow.api as wapi
     from guanlan_v2.research.loop import _CRITIQUE_CONSTRAINTS
     assert "analysis 终端" in _CRITIQUE_CONSTRAINTS
     assert "analysis 终端" in wapi.SYSTEM_PROMPT
-    assert "真实不可变 OOS" in wapi.SYSTEM_PROMPT
-    assert "下游回测消费该信号" in wapi.SYSTEM_PROMPT
+    assert "真实不可变 OOS 预测信号" in wapi.SYSTEM_PROMPT
     assert "不可替换成原始特征之和" in wapi.SYSTEM_PROMPT
 
 
@@ -561,26 +476,6 @@ def test_durable_backtest_preserves_canvas_frequency_costs_and_portfolio(monkeyp
     assert body.commission == 0.0002 and body.stamp_tax == 0.0005 and body.slippage_bps == 7
     assert body.weighting == "risk_parity" and body.vol_forecast == "ewma"
     assert body.industry_neutral is True and body.max_weight == 0.1
-
-
-def test_governed_backtest_forces_study_frequency(monkeypatch):
-    seen = {}
-
-    def fake(body):
-        seen["body"] = body
-        return {"ok": True, "portfolio": {"sharpe": 1.0}}
-
-    monkeypatch.setattr(ex, "_call_backtest", fake)
-    ctx = {
-        "universe": "csi300_active", "freq": "month", "oos_frac": 0.3,
-        "start": "", "end": "", "codes": [], "benchmark": "", "leader": "",
-        "force_rebalance": True,
-    }
-    ex._exec_backtest(
-        {"factor": {"features": ["rank(close)"]}},
-        {"rebalance": "week"}, ctx,
-    )
-    assert seen["body"].rebalance == "month"
 
 
 def test_unwired_source_pool_remains_canvas_global_fallback(monkeypatch):

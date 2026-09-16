@@ -150,6 +150,38 @@ _PRE_V4_PHASE9_REGISTRY_DIGEST = (
     "9e73ddf6d23def5a5666016b1ab113e7b9920eb940ff22a0dd73d806efd3ac07"
 )
 
+#: The minimal side registry used by the first production deep-run subject
+#: commits (``RunSubject@1`` only).  Durable rows at ``var/orchestration``
+#: already declare this exact digest, so it is a replay identity, not a
+#: migration target.  New deep runs use the timeframe-bound ``RunSubject@2``
+#: registry; both identities must remain resolvable across a restart.
+_LEGACY_RUN_SUBJECT_V1_REGISTRY_DIGEST = (
+    "cae973b48096a0deb51c1d32b8fcaadb6748056a15eed41b9939193e77fa5d3f"
+)
+
+
+def _build_legacy_run_subject_v1_registry():
+    """Rebuild the exact read-compatible registry for historical subjects.
+
+    This is deliberately a one-model sealed registry.  It does not alias the
+    old digest to the current ``RunSubject@2`` schema and it never rewrites an
+    existing payload.  The digest assertion makes a future change to the @1
+    model fail startup closed instead of silently reinterpreting durable bytes.
+    """
+    from guanlan_v2.orchestration.pipeline.contracts import RunSubject
+    from guanlan_v2.orchestration.schema_registry import SchemaRegistry
+
+    registry = SchemaRegistry()
+    registry.register(RunSubject)
+    registry.seal()
+    if registry.registry_digest != _LEGACY_RUN_SUBJECT_V1_REGISTRY_DIGEST:
+        raise RuntimeError(
+            "legacy RunSubject@1 registry recipe drifted: "
+            f"expected {_LEGACY_RUN_SUBJECT_V1_REGISTRY_DIGEST}, "
+            f"got {registry.registry_digest}"
+        )
+    return registry
+
 
 def _build_pre_v4_phase9_registry():
     """Rebuild the Phase-9 registry used by durable rows written before V4.
@@ -271,7 +303,8 @@ def _build_pre_v4_phase9_registry():
 
 def build_production_resolver():
     """The production schema-registry resolver: Phase-1 + Phase-2 + Phase-9 cumulative
-    + the two Phase-10 pipeline side registries.
+    + the two current Phase-10 pipeline side registries, plus sealed compatibility
+    readers for durable history.
 
     Returns ``(resolver, (phase1_digest, phase2_digest, phase9_digest,
     subject_digest, pipeline_digest))``. The Phase-9 registry is the *cumulative*
@@ -281,19 +314,17 @@ def build_production_resolver():
     comes from the chain's own ``PHASE9_BASE_REGISTRY_DIGEST`` — never a hardcoded
     digest, so a chain reseal can never leave a stale pin here.
 
-    The side registries (2026-07-31 restart wedge). ``RunSubject@1`` /
-    ``CandidateSlate@1`` are not in the cumulative chain yet, so the pipeline
-    commits them under two sealed *side* registries
-    (``live_decide._subject_registry`` — RunSubject; ``api._pipeline_registry`` —
-    RunSubject + CandidateSlate), registered into the LIVE process's resolver at
-    run time. That kept the committing process alive — and wedged every FRESH
+    The side registries (2026-07-31 restart wedge). Pipeline-only subjects/slates
+    were not in the cumulative chain, so the pipeline committed them under sealed
+    *side* registries registered into the LIVE process's resolver at run time.
+    That kept the committing process alive — and wedged every FRESH
     process: the startup fold re-reads the durable rows, finds a registry digest
     this resolver did not hold, and refuses the ENTIRE store as
     ``DurableStoreCorrupt`` (state=corrupt, deep lane dead process-wide). The one
-    honest fix is additive: hold both side registries HERE, at the single startup
-    call site. The recipes are imported from their owning modules — never rebuilt
-    — so the sealed digests (content-derived; ``cae973b4…`` already declared by
-    on-disk production rows) cannot fork. The imports stay lazy: ``pipeline.api``
+    honest fix is additive: hold both current side registries HERE and retain the
+    exact one-model ``RunSubject@1`` reader for rows written before deep subjects
+    moved to ``RunSubject@2``. No digest is aliased and no old row is rewritten.
+    The imports stay lazy: ``pipeline.api``
     pulls FastAPI at module level, and this function only runs inside
     ``bind_orchestration_stores``'s guard. Drift guard:
     ``tests/orchestration/test_startup_binding.py`` pins both digests and scans
@@ -311,8 +342,9 @@ def build_production_resolver():
     d1 = resolver.register(phase1)
     d2 = resolver.register(phase2_runtime_registry(phase1.registry_digest))
     # Backward compatibility is additive: old durable rows retain their exact
-    # registry identity; new writes use the V4-aware cumulative registry below.
+    # registry identities; new writes use the current cumulative/@2 registries.
     resolver.register(_build_pre_v4_phase9_registry())
+    resolver.register(_build_legacy_run_subject_v1_registry())
     d9 = resolver.register(chain.build_phase9_registry(chain.PHASE9_BASE_REGISTRY_DIGEST))
     ds = resolver.register(_subject_registry())
     dp = resolver.register(_pipeline_registry())
@@ -484,9 +516,47 @@ _LAUNCHER_STATUS: dict[str, Any] = {
 
 
 def orchestration_launcher_status() -> dict[str, Any]:
-    """A defensive copy of this process's launcher-binding record."""
+    """A defensive, whole-launcher view over adapter and pipeline bindings.
+
+    The original R3 switch owns the replay/adapters router.  The Phase-10 pipeline
+    has a separate production binding chain, so reporting only R3 made a healthy
+    executable pipeline look "disabled" and made a read-only replay bind look like
+    the entire orchestrator was executable.  The additive fields below are sampled
+    live and never turn a missing dependency into success.
+    """
     record = dict(_LAUNCHER_STATUS)
     record["notes"] = list(record["notes"])
+    try:
+        from guanlan_v2.orchestration.pipeline.api import process_pipeline_router_deps
+
+        deps = process_pipeline_router_deps()
+        core_names = (
+            "stores", "preset_registry", "catalog", "schema_registry", "clock",
+            "latest_snapshot_fn", "admission_factory", "coordinator_factory",
+            "request_store",
+        )
+        pipeline_core = all(getattr(deps, name, None) is not None for name in core_names)
+        planner_ready = pipeline_core and callable(getattr(deps, "planner_runner", None))
+        executor_ready = pipeline_core and callable(
+            getattr(deps, "plan_runner_factory", None)
+        )
+        surface = getattr(deps, "approval_surface", None)
+        approval_ready = bool(surface is not None and getattr(surface, "available", False))
+    except Exception:  # noqa: BLE001 — a health projection never breaks the probe
+        pipeline_core = planner_ready = executor_ready = approval_ready = False
+    record.update({
+        "adapters_router_bound": record.get("state") == "bound",
+        "pipeline_bound": pipeline_core,
+        "dynamic_planner_ready": planner_ready,
+        "plan_executor_ready": executor_ready,
+        "approval_surface_ready": approval_ready,
+        "pipeline_execution_ready": bool(
+            pipeline_core and planner_ready and executor_ready and approval_ready
+        ),
+        "replay_execution_ready": bool(
+            record.get("replay_bindings") and record.get("shadow_wakeup_context")
+        ),
+    })
     return record
 
 

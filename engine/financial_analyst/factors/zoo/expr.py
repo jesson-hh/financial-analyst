@@ -83,6 +83,24 @@ def validate_expr(expr: str) -> None:
         )
 
 
+def validate_persistable_expr(expr: str) -> None:
+    """校验可持久化的 zoo-DSL 表达式。
+
+    ``validate_expr`` 保留了旧评测链的兼容性，而将表达式存为可稍后发布/
+    执行的草稿需要更严格的边界：禁止属性访问（例如 ``close.to_csv``），且函数调用
+    只能直接指向已登记的 DSL 算子。这样字段值仍可正常参与算术/比较，
+    但 pandas 对象的方法不会成为延迟执行的写盘原语。
+    """
+    validate_expr(expr)
+    tree = _ast.parse(str(expr), mode="eval")
+    if any(isinstance(node, _ast.Attribute) for node in _ast.walk(tree)):
+        raise ValueError("可持久化因子表达式不允许属性/方法访问")
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Call):
+            if not isinstance(node.func, _ast.Name) or node.func.id not in _OP_NAMES:
+                raise ValueError("可持久化因子表达式只允许调用白名单 DSL 算子")
+
+
 def compile_factor(expr: str):
     """Build a PanelData->Series compute function from a whitelisted expression.
 

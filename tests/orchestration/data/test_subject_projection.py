@@ -137,11 +137,18 @@ class TestSubjectParamsProject:
             code="600519", as_of=datetime(2026, 7, 31, 15, 0, tzinfo=cst))
         assert sp.asof_value == datetime(2026, 7, 31, 7, 0, tzinfo=UTC).isoformat()
 
-    def test_document_is_the_closed_two_key_shape(self):
+    def test_document_is_the_closed_evidence_bound_shape(self):
         sp = _subject()
         doc = sp.as_document()
-        assert doc == {"asof_date": sp.asof_value, "code": sp.code_value}
-        assert sorted(doc) == ["asof_date", "code"]  # exactly two keys, closed
+        assert doc == {
+            "asof_date": sp.asof_value,
+            "code": sp.code_value,
+            "evidence_tf": "day",
+            "symbol": normalize_symbol("600519"),
+            "window_start": sp.window_start_value,
+        }
+        assert sorted(doc) == [
+            "asof_date", "code", "evidence_tf", "symbol", "window_start"]
 
     def test_the_carrier_is_frozen(self):
         sp = _subject()
@@ -172,8 +179,14 @@ class TestSubjectParamsProject:
         with pytest.raises(RT.DataRuntimeError):
             RT.SubjectParams.project(code="600519", as_of="2026-07-31T07:00:00+00:00")
 
+    def test_refuses_an_unknown_evidence_timeframe(self):
+        with pytest.raises(RT.DataRuntimeError, match="evidence_tf"):
+            RT.SubjectParams.project(
+                code="600519", as_of=_AS_OF, evidence_tf="15min")
+
     def test_the_pointer_set_is_closed(self):
-        assert RT.SUBJECT_PARAM_POINTERS == frozenset({"/asof_date", "/code"})
+        assert RT.SUBJECT_PARAM_POINTERS == frozenset({
+            "/asof_date", "/code", "/evidence_tf", "/symbol", "/window_start"})
 
 
 # --------------------------------------------------------------------------- #

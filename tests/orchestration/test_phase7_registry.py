@@ -63,7 +63,7 @@ UPSTREAM_GOLDEN_SHA256 = {
     "phase6_schema_manifest_v1.json":
         "3f6e3116007d62897f31e6646a12a3c1afe8845d866f1e9482aa15ec47ea9eb9",
     "phase6_catalog_manifest_v1.json":
-        "bae24f5788adf29921012c9efc3ec1bbf9ec7fe7120efadde8583b674beaab91",
+        "feb332c3d6e73a04ddd0c47e8ad9a7928413ff5a90fdc53a470fc3457f64a7c8",
 }
 
 #: the five Phase-7 contract modules the completeness firewall governs.

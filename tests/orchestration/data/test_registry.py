@@ -66,6 +66,7 @@ from guanlan_v2.orchestration.data.source import (
 from guanlan_v2.orchestration.digest import content_digest
 from guanlan_v2.orchestration.enums import DataBackend, DataMode, DataStatus
 from guanlan_v2.orchestration.refs import (
+    CapabilityRef,
     ContentRef,
     PayloadRef,
     SchemaRef,
@@ -135,12 +136,23 @@ _BACKUP = "backup.vendor"
 _HANDLER = ContentRef(id="data.source.handler", version="1", content_digest="a" * 64)
 
 
-def _descriptor(source_id: str, surface) -> DataSourceDescriptor:
+def _descriptor(
+    source_id: str,
+    surface,
+    *,
+    method_refs=None,
+    method_capability_refs=None,
+) -> DataSourceDescriptor:
+    if method_refs is None:
+        method_refs = tuple(s.method_ref for s in surface.method_specs)
+    if method_capability_refs is None:
+        method_capability_refs = tuple(
+            sorted(surface.capability_refs.values(), key=lambda c: (c.id, c.version))
+        )
     return DataSourceDescriptor.build(
         source_id=source_id, source_version="1",
-        method_refs=tuple(s.method_ref for s in surface.method_specs),
-        method_capability_refs=tuple(
-            sorted(surface.capability_refs.values(), key=lambda c: (c.id, c.version))),
+        method_refs=tuple(method_refs),
+        method_capability_refs=tuple(method_capability_refs),
         supported_modes=(DataMode.ONLINE, DataMode.PIT_REPLAY),
         supported_backends=(DataBackend.CACHE, DataBackend.LIVE, DataBackend.PIT_STORE),
         handler_ref=_HANDLER,
@@ -476,6 +488,129 @@ def test_unknown_route_source_is_a_freeze_time_error():
         route_policy_ref=ContentRef(id="policy.route.default", version="1",
                                     content_digest="d" * 64)))
     with pytest.raises(RoutingConfigurationError):
+        reg.seal()
+
+
+def test_unknown_route_method_is_a_freeze_time_error():
+    surface = phase3_data_surface()
+    spec = surface.spec_by_method["ohlcv"]
+    desc = _descriptor(_PRIMARY, surface)
+    reg = DataSourceRegistry(registry_version="v")
+    reg.register_method(spec).register_descriptor(desc)
+    reg.register_route(ResolvedMethodRoute(
+        method_ref=ContentRef(
+            id="ghost_method", version="1", content_digest="9" * 64),
+        entries=(RouteEntry(
+            source_ref=_source_ref(desc), capability_ref=spec.capability_ref),),
+        route_policy_ref=ContentRef(id="policy.route.default", version="1",
+                                    content_digest="d" * 64)))
+
+    with pytest.raises(RoutingConfigurationError, match="is not a registered method"):
+        reg.seal()
+
+
+def test_route_method_ref_must_exactly_match_registered_spec():
+    surface = phase3_data_surface()
+    spec = surface.spec_by_method["ohlcv"]
+    desc = _descriptor(_PRIMARY, surface)
+    reg = DataSourceRegistry(registry_version="v")
+    reg.register_method(spec).register_descriptor(desc)
+    reg.register_route(ResolvedMethodRoute(
+        method_ref=ContentRef(
+            id=spec.method_id, version=spec.method_version, content_digest="0" * 64),
+        entries=(RouteEntry(
+            source_ref=_source_ref(desc), capability_ref=spec.capability_ref),),
+        route_policy_ref=ContentRef(id="policy.route.default", version="1",
+                                    content_digest="d" * 64)))
+
+    with pytest.raises(RoutingConfigurationError, match="method ref.*exactly match"):
+        reg.seal()
+
+
+def test_route_source_ref_must_exactly_match_registered_descriptor():
+    surface = phase3_data_surface()
+    spec = surface.spec_by_method["ohlcv"]
+    desc = _descriptor(_PRIMARY, surface)
+    reg = DataSourceRegistry(registry_version="v")
+    reg.register_method(spec).register_descriptor(desc)
+    reg.register_route(ResolvedMethodRoute(
+        method_ref=spec.method_ref,
+        entries=(RouteEntry(
+            source_ref=ContentRef(
+                id=desc.source_id, version=desc.source_version,
+                content_digest="0" * 64),
+            capability_ref=spec.capability_ref),),
+        route_policy_ref=ContentRef(id="policy.route.default", version="1",
+                                    content_digest="d" * 64)))
+
+    with pytest.raises(RoutingConfigurationError, match="source ref.*exactly match"):
+        reg.seal()
+
+
+def test_route_entry_capability_must_equal_registered_method_capability():
+    surface = phase3_data_surface()
+    spec = surface.spec_by_method["ohlcv"]
+    desc = _descriptor(_PRIMARY, surface)
+    wrong_capability = CapabilityRef(
+        id=spec.capability_ref.id,
+        version=spec.capability_ref.version,
+        content_digest="0" * 64,
+    )
+    reg = DataSourceRegistry(registry_version="v")
+    reg.register_method(spec).register_descriptor(desc)
+    reg.register_route(ResolvedMethodRoute(
+        method_ref=spec.method_ref,
+        entries=(RouteEntry(
+            source_ref=_source_ref(desc), capability_ref=wrong_capability),),
+        route_policy_ref=ContentRef(id="policy.route.default", version="1",
+                                    content_digest="d" * 64)))
+
+    with pytest.raises(RoutingConfigurationError, match="registered method capability"):
+        reg.seal()
+
+
+def test_route_source_descriptor_must_declare_exact_method_ref():
+    surface = phase3_data_surface()
+    spec = surface.spec_by_method["ohlcv"]
+    desc = _descriptor(
+        _PRIMARY,
+        surface,
+        method_refs=tuple(s.method_ref for s in surface.method_specs if s != spec),
+    )
+    reg = DataSourceRegistry(registry_version="v")
+    reg.register_method(spec).register_descriptor(desc)
+    reg.register_route(ResolvedMethodRoute(
+        method_ref=spec.method_ref,
+        entries=(RouteEntry(
+            source_ref=_source_ref(desc), capability_ref=spec.capability_ref),),
+        route_policy_ref=ContentRef(id="policy.route.default", version="1",
+                                    content_digest="d" * 64)))
+
+    with pytest.raises(RoutingConfigurationError, match="does not declare the exact method ref"):
+        reg.seal()
+
+
+def test_route_source_descriptor_must_declare_method_capability():
+    surface = phase3_data_surface()
+    spec = surface.spec_by_method["ohlcv"]
+    desc = _descriptor(
+        _PRIMARY,
+        surface,
+        method_capability_refs=tuple(
+            cap for cap in surface.capability_refs.values()
+            if cap != spec.capability_ref
+        ),
+    )
+    reg = DataSourceRegistry(registry_version="v")
+    reg.register_method(spec).register_descriptor(desc)
+    reg.register_route(ResolvedMethodRoute(
+        method_ref=spec.method_ref,
+        entries=(RouteEntry(
+            source_ref=_source_ref(desc), capability_ref=spec.capability_ref),),
+        route_policy_ref=ContentRef(id="policy.route.default", version="1",
+                                    content_digest="d" * 64)))
+
+    with pytest.raises(RoutingConfigurationError, match="does not declare the capability"):
         reg.seal()
 
 

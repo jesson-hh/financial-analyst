@@ -17,7 +17,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from financial_analyst.data.net import rate_limited
-from financial_analyst.data.code_norm import etf_exchange
+from financial_analyst.data.code_norm import etf_exchange, is_bj_code
 
 _TENCENT_BASE = "http://qt.gtimg.cn/q="
 
@@ -40,7 +40,7 @@ def _to_tencent(code: str) -> str:
             return "sh" + c
         if c[0] in "03":
             return "sz" + c
-        if c[0] in "84":
+        if is_bj_code(c):
             return "bj" + c
     return c.lower()
 

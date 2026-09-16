@@ -7,10 +7,14 @@ snapshot=true 的行是「正式选股」(P1 收益跟踪只认它们);其余为
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
-PICKS_PATH = Path(__file__).resolve().parents[2] / "var" / "screen_picks.jsonl"
+_SCREEN_ROOT = Path(os.environ.get("GUANLAN_SCREEN_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var"
+))
+PICKS_PATH = _SCREEN_ROOT / "screen_picks.jsonl"
 
 
 def append_pick(record: Dict[str, Any]) -> bool:

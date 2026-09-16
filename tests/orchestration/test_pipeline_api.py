@@ -27,6 +27,8 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import dataclasses
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,7 +58,11 @@ from guanlan_v2.orchestration.catalog_runtime import (
     InMemoryMaterialSource,
 )
 from guanlan_v2.orchestration.digest import content_digest
-from guanlan_v2.orchestration.enums import PlanSource, ToolCallRequirement
+from guanlan_v2.orchestration.enums import (
+    ApprovalDecision,
+    PlanSource,
+    ToolCallRequirement,
+)
 from guanlan_v2.orchestration.eventstore import (
     RuntimeStores,
     SchemaRegistryResolver,
@@ -90,6 +96,7 @@ from guanlan_v2.orchestration.pipeline.deep_decide import (
     DEEP_DECIDE_WORKER_IDS,
     REDUCED_DEEP_DECIDE_PRESET_ID,
     REDUCED_EVIDENCE_BADGE,
+    DeepRunSubject,
     materialize_deep_decide_draft,
 )
 from guanlan_v2.orchestration.pipeline.screening import (
@@ -100,6 +107,7 @@ from guanlan_v2.orchestration.pipeline.screening import (
 
 from guanlan_v2.orchestration.pipeline import api as api_mod
 from guanlan_v2.orchestration.pipeline import screening_driver
+from guanlan_v2.orchestration.pipeline.approval_driver import PipelineApprovalSurface
 from guanlan_v2.orchestration.pipeline.api import (
     PIPELINE_ROUTER_PREFIX,
     PIPELINE_ROUTE_PATHS,
@@ -180,7 +188,7 @@ class _EmptyRankingReader:
 
 def _mint_subject_ref(subject: RunSubject) -> TypedPayloadRef:
     return TypedPayloadRef(
-        schema_ref=SchemaRef(name="RunSubject", version="1"),
+        schema_ref=SchemaRef(name="RunSubject", version=subject.schema_version),
         payload_ref=PayloadRef(
             namespace="main", object_id=f"subject-{subject.code}",
             content_digest=subject.semantic_digest()))
@@ -211,7 +219,8 @@ class _FakePlanner:
             return SimpleNamespace(
                 record=SimpleNamespace(terminal_outcome=self._outcome),
                 record_ref=None, draft=None, report=None)
-        subject = RunSubject(code="600519", as_of=NOW)
+        subject = DeepRunSubject(
+            code="600519", as_of=NOW, evidence_tf="day")
         materialized = materialize_deep_decide_draft(
             request=request,
             preset_registry=load_phase10_preset_registry(PRODUCTION_PRESETS_DIR),
@@ -223,7 +232,7 @@ class _FakePlanner:
             else self._env["snapshot"],
             schema_registry=self._env["registry"],
             draft_id=draft_id,
-            run_id=run_id)
+            run_id=run_id, subject=subject)
         draft = materialized.draft.model_copy(update={"source": PlanSource.DYNAMIC})
         digest = compute_candidate_plan_digest(
             request=request, draft=draft,
@@ -313,7 +322,8 @@ class _ApiEnv:
 
 def _make_env(env, trimmed_catalog, tmp_path, *,
               profile=STATIC_RUNTIME_PROFILE_V2, reader=None, planner=None,
-              snapshot_fn=..., clock=None, **overrides) -> _ApiEnv:
+              snapshot_fn=..., refresh_snapshot_fn=..., clock=None,
+              **overrides) -> _ApiEnv:
     """A full injected-deps environment: REAL admission + REAL coordinator over
     the trimmed catalog, in-memory RuntimeStores, tmp journal + tmp request store
     + tmp TA inbox (invariant 4's test half: tmp/in-memory injection)."""
@@ -360,6 +370,9 @@ def _make_env(env, trimmed_catalog, tmp_path, *,
         subject_committer=build_stores_subject_committer(stores),
         latest_snapshot_fn=(
             (lambda: (context, ctx_ref)) if snapshot_fn is ... else snapshot_fn),
+        refresh_snapshot_fn=(
+            (lambda **_kwargs: (context, ctx_ref))
+            if refresh_snapshot_fn is ... else refresh_snapshot_fn),
         admission_factory=admission_factory,
         coordinator_factory=coordinator_factory,
         planner_runner=planner,
@@ -417,6 +430,8 @@ class TestRouteTable:
         source = Path("guanlan_v2/server.py").read_text(encoding="utf-8")
         assert "build_pipeline_router" in source
         assert "pipeline router skipped" in source
+        assert "process_pipeline_approval_surface" in source
+        assert '_console_kw["plan_admit"]' in source
         # lazy import INSIDE the guarded block, the D8 idiom.
         mount = source.index("build_pipeline_router")
         guard = source.rindex("try:", 0, mount)
@@ -639,9 +654,21 @@ class TestStartPreset:
         assert body["mode"] == "preset"
         assert re.fullmatch(r"[0-9a-f]{64}", body["candidate_plan_digest"])
         assert body["outcome"] == "pending_human"
-        assert body["cost_preview"]["budget_request_llm_invocations"] == 8
+        # Eight primary LLM nodes run on the clean path. Technical/News each
+        # reserve one extra explicit cycle; every cycle may schema-resample once.
+        assert body["cost_preview"]["budget_request_llm_invocations"] == 20
+        assert body["cost_preview"]["budget_request_tokens"] == 851_968
         assert body["cost_preview"]["n_plans"] == 1
         assert "subject_run_scoped_v1" in body["badges"]
+        # The committed subject is pinned to the run-scoped context cutoff
+        # (15:00 +08 here), not the old session-midnight seed.
+        recovery = e.deps.request_store.get(body["request_id"])[
+            "execution_recovery"]
+        assert datetime.fromisoformat(
+            recovery["subject"]["as_of"].replace("Z", "+00:00")) == NOW
+        assert datetime.fromisoformat(
+            recovery["context"]["data_context"]["as_of"].replace(
+                "Z", "+00:00")) == NOW
         # the ONE pending card carries TRUE preset provenance.
         assert _journal_kinds(e.journal) == ["pending"]
         reader = PlanApprovalCoordinator(
@@ -653,6 +680,119 @@ class TestStartPreset:
         # no freeze, no execution.
         assert [ev for ev in e.stores.events.journal(body["run_id"], "main")
                 if ev.event_type is EventType.PLAN_FROZEN] == []
+
+    def test_human_approval_reaches_the_owning_admission_and_runner_once(
+            self, env, trimmed_catalog, tmp_path):
+        """The start door still stops, but the later console decision now runs.
+
+        The fake runner performs only the launcher's freeze half; the production
+        binding supplies the real DAG executor through this exact factory seam.
+        """
+        calls = []
+        surface = PipelineApprovalSurface(clock=_FixedClock())
+
+        def runner_factory(*, admission, lane_bindings, run_context_factory,
+                           request_id, prompt_assembler, subject_params=None):
+            def run(*, lane, point, approval, data_context, memory_binding,
+                    candidate_plan_digest):
+                binding = lane_bindings["main"]
+                plan, _witness = admission.freeze_and_admit_candidate(
+                    candidate_plan_digest,
+                    reservation_id=binding.reservation_id,
+                    approval_event_id=binding.approval_event_id,
+                    idempotency_key=f"test-freeze:{request_id}")
+                run_context = run_context_factory(
+                    lane=lane, point=point, plan=plan,
+                    data_context=data_context, memory_binding=memory_binding)
+                calls.append({
+                    "digest": candidate_plan_digest,
+                    "run_id": run_context.run_id,
+                    "subject_params": subject_params,
+                    "assembler": prompt_assembler,
+                })
+                return {"artifact": "typed-sink"}
+            return run
+
+        e = _make_env(
+            env, trimmed_catalog, tmp_path,
+            approval_surface=surface, plan_runner_factory=runner_factory)
+        body = _client(e.deps).post(f"{API}/start", json={
+            "preset_id": DEEP_DECIDE_PRESET_ID, "code": "600519"}).json()
+
+        card = surface.list_pending()[0]
+        approval, event = surface.decide(
+            request_id=card.request_id,
+            candidate_plan_digest=card.candidate_plan_digest,
+            decision=ApprovalDecision.APPROVED,
+            actor=GOOD_CRED, reason="reviewed",
+            idempotency_key="human-decision:1")
+        first = surface.admit_and_run(approval, event)
+        replay = surface.admit_and_run(approval, event)
+
+        assert first["status"] == "completed" and first["replayed"] is False
+        assert replay["status"] == "completed" and replay["replayed"] is True
+        assert len(calls) == 1
+        assert calls[0]["digest"] == body["candidate_plan_digest"]
+        assert calls[0]["run_id"] == body["run_id"]
+        assert calls[0]["subject_params"].symbol_value.code == "600519"
+        assert calls[0]["subject_params"].evidence_tf_value == "day"
+        assert [ev for ev in e.stores.events.journal(body["run_id"], "main")
+                if ev.event_type is EventType.PLAN_FROZEN]
+
+    def test_approved_candidate_rebuilds_its_run_owner_after_restart(
+            self, env, trimmed_catalog, tmp_path):
+        calls = []
+        resumed = threading.Event()
+        first_surface = PipelineApprovalSurface(clock=_FixedClock())
+
+        def runner_factory(*, admission, lane_bindings, run_context_factory,
+                           request_id, prompt_assembler, subject_params=None):
+            def run(*, lane, point, approval, data_context, memory_binding,
+                    candidate_plan_digest):
+                binding = lane_bindings["main"]
+                plan, _ = admission.freeze_and_admit_candidate(
+                    candidate_plan_digest,
+                    reservation_id=binding.reservation_id,
+                    approval_event_id=binding.approval_event_id,
+                    idempotency_key=f"restart-freeze:{request_id}")
+                calls.append(plan.run_id)
+                resumed.set()
+                return {"artifact": "resumed"}
+            return run
+
+        e = _make_env(
+            env, trimmed_catalog, tmp_path,
+            approval_surface=first_surface,
+            plan_runner_factory=runner_factory)
+        body = _client(e.deps).post(f"{API}/start", json={
+            "preset_id": DEEP_DECIDE_PRESET_ID, "code": "600519"}).json()
+        card = first_surface.list_pending()[0]
+        first_surface.decide(
+            request_id=card.request_id,
+            candidate_plan_digest=card.candidate_plan_digest,
+            decision=ApprovalDecision.APPROVED,
+            actor=GOOD_CRED, reason="approved-before-crash",
+            idempotency_key="restart-decision:1")
+        assert e.deps.request_store.get(body["request_id"])["execution_recovery"]
+
+        restarted_surface = PipelineApprovalSurface(clock=e.clock)
+        presets = e.deps.preset_registry
+
+        def replaying_coordinator(*, admission, approvals_sink):
+            return PlanApprovalCoordinator.replay(
+                e.journal, admission=admission, clock=e.clock,
+                verifier=_Verifier(), approvals_sink=approvals_sink,
+                preset_registry=presets,
+                catalog_digest=e.snapshot.catalog_digest,
+                registry_digest=e.registry.registry_digest)
+
+        restarted = dataclasses.replace(
+            e.deps, approval_surface=restarted_surface,
+            coordinator_factory=replaying_coordinator)
+        assert api_mod._recover_single_plan_executions(restarted) == 1
+        assert restarted_surface.resume_approved_in_background() == 1
+        assert resumed.wait(2.0)
+        assert calls == [body["run_id"]]
 
     def test_a_missing_subject_code_is_a_422(self, env, trimmed_catalog, tmp_path):
         e = _make_env(env, trimmed_catalog, tmp_path)
@@ -684,7 +824,8 @@ class TestStartPreset:
         assert body["preset_id"] == REDUCED_DEEP_DECIDE_PRESET_ID
         assert body["outcome"] == "pending_human"
         assert body["cost_preview"]["node_count"] == 8
-        assert body["cost_preview"]["budget_request_llm_invocations"] == 6
+        assert body["cost_preview"]["budget_request_llm_invocations"] == 12
+        assert body["cost_preview"]["budget_request_tokens"] == 393_216
         assert REDUCED_EVIDENCE_BADGE in body["badges"]
         assert "pv.technical" in body["evidence_note"]
         assert "text.news" in body["evidence_note"]
@@ -717,6 +858,47 @@ class TestStartPreset:
         assert not (set(full["badges"]) & {REDUCED_EVIDENCE_BADGE})
         assert "evidence_note" not in full
 
+    def test_launch_contract_change_invalidates_an_older_exact_approval(
+            self, env, trimmed_catalog, tmp_path, monkeypatch):
+        """A repaired runtime generation must require its own exact approval.
+
+        The launch-contract seal participates in request/run identity.  An
+        approval for the same preset, symbol and session under v9 therefore
+        cannot silently authorize the v10 candidate.
+        """
+        surface = PipelineApprovalSurface(clock=_FixedClock())
+        e = _make_env(
+            env, trimmed_catalog, tmp_path, approval_surface=surface,
+            plan_runner_factory=lambda **_bindings: (lambda **_run: None))
+        client = _client(e.deps)
+
+        monkeypatch.setattr(
+            api_mod, "_DEEP_LAUNCH_CONTRACT",
+            "run-scoped-online-context-v9")
+        old = client.post(f"{API}/start", json={
+            "preset_id": DEEP_DECIDE_PRESET_ID, "code": "600519"}).json()
+        old_card = surface.list_pending()[0]
+        surface.decide(
+            request_id=old_card.request_id,
+            candidate_plan_digest=old_card.candidate_plan_digest,
+            decision=ApprovalDecision.APPROVED,
+            actor=GOOD_CRED, reason="approved v9 only",
+            idempotency_key="launch-contract:v9-approval")
+
+        monkeypatch.setattr(
+            api_mod, "_DEEP_LAUNCH_CONTRACT",
+            "run-scoped-online-context-v10")
+        new = client.post(f"{API}/start", json={
+            "preset_id": DEEP_DECIDE_PRESET_ID, "code": "600519"}).json()
+
+        assert new["request_id"] != old["request_id"]
+        assert new["run_id"] != old["run_id"]
+        assert new["candidate_plan_digest"] != old["candidate_plan_digest"]
+        pending = surface.list_pending()
+        assert len(pending) == 1
+        assert pending[0].request_id == new["request_id"]
+        assert pending[0].candidate_plan_digest == new["candidate_plan_digest"]
+
     def test_a_missing_context_snapshot_is_a_typed_422(
             self, env, trimmed_catalog, tmp_path):
         e = _make_env(env, trimmed_catalog, tmp_path, snapshot_fn=lambda: None)
@@ -724,6 +906,21 @@ class TestStartPreset:
             "preset_id": DEEP_DECIDE_PRESET_ID, "code": "600519"})
         assert r.status_code == 422
         assert r.json()["reason"] == "context_snapshot_unavailable"
+
+    def test_a_failed_run_scoped_refresh_is_a_typed_503_and_registers_no_card(
+            self, env, trimmed_catalog, tmp_path):
+        def broken_refresh(**_kwargs):
+            raise RuntimeError("capture unavailable")
+
+        e = _make_env(
+            env, trimmed_catalog, tmp_path,
+            refresh_snapshot_fn=broken_refresh)
+        r = _client(e.deps).post(f"{API}/start", json={
+            "preset_id": DEEP_DECIDE_PRESET_ID, "code": "600519"})
+        assert r.status_code == 503
+        assert r.json()["reason"] == "run_scoped_context_unavailable"
+        assert _journal_kinds(e.journal) == []
+        assert e.deps.request_store.all() == ()
 
     def test_an_unnameable_code_is_a_422(self, env, trimmed_catalog, tmp_path):
         e = _make_env(env, trimmed_catalog, tmp_path)
@@ -764,6 +961,43 @@ class TestStartGoal:
         assert call["run_id"] and call["draft_id"]
         # ONE pending DYNAMIC card, no decision.
         assert _journal_kinds(e.journal) == ["pending"]
+
+    def test_goal_approval_dispatches_without_inventing_subject_params(
+            self, env, trimmed_catalog, tmp_path):
+        planner = _FakePlanner(env, catalog=trimmed_catalog[0])
+        surface = PipelineApprovalSurface(clock=_FixedClock())
+        calls = []
+
+        def runner_factory(*, admission, lane_bindings, run_context_factory,
+                           request_id, prompt_assembler, subject_params=None):
+            assert prompt_assembler is None
+            assert subject_params is None
+
+            def run(*, lane, point, approval, data_context, memory_binding,
+                    candidate_plan_digest):
+                binding = lane_bindings["main"]
+                plan, _ = admission.freeze_and_admit_candidate(
+                    candidate_plan_digest,
+                    reservation_id=binding.reservation_id,
+                    approval_event_id=binding.approval_event_id,
+                    idempotency_key=f"goal-freeze:{request_id}")
+                calls.append(plan.run_id)
+                return {"artifact": "goal-sink"}
+            return run
+
+        e = _make_env(
+            env, trimmed_catalog, tmp_path, planner=planner,
+            approval_surface=surface, plan_runner_factory=runner_factory)
+        body = _client(e.deps).post(
+            f"{API}/start", json={"goal": "比较行业风险并形成结论"}).json()
+        card = surface.list_pending()[0]
+        approval, event = surface.decide(
+            request_id=card.request_id,
+            candidate_plan_digest=card.candidate_plan_digest,
+            decision=ApprovalDecision.APPROVED, actor=GOOD_CRED,
+            reason="reviewed", idempotency_key="goal-decision:1")
+        surface.admit_and_run(approval, event)
+        assert calls == [body["run_id"]]
 
     def test_a_crashing_planner_is_a_typed_503_never_a_raw_500(
             self, env, trimmed_catalog, tmp_path):
@@ -1074,6 +1308,7 @@ class TestProductionWiring:
         assert deps.preset_registry is not None
         assert deps.subject_committer is not None
         assert deps.latest_snapshot_fn is not None
+        assert deps.refresh_snapshot_fn is not None
         # the request store lands under the durable root; the inbox under var/.
         assert Path(deps.request_store.path).parent == Path(stores.root)
         assert Path(deps.ta_inbox_dir) == Path("var") / "ta_inbox"

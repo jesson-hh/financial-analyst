@@ -62,15 +62,11 @@ def _tool_rows() -> str:
             else:
                 rw = "只读"
             label = f"`{name}`"
-        elif t.get("builtin") == "workspace_list":
-            # MCP exposes this selector in addition to WW_TOOL_TABLE so an
-            # external client can discover the opaque workspace_id required by
-            # scoped workspace tools.  It reads Console's workspace catalog
-            # directly and therefore has no WW endpoint/reachability row.
-            cost, reach, rw = "即时", "MCP 内置", "只读"
-            label = f"`{name}` [MCP内置]"
         else:
-            raise KeyError(f"MCP tool {name!r} has no documentation source")
+            # MCP 自带工具（如研究空间选择器）没有 WW_TOOL_TABLE 行。
+            cost, reach = "即时", "(MCP 内置)"
+            rw = "写(锁)" if t["gated"] else ("只读" if t["read_only"] else "写(不锁)")
+            label = f"`{name}` [MCP内置]"
         rows.append(f"| {label} | {_flat(t['description'])} | {cost} | {rw} | {reach} |")
     return "\n".join(rows)
 
@@ -131,14 +127,15 @@ def render_doc() -> str:
 
 - 读写列:`只读` / `写(锁)` = 需 `GUANLAN_MCP_WRITE=1` / `写(不锁)` = 低危例外。
 - `[引擎]` = alpha-zoo 研究工具(经引擎 TOOL_REGISTRY,不走 ww 池)。
-- console-UI-only 不进 MCP 的工具:{excluded} —— 依赖前端 `window.GL`/会话右栏落地,
-  MCP 语境调了也不会发生任何事(空转假成功),诚实排除;要用请走帷幄 console。
+- console-UI-only 不进 MCP 的工具:{excluded} —— `ww_plan_update` 依赖当前会话,
+  `ww_show_page` 只返回浏览器顶栏导航提示,`ww_seats_bind` 依赖前端 `window.GL` 落地;
+  MCP 无对应 UI 语境,诚实排除;要用请走帷幄 console。
 
 ## 3. 数据面导览(数据类工具背后是什么)
 
 | 数据面 | 入口 | 上游 | 存储/新鲜度 | 语义要点 |
 |---|---|---|---|---|
-| 实时行情/文本探针 | `ww_live_text` | G:\\stocks probe CLI 子进程(50+ 源:行情/公告/互动易/涨停池/龙虎榜/两融/北向/期权/估值分位/海外个股/海外六指数…) | 零落盘现拉;子进程 90s 超时 + 1s 节流 | 源清单经 catalog 动态发现;`ok:false` 仅机械错,上游故障经 `status/error` 显形恒不编造 |
+| 实时行情/文本探针 | `ww_live_text` | G:\\stocks probe CLI/常驻 worker(源数以运行时 catalog 为准、dataset 主备路由)+`research_digest` | live 零正式库写入;last-good 只在 runtime;研报观点最多5条 | `source=auto,dataset=...` 由数据层选 provider;必须尊重 actual_provider/fallback_level/status/error_kind/stale_age/cache_hit。`dataset=catalog` 返回紧凑实时能力目录。历史查询传 as_of+auto/canonical，禁止 live 绕过 PIT |
 | 全市场盘口快照 | `ww_market_tape` · `/data/market_tape` | 10 个全市场源经 live_client 聚合 | var/live/market_tape.json,SWR TTL 180s | 失败源保留上轮标"(旧)";overall pulled_at 取最旧分量;涨停池空回溯 ≤8 日带 board_backfilled 徽章 |
 | 7×24 快讯 | `ww_news_live` / `ww_news_search` | 东财快讯经引擎 opencli 采集器(kuaixun 唯一门户) | 观澜侧零落盘(引擎内存 15s 缓存) | 唯一带 per-flash codes 的快讯源;search 会写情绪判读 |
 | 产业 RSS 雷达 | `ww_newsradar` · `/data/newsradar` | 108 出版方 RSS/Atom 直连(12 赛道,MIT 源表) | var/live/newsradar.json,SWR TTL 30min;超 30 天窗即丢(P3 归档已立项) | 纯展示不进信号;content 头尾注入防御定界 + title/url 换行压平 |
@@ -147,6 +144,7 @@ def render_doc() -> str:
 | 全球情绪温度计 | `ww_macro_pulse` · `/macro/pulse` `/macro/history` | Polymarket + Kalshi 直连 + A股打板温度(经 stocks) | var/macro_pulse/snapshots.jsonl append;Δ24h 从 ≥20h 前快照读 | 纯展示非信号;仅显式标方向的锚定市场参与合成;ww 侧默认 refresh=true 每调真拉外网 |
 | 情绪判读 store | `ww_sentiment`(读)/ `ww_news_search`(写) | 无上游,被 LLM 判读写入 | var/sentiment/*-YYYYMM.jsonl 月轮转 | 只存判读结论非新闻原文;键 (date,code) 后写胜 |
 | 五档盘口/逐笔 | `ww_orderbook` / `ww_ticks` · `/seats/*` | 通达信 tdx 唯一源(经统一 live_client) | 现拉 | 不可达即 ok:false 诚实降级无备胎;逐笔升序须反转取最新;腾讯主+tdx 备的 failover 只在 /seats 报价腿(台账盘中 MTM) |
+| 开盘集合竞价 | `ww_auction` · `/seats/auction` | 盘中:本机官方 TQ `tqcenter.py`;盘后:pytdx 历史逐笔 | 盘中快照现拉;盘后按日期查询 | 09:15-09:24 side=8/vol=0 是虚拟撮合轨迹,09:25 有量行是开盘撮合;非竞价时段 TQ 普通报价禁止称实时竞价;历史腿不含未匹配买卖量 |
 | 板块资金流 | `ww_fundflow` · `/fundflow/live` | 东财 push2(http 明文)回落 push2delay | SWR | 红线:大盘分解/全A涨跌绝不由板块加总 |
 | 数据健康总闸 | `ww_data_health` · `/data/health` | 汇总全部数据面(项数以 /data/health 实答为准) | 即时探测 | overall=数据项最差;运维项(datafeed/health.py `_OPS_ITEMS`,含 probe_worker 通道自检)自身显形但不拖 overall |
 | 盘后晨报 | `ww_review_report` · `/autonomy/report/latest` | 盘后复盘官(autonomy)产物 | var 落盘,日更 | 五段:A/B 成绩单/落子复盘/数据巡检/综合晨报/批判;另三职责:大盘判读日更/蒸馏草稿/macro 快照搭车 |

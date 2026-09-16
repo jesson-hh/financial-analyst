@@ -388,7 +388,10 @@ def render_markdown(report: dict) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--live-root", type=Path, default=Path("G:/guanlan-v2"))
+    parser.add_argument(
+        "--live-root", type=Path, default=CHECKOUT,
+        help="Guanlan source checkout to review (default: this checkout)",
+    )
     parser.add_argument("--receipts-dir", type=Path, default=DEFAULT_REPORT_DIR)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_REPORT_DIR)
     args = parser.parse_args()

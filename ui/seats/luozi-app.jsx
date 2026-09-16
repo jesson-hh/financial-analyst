@@ -8,6 +8,55 @@ const { useMemo, useCallback: useCB } = React;
 const WW_EMBED = new URLSearchParams(location.search).get('embed') === '1';
 const WW_WS = new URLSearchParams(location.search).get('ws') || '';
 
+// /seats/decisions 的单次回读上限也是 300。真跑不超过这个上限，才能在注册 run 头前
+// 用服务端落盘事实完整核对一次，避免「在途请求已落盘、前端停止后却没计入汇总」。
+const LZ_RUN_RECONCILE_LIMIT = 300;
+
+function lzSummarizeRunRows(rows) {
+  const ordered = (Array.isArray(rows) ? rows : []).filter(Boolean).slice().sort((a, b) =>
+    String(a.asof || a.ts || '').localeCompare(String(b.asof || b.ts || '')));
+  let nBuy = 0, nSell = 0, nWatch = 0;
+  ordered.forEach(r => {
+    const direction = String(r.direction || '');
+    if (/买/.test(direction)) nBuy++;
+    else if (/卖/.test(direction)) nSell++;
+    else nWatch++;
+  });
+  const first = ordered[0] || null, last = ordered[ordered.length - 1] || null;
+  return {
+    total: ordered.length, nBuy, nSell, nWatch,
+    firstDate: first ? String(first.asof || first.ts || '') : '',
+    lastDate: last ? String(last.asof || last.ts || '') : '',
+    lastModel: last ? String(last.model_name || '') : '',
+  };
+}
+
+async function lzReadRunRowsStrict(runId, code, strategyId) {
+  const api = window.GUANLAN_BACKEND || '';
+  const codeCore = String(code || '').replace(/\D/g, '');
+  const wantStrategy = String(strategyId || '').trim();
+  if (!api || !runId || !codeCore || !wantStrategy) throw new Error('落子后端未连接或 run 身份不完整');
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await fetch(api + '/seats/decisions?run_id=' + encodeURIComponent(runId)
+        + '&limit=' + LZ_RUN_RECONCILE_LIMIT);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      if (!j || !j.ok || !Array.isArray(j.decisions)) throw new Error('落盘回读格式异常');
+      return j.decisions.filter(row => row
+        && row.kind === 'decide'
+        && String(row.run_id || '') === String(runId)
+        && String(row.code || '').replace(/\D/g, '') === codeCore
+        && String(row.strategy_id || '').trim() === wantStrategy);
+    } catch (e) {
+      lastError = e;
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 180 * (attempt + 1)));
+    }
+  }
+  throw lastError || new Error('落盘回读失败');
+}
+
 // ② 五档盘口 + 逐笔成交面板(纯展示,数据来自 /seats/orderbook + /seats/ticks;tdx 经统一 live_client)。
 //   null-safe:book/ticks 缺失或 ok:false → 显 note 降级,绝不塞 0 价假档。红线:只读展示,绝不喂研判/信号。
 function OrderbookTicksPanel({ book, ticks }) {
@@ -56,6 +105,146 @@ function OrderbookTicksPanel({ book, ticks }) {
 
 const APP_TF_CN = { day: '日线', '30min': '30分钟', '5min': '5分钟', '1min': '1分钟' };
 const APP_CADENCE_CN = { daily: '每日一次', '60min': '每60分钟', hourly: '每60分钟', '30min': '每30分钟', '10min': '每10分钟' };
+
+// Pro·10席事件深研授权是一个独立、显式的用户动作：读状态可自动，签发/撤销绝不自动。
+// 响应兼容 authorization/deep_authorization/lease 包装；字段缺失就显“—”，不猜授权有效。
+function appDeepAuthMeta(payload) {
+  const envelope = (payload && typeof payload === 'object') ? payload : {};
+  const raw = (envelope.authorization && typeof envelope.authorization === 'object') ? envelope.authorization
+    : ((envelope.deep_authorization && typeof envelope.deep_authorization === 'object') ? envelope.deep_authorization
+      : ((envelope.lease && typeof envelope.lease === 'object') ? envelope.lease : envelope));
+  const status = String(raw.status || envelope.status || '').trim().toLowerCase();
+  const explicitActive = (typeof raw.authorized === 'boolean') ? raw.authorized
+    : ((typeof raw.active === 'boolean') ? raw.active : null);
+  const active = explicitActive != null ? explicitActive
+    : ['active', 'not_yet_valid', 'stale', 'authorized', 'valid', 'issued', 'granted', 'pending'].indexOf(status) >= 0;
+  const num = (...xs) => {
+    const hit = xs.find(x => x != null && x !== '' && isFinite(+x));
+    return hit == null ? null : Math.max(0, +hit);
+  };
+  const maxRuns = num(raw.max_runs, raw.max_admissions);
+  const usedRuns = num(raw.runs_used, raw.admissions_used);
+  const runsRemaining = num(raw.runs_remaining, raw.remaining_runs, raw.admissions_remaining,
+    (maxRuns != null && usedRuns != null) ? maxRuns - usedRuns : null);
+  const maxLLM = num(raw.max_llm_invocations, raw.budget_cap_llm_invocations);
+  const usedLLM = num(raw.llm_invocations_used, raw.budget_used, raw.used_llm_invocations);
+  const llmRemaining = num(raw.llm_invocations_remaining, raw.remaining_llm_invocations,
+    (maxLLM != null && usedLLM != null) ? maxLLM - usedLLM : null);
+  const bool = (...xs) => {
+    const hit = xs.find(x => typeof x === 'boolean');
+    return typeof hit === 'boolean' ? hit : null;
+  };
+  const period = String(raw.period || raw.effective_evidence_tf || raw.evidence_tf || raw.requested_evidence_tf
+    || envelope.period || envelope.effective_evidence_tf || envelope.evidence_tf || envelope.requested_evidence_tf || '').trim();
+  const periodsRaw = raw.supported_periods || raw.eligible_periods || envelope.supported_periods || envelope.eligible_periods;
+  const supportedPeriods = Array.isArray(periodsRaw) ? periodsRaw.map(x => String(x)).filter(Boolean)
+    : (typeof periodsRaw === 'string' && periodsRaw.trim() ? periodsRaw.split(',').map(x => x.trim()).filter(Boolean) : []);
+  const globalRaw = raw.global_deep_budget != null ? raw.global_deep_budget : envelope.global_deep_budget;
+  const globalObj = globalRaw && typeof globalRaw === 'object' ? globalRaw : {};
+  const globalRemaining = num(globalObj.remaining, globalObj.runs_remaining, globalObj.remaining_runs,
+    globalObj.available, globalObj.available_runs, (typeof globalRaw === 'number' ? globalRaw : null));
+  const globalLLMRemaining = num(globalObj.llm_invocations_remaining, globalObj.remaining_llm_invocations);
+  const globalBudgetText = (typeof globalRaw === 'string') ? globalRaw.trim() : '';
+  return {
+    supported: true,
+    active,
+    status: status || (active ? 'active' : 'none'),
+    authorizationId: String(raw.authorization_id || raw.lease_id || raw.id || '').trim(),
+    revision: num(raw.assignment_revision, envelope.assignment_revision, raw.revision, envelope.revision),
+    runsRemaining,
+    llmRemaining,
+    validUntil: raw.valid_until || raw.expires_at || envelope.valid_until || envelope.expires_at || null,
+    requiredConfirmText: String(raw.required_confirm_text || envelope.required_confirm_text || '').trim(),
+    eligible: bool(raw.eligible, envelope.eligible),
+    periodSupported: bool(raw.period_supported, raw.supports_period, envelope.period_supported, envelope.supports_period),
+    period,
+    supportedPeriods,
+    sessionLabel: String(raw.session_label || envelope.session_label || '').trim(),
+    globalRemaining,
+    globalLLMRemaining,
+    globalBudgetText,
+    detail: String(envelope.detail || raw.detail || '').trim(),
+    reason: String(envelope.eligibility_reason || envelope.period_reason || envelope.reason
+      || raw.eligibility_reason || raw.period_reason || raw.terminal_reason || raw.reason || '').trim(),
+  };
+}
+
+const APP_DEEP_REASON_CN = {
+  assignment_not_found: '尚未保存本票盯盘配置',
+  assignment_disabled: '本票自动研判尚未启用',
+  assignment_not_runnable: '本票盯盘配置当前不可运行',
+  thinking_mode_not_deep: '已保存配置不是 Pro·10席事件深研',
+  unsupported_evidence_tf_for_10_agent: '当前数据周期尚不支持10席深研（首版仅日线）',
+  deep_preset_unavailable: '10席深研编排预设当前不可用',
+  authorization_preset_mismatch_requires_revoke: '编排版本已更新，请先撤销旧授权再重新授权',
+  revision_conflict: '盯盘配置已更新，请重新读取后再授权',
+  session_changed: '目标交易时段已变化，请重新读取后再授权',
+  confirm_text_mismatch: '确认文字不一致，未授权',
+  authorization_conflict: '本交易时段已有一份不同授权，请先撤销',
+  assignment_session_already_consumed: '本票本交易时段已完成或已消耗一次深研，不能重复授权',
+  authorization_not_found: '未找到可撤销的授权',
+  invalid_authorization_request: '授权请求不符合服务端约束',
+  deep_authorization_store_error: '授权记录暂不可用',
+  deep_authorization_status_unavailable: '授权状态暂不可用',
+  deep_authorization_issue_failed: '授权签发失败',
+  revoked: '授权已撤销',
+  expired: '授权已过期',
+  runs_exhausted: '本交易时段深研次数已用尽',
+  llm_exhausted: '本交易时段模型调用额度已用尽',
+  preset_mismatch: '授权绑定的编排版本已失效',
+};
+
+function appDeepAuthReasonCN(reason) {
+  const raw = String(reason || '').trim();
+  return APP_DEEP_REASON_CN[raw] || raw;
+}
+
+function appDeepAuthError(payload, fallback) {
+  if (!payload || typeof payload !== 'object') return fallback;
+  const value = payload.reason != null ? payload.reason
+    : (payload.error != null ? payload.error : (payload.detail != null ? payload.detail : payload.message));
+  if (value == null || value === '') return fallback;
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+async function appDeepAuthRequest(code, action, current, confirmText) {
+  const API = (window.GUANLAN_BACKEND || '');
+  const c = String(code || '').replace(/^(SH|SZ|BJ)/i, '');
+  if (!API || !c) return { ok: false, supported: null, reason: '未连接后端或股票代码为空' };
+  const base = API + '/seats/watch/assignments/' + encodeURIComponent(c) + '/deep-authorization';
+  const authId = current && current.authorizationId;
+  const isRead = action === 'read';
+  if (action === 'revoke' && !authId) return { ok: false, supported: true, reason: '后端未返回授权 ID，无法安全撤销' };
+  if (action === 'authorize' && (!current || current.revision == null)) return { ok: false, supported: true, reason: '后端未返回授权版本，无法安全签发' };
+  if (action === 'authorize' && !String(current.requiredConfirmText || '').trim()) return { ok: false, supported: true, reason: '后端未返回必需确认文案，未发起授权' };
+  if (action === 'authorize' && String(confirmText == null ? '' : confirmText) !== current.requiredConfirmText) return { ok: false, supported: true, reason: 'confirm_text_mismatch' };
+  const url = action === 'revoke'
+    ? (API + '/seats/watch/deep-authorizations/' + encodeURIComponent(authId) + '/revoke')
+    : base;
+  const options = isRead ? {} : {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(action === 'revoke'
+      ? { reason: '用户撤销' }
+      : {
+          expected_revision: (current && current.revision != null) ? current.revision : 0,
+          max_runs: 1,
+          max_llm_invocations: 20,
+          reason: '当日盯盘10席深研',
+          confirm_text: String(confirmText == null ? '' : confirmText),
+        }),
+  };
+  try {
+    const res = await fetch(url, options);
+    if (res.status === 404 || res.status === 405) return { ok: false, supported: false, reason: 'Pro·10席授权接口未接通' };
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j || j.ok === false) {
+      return Object.assign({}, appDeepAuthMeta(j), { ok: false, supported: true, reason: appDeepAuthError(j, '授权接口 HTTP ' + res.status) });
+    }
+    return Object.assign({ ok: true }, appDeepAuthMeta(j));
+  } catch (e) {
+    return { ok: false, supported: null, reason: 'Pro·10席授权接口不可达' };
+  }
+}
 
 // 全局总闸只放顶栏；详细状态按需展开，不再与单票配置、条件触发监控混成一条横栏。
 function WatchControl({ watch, onToggle, assignmentMode }) {
@@ -111,6 +300,68 @@ function WatchAssignmentDialog({ meta, assignment, assignmentMode, strategies, l
   const [thinking, setThinking] = useState((assignment && assignment.thinking_mode) === 'deep' ? 'deep' : 'fast');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [deepAuth, setDeepAuth] = useState(null);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authNote, setAuthNote] = useState('');
+  const persistedPeriod = String((assignment && (assignment.requested_evidence_tf || assignment.evidence_tf)) || '');
+  const periodDirty = !!(persistedPeriod && String(evidenceTF) !== persistedPeriod);
+  const draftDirty = !assignment
+    || enabled !== !!assignment.enabled
+    || String(strategyId) !== String(assignment.strategy_id || '')
+    || String(evidenceTF) !== persistedPeriod
+    || String(cadence) !== String(assignment.decision_cadence || '')
+    || String(thinking) !== String(assignment.thinking_mode || 'fast');
+  useEffect(() => {
+    let alive = true;
+    if (thinking !== 'deep' || legacy) {
+      setDeepAuth(null); setAuthLoading(false); setAuthNote('');
+      return () => { alive = false; };
+    }
+    setAuthLoading(true); setAuthNote('');
+    appDeepAuthRequest(meta.code, 'read').then(r => {
+      if (!alive) return;
+      setDeepAuth(r); setAuthLoading(false);
+    });
+    return () => { alive = false; };
+  }, [meta.code, thinking, legacy]);
+  const refreshDeepAuth = async (fallback) => {
+    const refreshed = await appDeepAuthRequest(meta.code, 'read');
+    setDeepAuth(refreshed && refreshed.supported !== null ? refreshed : fallback);
+  };
+  const authorizeSession = async () => {
+    if (authBusy || authLoading || !deepAuth || deepAuth.supported !== true || deepAuth.active
+      || deepAuth.eligible === false || deepAuth.periodSupported === false || draftDirty
+      || deepAuth.status === 'exhausted') return;
+    if (deepAuth.revision == null) { setAuthNote('后端未返回授权版本，未发起授权。'); return; }
+    if (!deepAuth.requiredConfirmText) { setAuthNote('后端未返回必需确认文案，未发起授权。'); return; }
+    const entered = window.prompt('请逐字输入以下服务端确认文字：\n' + deepAuth.requiredConfirmText
+      + '\n\n仅研究、不交易；本次授权最多 1 次深研 / 20 次模型调用（8 次 clean path；Technical/News 各一额外周期；每周期至多一次结构重采样）。', '');
+    if (entered == null) return;
+    if (entered !== deepAuth.requiredConfirmText) { setAuthNote('确认文字不一致，未发起授权。'); return; }
+    setAuthBusy(true); setAuthNote('');
+    const r = await appDeepAuthRequest(meta.code, 'authorize', deepAuth, entered);
+    if (r && r.ok) {
+      setAuthNote('本交易时段授权已提交。');
+      await refreshDeepAuth(r);
+    } else {
+      setDeepAuth(r || deepAuth); setAuthNote(appDeepAuthReasonCN(r && r.reason) || '授权失败');
+    }
+    setAuthBusy(false);
+  };
+  const revokeSession = async () => {
+    if (authBusy || authLoading || !deepAuth || !deepAuth.active || !deepAuth.authorizationId) return;
+    if (!window.confirm('确认撤销本票当前交易时段的 Pro·10席事件深研授权？')) return;
+    setAuthBusy(true); setAuthNote('');
+    const r = await appDeepAuthRequest(meta.code, 'revoke', deepAuth);
+    if (r && r.ok) {
+      setAuthNote('授权已撤销。');
+      await refreshDeepAuth(r);
+    } else {
+      setDeepAuth(r || deepAuth); setAuthNote(appDeepAuthReasonCN(r && r.reason) || '撤销失败');
+    }
+    setAuthBusy(false);
+  };
   const save = async () => {
     if (saving || unavailable) return;
     setSaving(true); setError('');
@@ -126,9 +377,42 @@ function WatchAssignmentDialog({ meta, assignment, assignmentMode, strategies, l
       <span>{child}{note && <span className="serif" style={{ display: 'block', marginTop: 3, fontSize: 9, color: 'var(--ink-3)' }}>{note}</span>}</span>
     </label>
   );
+  const authStatus = (() => {
+    if (authLoading) return '读取中…';
+    if (!deepAuth) return '尚未读取';
+    if (deepAuth.supported === false) return '接口未接通';
+    if (deepAuth.supported == null) return '接口不可达';
+    if (deepAuth.status === 'not_yet_valid') return '已预授权 · 待生效';
+    if (deepAuth.status === 'active') return '授权有效';
+    if (deepAuth.status === 'stale') return '旧授权待撤销';
+    if (deepAuth.status === 'exhausted') return '额度已用尽';
+    if (deepAuth.status === 'expired') return '已过期';
+    if (deepAuth.status === 'revoked') return '已撤销';
+    if (deepAuth.active) return '已授权';
+    return deepAuth.status && deepAuth.status !== 'none' ? deepAuth.status : '未授权';
+  })();
+  const authPeriod = (deepAuth && deepAuth.period) || evidenceTF;
+  const authPeriodCN = APP_TF_CN[authPeriod] || authPeriod || '—';
+  const sessionLabel = deepAuth && deepAuth.sessionLabel ? deepAuth.sessionLabel : '';
+  const authorizeLabel = sessionLabel && /下一交易日/.test(sessionLabel) ? '授权下一交易日' : '授权本交易时段';
+  const validUntil = deepAuth && deepAuth.validUntil ? (() => {
+    const d = new Date(deepAuth.validUntil);
+    return isNaN(d.getTime()) ? String(deepAuth.validUntil) : d.toLocaleString('zh-CN', { hour12: false });
+  })() : '—';
+  const authBlocked = authBusy || authLoading || !deepAuth || deepAuth.supported !== true || deepAuth.active
+    || deepAuth.eligible === false || deepAuth.periodSupported === false || draftDirty
+    || deepAuth.status === 'exhausted'
+    || deepAuth.revision == null || !deepAuth.requiredConfirmText;
+  const periodNote = periodDirty ? ('周期尚未保存：当前服务端为 ' + (APP_TF_CN[persistedPeriod] || persistedPeriod)
+    + '，请先保存 ' + (APP_TF_CN[evidenceTF] || evidenceTF) + ' 后再授权；不会退回日线。')
+    : '';
+  const draftNote = draftDirty ? '当前有未保存的盯盘配置（启用状态、Agent、周期、节奏或研判方式）。请先保存，再重新进入授权；授权只绑定已落盘配置。' : '';
+  const grantedLabel = deepAuth && deepAuth.status === 'not_yet_valid' ? '已预授权 · 待生效'
+    : (deepAuth && deepAuth.status === 'stale' ? '旧授权待撤销'
+      : (sessionLabel ? '已授权 · ' + sessionLabel : '本交易时段已授权'));
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(28,24,20,0.28)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
-      <div onClick={e => e.stopPropagation()} style={{ width: 440, maxWidth: '94vw', background: 'var(--paper)', border: '1px solid var(--line)', borderRadius: 14, boxShadow: '0 16px 44px rgba(28,24,20,0.24)', padding: '17px 19px' }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: 500, maxWidth: '94vw', maxHeight: '90vh', overflowY: 'auto', background: 'var(--paper)', border: '1px solid var(--line)', borderRadius: 14, boxShadow: '0 16px 44px rgba(28,24,20,0.24)', padding: '17px 19px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
           <span className="seal serif" style={{ width: 27, height: 27, fontSize: 14 }}>盯</span>
           <div><div className="serif" style={{ fontSize: 16, fontWeight: 700 }}>{meta.name} · 自动研判配置</div><div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', marginTop: 2 }}>{meta.code}</div></div>
@@ -150,9 +434,34 @@ function WatchAssignmentDialog({ meta, assignment, assignmentMode, strategies, l
           {row('自动研判节奏', <select disabled={legacy || unavailable} value={legacy ? '60min' : cadence} onChange={e => setCadence(e.target.value)} style={selStyle}>
             <option value="10min">每10分钟</option><option value="30min">每30分钟</option><option value="60min">每60分钟</option><option value="daily">每日一次</option>
           </select>)}
-          {row('自动思考强度', <select disabled={legacy || unavailable} value={legacy ? 'fast' : thinking} onChange={e => setThinking(e.target.value)} style={selStyle}>
-            <option value="fast">快速 · 非思考</option><option value="deep">Pro · 高强度思考</option>
-          </select>)}
+          {row('自动研判方式', <select disabled={legacy || unavailable} value={legacy ? 'fast' : thinking} onChange={e => setThinking(e.target.value)} style={selStyle}>
+            <option value="fast">快速研判</option><option value="deep">Pro · 10席事件深研</option>
+          </select>, legacy ? '旧后端固定快速研判。' : 'Pro 仍先快速盯盘；仅命中事件且对应交易时段授权有效时，才进入10席深研。')}
+          {thinking === 'deep' && !legacy && <div style={{ border: '1px solid var(--zhu-soft)', borderRadius: 10, padding: '10px 11px', background: 'rgba(168,57,45,0.035)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+              <span className="serif" style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--ink-1)' }}>Pro · 10席事件深研授权</span>
+              <span className="mono" style={{ fontSize: 8.5, border: '1px solid var(--line)', borderRadius: 5, padding: '1px 6px', color: deepAuth && deepAuth.active ? 'var(--dai)' : 'var(--ink-3)' }}>状态 · {authStatus}</span>
+            </div>
+            <div className="mono" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px 12px', marginTop: 8, fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.5 }}>
+              <span>周期资格 · {authPeriodCN} · {deepAuth && (deepAuth.eligible === false || deepAuth.periodSupported === false) ? '不可授权' : (deepAuth && (deepAuth.eligible === true || deepAuth.periodSupported === true) ? '可用' : '待服务端确认')}</span>
+              <span>授权时段 · {sessionLabel || '本交易时段'}</span>
+              <span>剩余次数 · {deepAuth && deepAuth.runsRemaining != null ? deepAuth.runsRemaining : '—'} 次</span>
+              <span>模型调用余量 · {deepAuth && deepAuth.llmRemaining != null ? deepAuth.llmRemaining : '—'} 次</span>
+              <span>有效期 · {validUntil}</span>
+            </div>
+            <div className="mono" style={{ marginTop: 5, fontSize: 8.5, color: 'var(--ink-3)' }}>服务端状态 · {deepAuth && deepAuth.status ? deepAuth.status : '—'} · 授权资格 {deepAuth && deepAuth.eligible != null ? (deepAuth.eligible ? '是' : '否') : '未返回'} · 周期支持 {deepAuth && deepAuth.periodSupported != null ? (deepAuth.periodSupported ? '是' : '否') : '见资格说明'}</div>
+            <div className="mono" style={{ marginTop: 5, fontSize: 8.5, color: 'var(--ink-3)' }}>全局深研余量 · {deepAuth && deepAuth.globalRemaining != null ? deepAuth.globalRemaining + ' 次' : (deepAuth && deepAuth.globalBudgetText ? deepAuth.globalBudgetText : '—')}{deepAuth && deepAuth.globalLLMRemaining != null ? ' · 模型调用 ' + deepAuth.globalLLMRemaining + ' 次' : ''}</div>
+            <div className="mono" style={{ marginTop: 5, fontSize: 8.5, color: 'var(--ink-3)' }}>10席深研支持周期 · {deepAuth && deepAuth.supportedPeriods && deepAuth.supportedPeriods.length > 0 ? deepAuth.supportedPeriods.map(p => APP_TF_CN[p] || p).join('、') : '日线（当前首版）'} · 分钟周期不回退日线</div>
+            <div className="serif" style={{ marginTop: 7, fontSize: 9.5, color: 'var(--yin)', lineHeight: 1.55 }}>仅研究、不交易 · 每个授权交易时段最多 1 次深研 / 20 次模型调用（8 次 clean path；Technical/News 各一额外周期；每周期至多一次结构重采样）；选择 Pro 或保存配置都不会自动授权。</div>
+            {draftNote && <div className="serif" style={{ marginTop: 5, fontSize: 9.5, color: 'var(--yin)', lineHeight: 1.55 }}>{draftNote}</div>}
+            {periodNote && <div className="serif" style={{ marginTop: 5, fontSize: 9.5, color: 'var(--yin)', lineHeight: 1.55 }}>{periodNote}</div>}
+            {deepAuth && (deepAuth.reason || deepAuth.detail) && <div className="mono" style={{ marginTop: 5, fontSize: 8.7, color: 'var(--yin)', whiteSpace: 'pre-wrap' }}>{appDeepAuthReasonCN(deepAuth.reason)}{deepAuth.detail ? (deepAuth.reason ? ' · ' : '') + deepAuth.detail : ''}</div>}
+            {authNote && <div className="mono" style={{ marginTop: 5, fontSize: 8.7, color: 'var(--yin)', whiteSpace: 'pre-wrap' }}>{authNote}</div>}
+            <div style={{ display: 'flex', gap: 7, marginTop: 9 }}>
+              <span onClick={authorizeSession} className="serif" style={{ cursor: authBlocked ? 'default' : 'pointer', borderRadius: 7, padding: '5px 11px', background: authBlocked ? 'var(--line)' : 'var(--yin)', color: authBlocked ? 'var(--ink-3)' : 'var(--paper)', fontSize: 10.5 }}>{authBusy ? '处理中…' : (deepAuth && deepAuth.active ? grantedLabel : authorizeLabel)}</span>
+              <span onClick={revokeSession} className="serif" style={{ cursor: deepAuth && deepAuth.active && deepAuth.authorizationId && !authBusy ? 'pointer' : 'default', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 11px', color: deepAuth && deepAuth.active ? 'var(--ink-2)' : 'var(--ink-3)', opacity: deepAuth && deepAuth.active ? 1 : 0.5, fontSize: 10.5 }}>撤销</span>
+            </div>
+          </div>}
         </div>
         {assignment && assignment.effective_evidence_tf == null && <div className="serif" style={{ marginTop: 10, color: 'var(--yin)', fontSize: 10.5, lineHeight: 1.55 }}>当前请求 {APP_TF_CN[assignment.requested_evidence_tf || assignment.evidence_tf] || assignment.evidence_tf}，后端状态为“未接通”；该票已暂停自动研判，没有退回日线。</div>}
         {error && <div className="mono" style={{ marginTop: 10, color: 'var(--yin)', fontSize: 9.5 }}>{error}</div>}
@@ -191,25 +500,38 @@ function LuoziApp() {
   const [liveBar, setLiveBar] = useState(null);       // 今日柱缓存(盘后保图有今天)
   useEffect(() => { setLiveBar(window.lzLivebarLoad ? window.lzLivebarLoad(code) : null); }, [code]);
   const [watch, setWatch] = useState(null);           // 后端盯盘状态(null=端点不可达/旧后端)
+  // 行情端点的 session state 更新更快；缺席时才回退 30s 的 watcher 心跳。
+  const liveMarketOpen = quote && typeof quote.marketOpen === 'boolean'
+    ? quote.marketOpen : (watch ? !!watch.marketOpen : null);
   const [watchAssignments, setWatchAssignments] = useState({});
   const [assignmentMode, setAssignmentMode] = useState({ supported: null, legacy: false, reason: '检查单票配置中' });
   const [watchEdit, setWatchEdit] = useState(null);   // 正在配置的股票 meta
   const assignmentWriteRef = useRef({});              // PUT 后短窗写栅栏，防轮询旧快照覆盖刚保存配置
   const [todayDecs, setTodayDecs] = useState([]);     // 今日页 K 线金框标记源(后端落盘时间线)
   const [realDecs, setRealDecs] = useState({});       // 复盘真跑「进行中」的即时标记(跑完由选中 run 接管)
-  const [realRun, setRealRun] = useState({ running: false, done: 0, total: 0, cur: null, seatName: '', errors: 0 });
+  const [realRun, setRealRun] = useState({ running: false, stopping: false, done: 0, total: 0, cur: null, seatName: '', errors: 0 });
   const [runsBump, setRunsBump] = useState(0);
   const [selRun, setSelRun] = useState(null);
   const [runDecs, setRunDecs] = useState([]);
   const [orderTriggers, setOrderTriggers] = useState([]);   // 条件单触发(标 K 线;不再写影子/台账)
+  const [todayTool, setTodayTool] = useState('judge');       // 今日操作台:judge | order | trail
+  const [todayToolOpen, setTodayToolOpen] = useState(false);
+  const [todayTrailBump, setTodayTrailBump] = useState(0);
   // 复盘向导(与游标解耦的真跑参数;空 = 用派生默认:近 120 交易日 · 日线)
   const [wizStart, setWizStart] = useState('');
   const [wizEnd, setWizEnd] = useState('');
   const [wizFreq, setWizFreq] = useState('day');      // day | 30min
   const realStopRef = useRef(false);
+  const realRunActiveRef = useRef(false);              // React state 提交前也立即加锁,防双击并发起两个 run
   useEffect(() => { realStopRef.current = true; }, [code, page]);   // 切票/切页 → 停掉进行中的真跑
 
   useEffect(() => { document.body.classList.toggle('dark', dark); }, [dark]);
+  useEffect(() => {
+    if (!todayToolOpen) return;
+    const closeOnEsc = (e) => { if (e.key === 'Escape') setTodayToolOpen(false); };
+    window.addEventListener('keydown', closeOnEsc);
+    return () => window.removeEventListener('keydown', closeOnEsc);
+  }, [todayToolOpen]);
 
   // 当前票在场策略(订阅 GL,增删改 / 跨标签即刷新)
   useEffect(() => {
@@ -323,11 +645,21 @@ function LuoziApp() {
     let alive = true;
     const pull = () => window.lzFetchDecisionsTimeline(code, 20).then(rows => {
       if (!alive || !rows) return;
-      setTodayDecs(rows.filter(r => r.kind !== 'order').map(r => ({
+      setTodayDecs(rows.filter(r => r.kind === 'decide').map(r => ({
         key: 'tl_' + r.id, seat: r.strategy_id || '', date: String(r.asof || r.ts || '').slice(0, 10),
         side: /买/.test(r.direction || '') ? 'buy' : (/卖/.test(r.direction || '') ? 'sell' : 'watch'),
         direction: r.direction || '', conf: (r.confidence != null ? r.confidence : null),
         rationale: r.rationale || '', asof: r.asof || r.ts, model_name: r.model_name || '',
+        source: r.source || '', preset_id: r.preset_id || '', badges: r.badges || [],
+        triggers: r.triggers || [], escalation_triggers: r.escalation_triggers || [],
+        trigger_summary: r.trigger_summary || '', escalation_digest: r.escalation_digest || '',
+        node_summaries: r.node_summaries || null, agent_summaries: r.agent_summaries || null,
+        node_statuses: r.node_statuses || null, orchestration: r.orchestration || null,
+        deep_quality: r.deep_quality || null, evidence_warnings: r.evidence_warnings || null,
+        confidence_band: r.confidence_band || '',
+        orchestration_mode: r.orchestration_mode || '', orchestration_grade: r.orchestration_grade || '',
+        deep_variant: r.deep_variant || '', deep_status: r.deep_status || '', coverage: r.coverage || '',
+        evidence_note: r.evidence_note || '',
         // 出场语义(2026-08-03):持仓语境的研判才有,缺席即 null(空仓行逐字同旧)
         position_action: r.position_action || null,
         exit_fraction: (r.exit_fraction == null ? null : +r.exit_fraction),
@@ -339,17 +671,18 @@ function LuoziApp() {
     return () => { alive = false; clearInterval(iv); };
   }, [page, code]);
 
-  // 实时盘口:今日页轮询 /seats/quote(~6s);切走清空,失败保留上次(诚实降级)。
+  // 实时盘口:只在交易中保持 6s 轮询；午休/盘后只取一次快照，30s 状态心跳负责开盘唤醒。
   useEffect(() => {
     if (page !== 'today' || !window.lzFetchQuote) { setQuote(null); return; }
     let alive = true;
     const pull = () => window.lzFetchQuote(code).then(q => { if (alive && q) setQuote(q); });
     pull();
+    if (liveMarketOpen !== true) return () => { alive = false; };
     const iv = setInterval(pull, 6000);
     return () => { alive = false; clearInterval(iv); };
-  }, [page, code]);
+  }, [page, code, liveMarketOpen]);
 
-  // 五档盘口 + 逐笔:今日页轮询(~8s)
+  // 五档盘口 + 逐笔:盘中 8s；休市保留最后快照且不再请求。
   useEffect(() => {
     if (page !== 'today' || !window.lzFetchOrderbook) { setBook(null); setTicks(null); return; }
     let alive = true;
@@ -358,9 +691,10 @@ function LuoziApp() {
       window.lzFetchTicks(code, 30).then(t => { if (alive && t) setTicks(t); });
     };
     pull();
+    if (liveMarketOpen !== true) return () => { alive = false; };
     const iv = setInterval(pull, 8000);
     return () => { alive = false; clearInterval(iv); };
-  }, [page, code]);
+  }, [page, code, liveMarketOpen]);
 
   const currentAssignment = watchAssignments[String(code).replace(/^(SH|SZ|BJ)/i, '')] || null;
   const availableStrategies = useMemo(() => {
@@ -389,6 +723,15 @@ function LuoziApp() {
       : ((assignedSid && availableStrategies.some(s => s.id === assignedSid)) ? assignedSid : ((availableStrategies[0] && availableStrategies[0].id) || null)));
   const curStrat = availableStrategies.find(s => s.id === curSid) || null;
   const curName = (curStrat && curStrat.name) || '策略';
+  const toggleTodayTool = (tool) => {
+    const next = tool || todayTool;
+    if (todayToolOpen && next === todayTool) setTodayToolOpen(false);
+    else { setTodayTool(next); setTodayToolOpen(true); }
+  };
+  const currentOrderTriggerPrefix = String(code || '') + '·' + String(curSid || '');
+  const currentOrderTriggers = orderTriggers.filter(t => String((t && t.id) || '').startsWith(currentOrderTriggerPrefix));
+  const currentOrderTriggered = currentOrderTriggers.length > 0;
+  const workbenchTabs = [['judge', '研判'], ['order', '条件单'], ['trail', '记录']];
   const active = useMemo(() => curSid ? [curSid] : [], [curSid]);
   const n = symbol.bars.length;
   const cursor = n - 1;                                // 游标退役:恒末根(推演/播放已删)
@@ -479,8 +822,30 @@ function LuoziApp() {
   // ⑤++ 复盘「真跑」(向导驱动):按 [起, 止] 日期区间逐 bar 真调 /seats/decide(PIT),与游标解耦。
   //   运行中再点=停;串行 await;regime=null 防 look-ahead;跑完注册 run 头并自动选中。
   const runRealThink = async () => {
-    if (realRun.running) { realStopRef.current = true; return; }
+    if (realRunActiveRef.current) {
+      if (!realStopRef.current) {
+        realStopRef.current = true;
+        setRealRun(s => Object.assign({}, s, { stopping: true }));
+      }
+      return;
+    }
     if (page !== 'replay' || !window.lzSeatDecide) return;
+    // ref 是同步互斥锁:同一帧内的第二次点击也只会发停止信号,不会再起一条并发 run。
+    realRunActiveRef.current = true;
+    realStopRef.current = false;
+    setRealRun(s => Object.assign({}, s, { running: true, stopping: false, done: 0, total: 0, cur: null, errors: 0 }));
+    try {
+      await runRealThinkLocked();
+    } catch (e) {
+      setToast({ kind: 'handoff', text: '复盘真跑异常终止:' + String((e && e.message) || e || '未知错误') });
+      setTimeout(() => setToast(null), 4800);
+    } finally {
+      realRunActiveRef.current = false;
+      setRealRun(s => Object.assign({}, s, { running: false, stopping: false, cur: null }));
+    }
+  };
+
+  const runRealThinkLocked = async () => {
     const isMin = (wizFreq === '30min');
     const sid = curSid;
     if (!sid) { setToast({ kind: 'handoff', text: '无策略可跑——先去「策略」页钤印一个' }); setTimeout(() => setToast(null), 4000); return; }
@@ -489,7 +854,7 @@ function LuoziApp() {
     const seatName = (strat && strat.name) || sid;
     const tmplCreed = (window.LZ_TEMPLATES && tmpl && window.LZ_TEMPLATES[tmpl] && window.LZ_TEMPLATES[tmpl].creed) || '';
     const creed = (strat && strat.creed) || tmplCreed;
-    const rcp = window.lzRecipeForStrategy ? window.lzRecipeForStrategy(sid) : { cards: [], research: [], factors: [] };
+    const rcp = window.lzRecipeForStrategy ? window.lzRecipeForStrategy(sid) : { cards: [], factors: [] };
     const codeNow = code, meta = symbol.meta;
     // 区间默认:近 120 交易日(日线)/ 近 10 交易日(30min);向导有值用向导
     const dayBars = symbol.bars;
@@ -516,13 +881,16 @@ function LuoziApp() {
       if (i0 >= 0 && i0 < 6) runBars = runBars.slice(6 - i0);
       if (!runBars.length) { setToast({ kind: 'handoff', text: '区间太靠前,因子窗口不足' }); setTimeout(() => setToast(null), 4000); return; }
     }
+    if (runBars.length > LZ_RUN_RECONCILE_LIMIT) {
+      setToast({ kind: 'handoff', text: '本次有 ' + runBars.length + ' 个研判点,超过单次 300 点的一致性上限——请缩短日期区间后再跑' });
+      setTimeout(() => setToast(null), 5000);
+      return;
+    }
     const total = runBars.length;
     const runId = window.lzRunId ? window.lzRunId() : ('run_' + Date.now());
-    let nBuy = 0, nSell = 0, nWatch = 0, firstDate = null, lastDate = null, lastModel = '';
-    realStopRef.current = false;
     setSelRun(null); setSelected(null);
     setRealDecs({});                                    // 进行中标记清零重来
-    setRealRun({ running: true, done: 0, total: total, cur: 0, seatName: seatName, errors: 0 });
+    setRealRun({ running: true, stopping: !!realStopRef.current, done: 0, total: total, cur: 0, seatName: seatName, errors: 0 });
     let done = 0, errors = 0;
     // 持仓状态机(纯 LLM 口径,镜像 lzRunBacktest 的 pos/entryPx/entryIdx):只活在本次「真跑」作用域,
     //   不落盘不外泄——喂给 decide 的 hold_entry/hold_bars 只是上下文,后端不因此改输出 schema。
@@ -551,12 +919,12 @@ function LuoziApp() {
           pa_method: (strat && strat.pa) ? (strat.paMethod || window.LZ_PA_METHOD_DEFAULT || '') : '',
         }, holdExtra);
       } catch (e) { res = null; }
-      if (realStopRef.current) break;
-      done++;
+      // 不在 await 后 break:服务端会先落盘再回响应,此刻即使用户刚点了停止，也必须把这笔
+      // 在途结果纳入即时 UI；停止只阻止「下一笔」发出。最终 run 头仍以后端回读为准。
       if (res && res.ok && res.direction) {
+        done++;
         const dir = res.direction;
         const side = /买/.test(dir) ? 'buy' : (/卖/.test(dir) ? 'sell' : 'watch');
-        if (side === 'buy') nBuy++; else if (side === 'sell') nSell++; else nWatch++;
         // 了结比例(2026-08-03):后端持仓语境下 position_action=减仓 → exit_fraction=0.5、清仓 → 1.0;
         //   旧记录/空仓语境无此字段 → 1(全平),故旧行为逐位不变。
         const efRaw = +res.exit_fraction;
@@ -568,16 +936,14 @@ function LuoziApp() {
           posFrac = +(posFrac * (1 - exitFrac)).toFixed(6);
           if (posFrac <= 1e-6) { pos = 0; entryPx = null; entryIdx = null; posFrac = 0; }
         }
-        if (!firstDate) firstDate = bar.date;
-        lastDate = bar.date;
-        if (res.model_name) lastModel = res.model_name;
         const rd = { key: 'true_' + sid + '@' + bar.date, seat: sid, code: codeNow, date: bar.date, side: side,
           direction: dir, conf: (res.confidence != null ? res.confidence : null),
           rationale: res.rationale || '', reasoning: res.reasoning || '', asof: res.asof || bar.date, model_name: res.model_name || '',
           // 出场语义原样带下去:回测按 exit_fraction 部分了结,卡片按 position_action 显形
           position_action: res.position_action || null,
           exit_fraction: (side === 'sell' ? exitFrac : null),
-          exit_engine: res.exit_engine || null, t_ref: res.t_ref || null };
+          exit_engine: res.exit_engine || null, t_ref: res.t_ref || null,
+          workspace_history_ref: res.workspace_history_ref || null };
         setRealDecs(prev => {
           const arr = (prev[codeNow] || []).filter(x => x.key !== rd.key).concat([rd]);
           return Object.assign({}, prev, { [codeNow]: arr });
@@ -585,22 +951,42 @@ function LuoziApp() {
       } else { errors++; }
       setRealRun(s => Object.assign({}, s, { done: done, errors: errors }));
     }
-    // run 头注册(≥1 笔成功;中途停也注册)→ 自动选中新 run(修「跑完不知道去哪看」)
-    if (firstDate) {
-      try {
-        await fetch((window.GUANLAN_BACKEND || '') + '/seats/runs', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ run_id: runId, code: codeNow, name: meta.name, strategy_id: sid, strategy_name: seatName,
-            tf: isMin ? '30min' : 'D', start_date: firstDate, end_date: lastDate, n_buy: nBuy, n_sell: nSell, n_watch: nWatch,
-            n_err: errors, model: lastModel || '' }),
-        });
-        setRunsBump(x => x + 1);
-        const list = window.lzRunsList ? await window.lzRunsList(codeNow) : null;
-        const head = list && list.find(r => r.run_id === runId);
-        if (head) { setSelRun(head); setRealDecs({}); }
-      } catch (e) {}
+    // 服务端 /decide 在返回前已同步落盘；因此 run 头绝不再信任前端响应计数，而是完整回读
+    // 同 run_id 的事实行后重算。回读失败宁可不注册头，也不制造「头 5 条、实际 6 条」分叉。
+    let persistedRows;
+    try {
+      persistedRows = await lzReadRunRowsStrict(runId, codeNow, sid);
+    } catch (e) {
+      setToast({ kind: 'handoff', text: '研判请求已停止，但落盘核对失败；为避免错误汇总，本次未生成回测头，请刷新后重试' });
+      setTimeout(() => setToast(null), 5200);
+      return;
     }
-    setRealRun(s => Object.assign({}, s, { running: false, cur: null }));
+    const summary = lzSummarizeRunRows(persistedRows);
+    setRealRun(s => Object.assign({}, s, { done: summary.total, errors: errors }));
+    if (!summary.total) return;
+
+    const headPayload = {
+      run_id: runId, code: codeNow, name: meta.name, strategy_id: sid, strategy_name: seatName,
+      tf: isMin ? '30min' : 'D', start_date: summary.firstDate, end_date: summary.lastDate,
+      n_buy: summary.nBuy, n_sell: summary.nSell, n_watch: summary.nWatch,
+      n_err: errors, model: summary.lastModel || '', stopped: !!realStopRef.current,
+    };
+    try {
+      const reg = await fetch((window.GUANLAN_BACKEND || '') + '/seats/runs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(headPayload),
+      });
+      const regBody = await reg.json();
+      if (!reg.ok || !regBody || !regBody.ok) throw new Error((regBody && regBody.reason) || ('HTTP ' + reg.status));
+      setRunsBump(x => x + 1);
+      const list = window.lzRunsList ? await window.lzRunsList(codeNow) : null;
+      const head = (list && list.find(r => r.run_id === runId)) || Object.assign({ ts: new Date().toISOString() }, headPayload);
+      setSelRun(head);
+      setRealDecs({});
+    } catch (e) {
+      setToast({ kind: 'handoff', text: '研判已落盘并核对完成，但回测头注册失败；未展示不一致汇总，请稍后重试' });
+      setTimeout(() => setToast(null), 5200);
+    }
   };
 
   // 切页/切票 → 清选中与触发标记
@@ -625,10 +1011,23 @@ function LuoziApp() {
         const side = /买/.test(dir) ? 'buy' : (/卖/.test(dir) ? 'sell' : 'watch');
         return { key: 'run_' + (r.id || key), seat: r.strategy_id || 'run', idx, date: key, side,
                  direction: dir, conf: (r.confidence == null ? null : +r.confidence),
-                 rationale: r.rationale || '', reasoning: r.reasoning || null, asof: r.asof,
-                 model_name: r.model_name || '', key_evidence: r.key_evidence || [],
+                  rationale: r.rationale || '', reasoning: r.reasoning || null, asof: r.asof,
+                  model_name: r.model_name || '', key_evidence: r.key_evidence || [],
+                  source: r.source || '', preset_id: r.preset_id || '', badges: r.badges || [],
+                  triggers: r.triggers || [], escalation_triggers: r.escalation_triggers || [],
+                  trigger_summary: r.trigger_summary || '', escalation_digest: r.escalation_digest || '',
+                  node_summaries: r.node_summaries || null, agent_summaries: r.agent_summaries || null,
+                  node_statuses: r.node_statuses || null, orchestration: r.orchestration || null,
+                  deep_quality: r.deep_quality || null, evidence_warnings: r.evidence_warnings || null,
+                  confidence_band: r.confidence_band || '',
+                  orchestration_mode: r.orchestration_mode || '', orchestration_grade: r.orchestration_grade || '',
+                  deep_variant: r.deep_variant || '', deep_status: r.deep_status || '', coverage: r.coverage || '',
+                  evidence_note: r.evidence_note || '',
                  recipe_factors: r.recipe_factors || [], card_names: r.card_names || [],
-                 research: r.research || [], factors_std: r.factors_std || null,
+                 factors_std: r.factors_std || null,
+                 // 旧 run 只保留「曾引用」布尔，不把历史研报标题/正文带入详情对象。
+                 legacy_research: !!r.legacy_research || (Array.isArray(r.research) && r.research.length > 0),
+                 workspace_history_ref: r.workspace_history_ref || null,
                  regime_asof: r.regime_asof || null,
                  recipe_factors_vintage: r.recipe_factors_vintage || [],
                  hybrid_direction: r.hybrid_direction || dir,
@@ -714,7 +1113,7 @@ function LuoziApp() {
     return () => { alive = false; };
   }, [tf, code, realSyms, selRun, page, wizFreq]);
 
-  // 今日页日内:轮询今日 5min 拼接(30s)
+  // 今日页日内:盘中轮询今日 5min 拼接(30s)，休市只读一次最终快照。
   useEffect(() => {
     if (page !== 'today') return;
     if (tf !== '60' && tf !== '30' && tf !== '15' && tf !== '5') return;
@@ -734,9 +1133,10 @@ function LuoziApp() {
       });
     });
     pull();
+    if (liveMarketOpen !== true) return () => { alive = false; };
     const iv = setInterval(pull, 30000);
     return () => { alive = false; clearInterval(iv); };
-  }, [page, tf, code]);
+  }, [page, tf, code, liveMarketOpen]);
 
   // 今日页 1min:整批替换(20s)。packet.code + 单调 seq 双闸，防切票时旧请求晚回覆盖。
   useEffect(() => {
@@ -752,9 +1152,10 @@ function LuoziApp() {
     });
     };
     pull();
+    if (liveMarketOpen !== true) return () => { alive = false; bars1SeqRef.current++; };
     const iv = setInterval(pull, 20000);
     return () => { alive = false; bars1SeqRef.current++; clearInterval(iv); };
-  }, [page, tf, code]);
+  }, [page, tf, code, liveMarketOpen]);
 
   // 复盘回灌:当前 run 成绩提炼为草稿经验卡
   const distillToCard = () => {
@@ -877,7 +1278,7 @@ function LuoziApp() {
         <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>朱砂涨 · 黛绿跌 · B 买 · S 卖</span>
       </div>
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        <CandleChart bars={dispFrame.fbars} decisions={[]} truedecs={chartMarks} activeSeats={selRun ? Array.from(new Set(runDecs.map(d => d.seat))) : active} selected={selected} onSelect={setSelected} revealTo={dispFrame.freveal} view={chartView} live={page === 'today'} asOf={{ on: false, date: '' }} triggers={orderTriggers} newsMarkers={newsMarkers} onNewsClick={setNewsPanel} />
+        <CandleChart bars={dispFrame.fbars} decisions={[]} truedecs={chartMarks} activeSeats={selRun ? Array.from(new Set(runDecs.map(d => d.seat))) : active} selected={selected} onSelect={setSelected} revealTo={dispFrame.freveal} view={chartView} live={page === 'today'} asOf={{ on: false, date: '' }} triggers={page === 'today' ? currentOrderTriggers : []} newsMarkers={newsMarkers} onNewsClick={setNewsPanel} />
         {newsPanel && (() => {
           const items = newsPanel.items || [];
           const sourceCN = {
@@ -965,9 +1366,9 @@ function LuoziApp() {
         <option value="30min">30 分钟</option>
       </select>
       <span onClick={runRealThink} title="逐 bar 真调 LLM(PIT·只用≤当日信息);运行中再点=停;跑完自动选中该 run"
-        className="serif" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', whiteSpace: 'nowrap', fontSize: 11.5, padding: '4px 13px', borderRadius: 7, flexShrink: 0, border: '1px solid ' + (realRun.running ? 'var(--dai)' : 'var(--zhu-soft)'), color: realRun.running ? 'var(--dai)' : 'var(--yin)', background: realRun.running ? 'rgba(74,107,92,0.07)' : 'rgba(168,57,45,0.05)' }}>
+        className="serif" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: realRun.stopping ? 'wait' : 'pointer', whiteSpace: 'nowrap', fontSize: 11.5, padding: '4px 13px', borderRadius: 7, flexShrink: 0, border: '1px solid ' + (realRun.running ? 'var(--dai)' : 'var(--zhu-soft)'), color: realRun.running ? 'var(--dai)' : 'var(--yin)', background: realRun.running ? 'rgba(74,107,92,0.07)' : 'rgba(168,57,45,0.05)' }}>
         {realRun.running
-          ? <React.Fragment><span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--dai)', animation: 'pulse 1s ease-in-out infinite' }} />停止 · {realRun.done}/{realRun.total}{realRun.errors ? ' · ' + realRun.errors + '失败' : ''}</React.Fragment>
+          ? <React.Fragment><span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--dai)', animation: 'pulse 1s ease-in-out infinite' }} />{realRun.stopping ? '正在收尾' : '停止'} · {realRun.done}/{realRun.total}{realRun.errors ? ' · ' + realRun.errors + '失败' : ''}</React.Fragment>
           : '✦ 开始真跑'}
       </span>
       <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>每 bar 一次 LLM 调用(fast),120 日 ≈ 数分钟;可中途停,已跑段照样成 run</span>
@@ -984,26 +1385,66 @@ function LuoziApp() {
         <React.Fragment>
           <MarketBar symbol={symbol} revealTo={cursor} mode="live" market={market} quote={quote} />
           <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
-            <TicketList code={code} onSelect={setCode} poolTick={poolTickV}
+            <TicketList code={code} onSelect={setCode} poolTick={poolTickV} marketOpen={liveMarketOpen}
               assignments={watchAssignments} assignmentMode={assignmentMode}
               onConfigureWatch={setWatchEdit} />
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}>
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, position: 'relative' }}>
               <div style={{ display: 'flex', alignItems: 'stretch', borderBottom: '1px solid var(--line)', flexShrink: 0, overflowX: 'auto' }}>
                 <StockHero symbol={symbol} rt={cursor} mode="live" quote={quote} />
                 <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '0 14px' }}>
                   <span className="serif" style={{ fontSize: 12, fontWeight: 600, color: 'var(--yin)', whiteSpace: 'nowrap' }}>{curName}</span>
-                  <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)', marginTop: 2, whiteSpace: 'nowrap' }}>当前策略 · 绑票/配方去「策略」页</span>
+                  <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)', marginTop: 2, whiteSpace: 'nowrap' }}>当前策略 · 自动盯盘与本次研判同源</span>
                 </div>
+                <button type="button" onClick={() => setWatchEdit(symbol.meta)} className="mono" title="更换本票负责 Agent、周期、节奏与自动研判方式"
+                  style={{ alignSelf: 'center', border: '1px solid var(--line)', borderRadius: 6, padding: '3px 8px', background: 'transparent', color: 'var(--ink-3)', fontSize: 8.5, cursor: 'pointer', whiteSpace: 'nowrap' }}>更换策略</button>
+                <span style={{ flex: 1, minWidth: 10 }} />
+                <button type="button" data-testid="luozi-workbench-trigger" aria-controls="luozi-workbench" aria-expanded={todayToolOpen}
+                  onClick={() => toggleTodayTool(todayTool)} className="serif"
+                  style={{ alignSelf: 'center', margin: '0 12px', display: 'flex', alignItems: 'center', gap: 7, border: '1px solid ' + (todayToolOpen ? 'var(--zhu-soft)' : 'var(--line)'), borderRadius: 8, padding: '5px 11px', background: todayToolOpen ? 'rgba(168,57,45,0.06)' : 'transparent', color: todayToolOpen ? 'var(--yin)' : 'var(--ink-2)', fontSize: 10.5, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                  {currentOrderTriggered && <span title="当前股票有条件单触发" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--zhu)', boxShadow: '0 0 0 2px rgba(168,57,45,0.12)' }} />}
+                  {todayToolOpen ? '收起操作台' : '打开操作台'} <span className="mono" style={{ fontSize: 8 }}>{todayToolOpen ? '×' : '◫'}</span>
+                </button>
               </div>
               {chartCenter(false)}
-            </div>
-            <div style={{ width: 372, flexShrink: 0, display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', overflowX: 'hidden', background: 'var(--paper)' }}>
-              <JudgeCard code={symbol.meta.code} name={symbol.meta.name} industry={symbol.meta.industry || ''} strat={curStrat} regime={market && market.regime}
-                assignment={currentAssignment} assignmentMode={assignmentMode} onConfigureWatch={() => setWatchEdit(symbol.meta)} />
-              <OrderWatchPanel code={symbol.meta.code} name={symbol.meta.name} mode="live" asOf={null} seatId={curSid} strategies={availableStrategies} symbol={symbol}
-                onTrigger={(t) => setOrderTriggers(ts => [...ts.filter(x => x.id !== t.id), t])} />
-              <DecisionTrail code={symbol.meta.code} />
-              <OrderbookTicksPanel book={book} ticks={ticks} />
+              <aside id="luozi-workbench" data-testid="luozi-workbench" role="dialog" aria-modal="false" aria-label="落子操作台" aria-hidden={!todayToolOpen}
+                style={{ position: 'absolute', zIndex: 24, top: 55, right: 0, bottom: 0, width: 438, maxWidth: 'calc(100% - 12px)', display: 'flex', flexDirection: 'column', background: 'var(--paper)', borderTop: '1px solid var(--line)', borderLeft: '1px solid var(--line)', boxShadow: todayToolOpen ? '-10px 0 30px rgba(28,24,20,0.18)' : 'none', transform: todayToolOpen ? 'translateX(0)' : 'translateX(calc(100% + 24px))', opacity: todayToolOpen ? 1 : 0, visibility: todayToolOpen ? 'visible' : 'hidden', pointerEvents: todayToolOpen ? 'auto' : 'none', transition: 'transform .2s ease, opacity .16s ease, visibility .2s' }}>
+                <div style={{ flexShrink: 0, padding: '11px 13px 9px', borderBottom: '1px solid var(--line)', background: 'linear-gradient(180deg, rgba(138,111,63,0.055), transparent)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className="seal serif" style={{ width: 24, height: 24, fontSize: 12 }}>落</span>
+                    <div style={{ minWidth: 0 }}>
+                      <div className="serif" style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--ink-1)' }}>{symbol.meta.name} · 操作台</div>
+                      <div className="mono" style={{ marginTop: 2, fontSize: 8.5, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{symbol.meta.code} · {curName} · {quote && quote.fresh ? '实时盘中' : '最新快照'}</div>
+                    </div>
+                    <button type="button" onClick={() => setWatchEdit(symbol.meta)} className="mono" style={{ marginLeft: 'auto', border: '1px solid var(--line)', borderRadius: 6, padding: '3px 7px', background: 'transparent', color: 'var(--ink-3)', fontSize: 8.5, cursor: 'pointer', whiteSpace: 'nowrap' }}>更换策略</button>
+                    <button type="button" aria-label="关闭操作台" onClick={() => setTodayToolOpen(false)} style={{ border: 'none', background: 'transparent', color: 'var(--ink-3)', fontSize: 17, cursor: 'pointer', padding: '0 2px' }}>×</button>
+                  </div>
+                  <div role="tablist" aria-label="操作台功能" style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 5, marginTop: 10 }}>
+                    {workbenchTabs.map(([k, label]) => (
+                      <button type="button" role="tab" key={k} aria-selected={todayTool === k} onClick={() => { setTodayTool(k); setTodayToolOpen(true); }}
+                        style={{ border: '1px solid ' + (todayTool === k ? 'var(--zhu-soft)' : 'var(--line)'), borderRadius: 7, padding: '5px 8px', background: todayTool === k ? 'rgba(168,57,45,0.07)' : 'transparent', color: todayTool === k ? 'var(--yin)' : 'var(--ink-3)', fontFamily: 'var(--serif)', fontSize: 10.5, cursor: 'pointer' }}>{label}{k === 'order' && currentOrderTriggered ? ' · 已触发' : ''}</button>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ flex: 1, minHeight: 0, position: 'relative', overflow: 'hidden' }}>
+                  <div data-workbench-panel="judge" aria-hidden={todayTool !== 'judge'} style={{ display: todayTool === 'judge' ? 'block' : 'none', height: '100%', overflowY: 'auto' }}>
+                    <JudgeCard code={symbol.meta.code} name={symbol.meta.name} industry={symbol.meta.industry || ''} strat={curStrat} regime={market && market.regime} quote={quote}
+                      assignment={currentAssignment} assignmentMode={assignmentMode} onConfigureWatch={null}
+                      onDecisionComplete={() => setTodayTrailBump(v => v + 1)} />
+                  </div>
+                  <div data-workbench-panel="order" aria-hidden={todayTool !== 'order'} style={{ display: todayTool === 'order' ? 'block' : 'none', height: '100%', overflowY: 'auto' }}>
+                    <OrderWatchPanel code={symbol.meta.code} name={symbol.meta.name} mode="live" asOf={null} seatId={curSid} strategies={availableStrategies} symbol={symbol} marketOpen={liveMarketOpen}
+                      onRecordChange={() => setTodayTrailBump(v => v + 1)}
+                      onTrigger={(t) => setOrderTriggers(ts => [...ts.filter(x => x.id !== t.id), t])} />
+                    <details style={{ margin: '10px 13px 14px', border: '1px solid var(--line)', borderRadius: 9, background: 'rgba(138,111,63,0.035)' }}>
+                      <summary className="serif" style={{ cursor: 'pointer', padding: '8px 10px', color: 'var(--ink-2)', fontSize: 11 }}>行情参考 · 五档盘口 / 逐笔</summary>
+                      <OrderbookTicksPanel book={book} ticks={ticks} />
+                    </details>
+                  </div>
+                  <div data-workbench-panel="trail" aria-hidden={todayTool !== 'trail'} style={{ display: todayTool === 'trail' ? 'block' : 'none', height: '100%', overflowY: 'auto' }}>
+                    <DecisionTrail code={symbol.meta.code} strategyId={curSid} active={todayToolOpen && todayTool === 'trail'} bump={todayTrailBump} />
+                  </div>
+                </div>
+              </aside>
             </div>
           </div>
         </React.Fragment>
@@ -1022,7 +1463,7 @@ function LuoziApp() {
                 {selected && selected._isRun
                   ? <RunDecCard dec={selected} />
                   : <div style={{ padding: 20, color: 'var(--ink-3)', fontFamily: 'var(--serif)', fontSize: 12.5, lineHeight: 1.7, textWrap: 'pretty' }}>
-                      点上方 run 内的任意一笔决策,或 K 线上的金框 <b style={{ color: 'var(--zhu)' }}>B</b>/<b style={{ color: 'var(--dai)' }}>S</b> —— 此处摊开完整证据链:vintage 因子 IC、当日浮出研报、当日大盘、价量形态与思维链。
+                      点上方 run 内的任意一笔决策,或 K 线上的金框 <b style={{ color: 'var(--zhu)' }}>B</b>/<b style={{ color: 'var(--dai)' }}>S</b> —— 此处摊开完整证据链:vintage 因子 IC、工作空间历史摘要使用记录、当日大盘、价量形态与思维链。
                     </div>}
               </div>
             </div>

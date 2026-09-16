@@ -405,6 +405,33 @@ def _news_titles(
     )
 
 
+def _pattern_hits(
+    pattern_hits_fn: Callable[[str], Sequence[str]] | None, code: str
+) -> tuple[str, ...] | None:
+    """Dictionary-recognizer hits from an injected deterministic port."""
+    if pattern_hits_fn is None:
+        return None
+    try:
+        raw = pattern_hits_fn(code)
+    except Exception as exc:  # any port failure is absence, never "no hit"
+        _LOG.warning(
+            "escalation pattern port failed for %s (trigger left inert): %s",
+            code, exc)
+        return None
+    if raw is None:
+        return None
+    if isinstance(raw, (str, bytes, Mapping)):
+        _LOG.warning("escalation pattern port returned invalid %s for %s",
+                     type(raw).__name__, code)
+        return None
+    try:
+        items = list(raw)
+    except TypeError:
+        return None
+    return tuple(item.strip() for item in items
+                 if isinstance(item, str) and item.strip())
+
+
 # =========================================================================== #
 # context assembly                                                             #
 # =========================================================================== #
@@ -417,6 +444,7 @@ def build_escalation_context(
     quote: Mapping[str, Any] | None = None,
     strat: Mapping[str, Any] | None = None,
     news_titles_fn: Callable[[str], Sequence[str]] | None = None,
+    pattern_hits_fn: Callable[[str], Sequence[str]] | None = None,
 ) -> EscalationContext:
     """Assemble the judge's context from INJECTED data only.
 
@@ -442,9 +470,7 @@ def build_escalation_context(
         stop_price=stop_price,
         take_price=take_price,
         news_titles=_news_titles(news_titles_fn, canonical),
-        # AMEND-6a (形态词典 feed) has not landed: there is no pattern port to
-        # inject yet, so the honest value is "absent" → inert-with-badge.
-        pattern_hits=None,
+        pattern_hits=_pattern_hits(pattern_hits_fn, canonical),
         opt_in_deep=bool(strat.get("deep_research"))
         if isinstance(strat, Mapping)
         else False,

@@ -1,0 +1,103 @@
+{
+  "schema_version": "company-research-recipe@2",
+  "recipe_id": "company_research_v1",
+  "revision": 2,
+  "integration_audit_date": "2026-09-04",
+  "binding": {
+    "workspace": "server_current_session",
+    "subject": "server_workspace_subject",
+    "workspace_kind": "stock",
+    "subject_kind": "a_share",
+    "client_workspace_id": "forbidden",
+    "client_subject": "forbidden"
+  },
+  "approval": {
+    "report_dispatch": "explicit_confirmation",
+    "auto_approve": false,
+    "prepare_tool_confirmation": "none_private_scoped",
+    "downstream_effects": "covered_by_confirmed_report_dispatch"
+  },
+  "restart": {
+    "resume_across_restart": true,
+    "stale_running": "resume_same_job",
+    "relaunch": "explicit_new_request"
+  },
+  "stages": [
+    {
+      "id": "prepare",
+      "operation": "ww_workspace_company_research_prepare",
+      "execution_owner": "console.workspace_tools",
+      "depends_on": [],
+      "side_effect": "workspace_write",
+      "approval_scope": "none_private_scoped"
+    },
+    {
+      "id": "research_report",
+      "operation": "ww_report_run",
+      "execution_owner": "console.report_background",
+      "depends_on": ["prepare"],
+      "side_effect": "background_process",
+      "approval_scope": "explicit_report_confirmation"
+    },
+    {
+      "id": "risk_gate",
+      "operation": "build_company_risk_contract",
+      "execution_owner": "console.workspace_report_finalizer",
+      "depends_on": ["research_report"],
+      "side_effect": "none",
+      "approval_scope": "confirmed_report_dispatch"
+    },
+    {
+      "id": "report_gate",
+      "operation": "validate_company_research_report_strict",
+      "execution_owner": "console.workspace_report_finalizer",
+      "depends_on": ["risk_gate"],
+      "side_effect": "none",
+      "approval_scope": "confirmed_report_dispatch"
+    },
+    {
+      "id": "workspace_asset_finalizer",
+      "operation": "finalize_company_research_report",
+      "execution_owner": "console.workspace_report_finalizer",
+      "depends_on": ["report_gate"],
+      "side_effect": "workspace_write",
+      "approval_scope": "confirmed_report_dispatch"
+    }
+  ],
+  "entrypoints": {
+    "console": {
+      "status": "connected",
+      "route": "console_confirmed_typed_v2_background",
+      "connected_stages": [
+        "prepare",
+        "research_report",
+        "risk_gate",
+        "report_gate",
+        "workspace_asset_finalizer"
+      ],
+      "missing_capabilities": []
+    },
+    "glmcp": {
+      "status": "unavailable",
+      "route": "glmcp_detached_report",
+      "connected_stages": [],
+      "missing_capabilities": [
+        "trusted_workspace_subject_binding",
+        "company_prepare_bundle",
+        "strict_workspace_report_finalizer"
+      ]
+    },
+    "typed_orchestration_v2": {
+      "status": "connected",
+      "route": "console_company_typed_v2_frozen_plan",
+      "connected_stages": [
+        "prepare",
+        "research_report",
+        "risk_gate",
+        "report_gate",
+        "workspace_asset_finalizer"
+      ],
+      "missing_capabilities": []
+    }
+  }
+}

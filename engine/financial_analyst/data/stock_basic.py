@@ -11,6 +11,8 @@ from typing import Dict, Optional
 
 import pandas as pd
 
+from financial_analyst.data.code_norm import is_bj_code
+
 BASIC_PATH = os.environ.get(
     "GL_STOCK_BASIC",
     r"G:\stocks\stock_data\parquet\tushare_stock_basic.parquet",
@@ -37,11 +39,14 @@ def _normalize_ts_code(code: str) -> Optional[str]:
     m = re.match(r"^([A-Z]{2})(\d{6})$", c)
     if m:
         return f"{m.group(2)}.{m.group(1)}"
-    # 裸 6 位:从首位推交易所(6→SH,其余→SZ)
+    # 裸 6 位:从号段推交易所(4/8/920→BJ,6→SH,其余→SZ)
     m = re.match(r"^(\d{6})$", c)
     if m:
         digits = m.group(1)
-        exch = "SH" if digits[0] == "6" else "SZ"
+        if is_bj_code(digits):
+            exch = "BJ"
+        else:
+            exch = "SH" if digits[0] == "6" else "SZ"
         return f"{digits}.{exch}"
     return None
 

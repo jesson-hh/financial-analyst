@@ -36,30 +36,25 @@ The four cells this file owns (2 vocabularies x 2 presets):
 2. full deep preset x OPTIONAL — ``text.news`` / ``news``
 3. screening lane   x OPTIONAL — ``text.news`` / ``news`` (the same worker on
    the A-line; ledger §11.2 records that every screening run now forces a real
-   news read, so this is the lane's live outage shape)
-4. screening lane   x CORE   — **structurally unreachable, and pinned as
-   exactly that**: the lane's nine workers carry exactly ONE reviewed prefetch
-   row (``text.news`` / ``news``) and that method is ``optional=True``, so no
-   scheduled seat on this lane can produce the core vocabulary.  The pin is
-   falsifiable, not a shrug: the day a core-method row enters the screening
-   lane it reddens and whoever put it there must drive cell 4 for real.
+   news read, so this is the lane's optional outage shape)
+4. screening lane   x CORE — ``pv.price_action`` / ``ohlcv``.  The price-action
+   evidence seat is now a first-class screening input, so the core arm is
+   driven rather than treated as structurally unreachable.
 
-**Graph-level consequence** (``TestTheTrunkSurvivesTheOutage``): the two aux
-readers reach the debate ONLY through ``DEGRADE`` dependencies and are absent
-from the decision spine ``sentiment -> research-mgr -> pm -> trader``, so an
-aux node that ends FAILED/INCOMPLETE cannot block the trunk.  That is the
-executable form of "degrade badge present, trunk completes, run COMPLETED",
-and it is what the mutation ``degrade -> REQUIRED`` reddens.  The end-to-end
-observation of a COMPLETED ten-node run under a live outage is Task 7's
-(the plan assigns the real run there); this file does not claim it.
+**Graph-level consequence** (``TestTheDecisionSpineFailsClosedOnOutage``): the
+full deep preset now treats technical and news evidence as blocking inputs to
+the debate and research manager.  A FAILED/INCOMPLETE evidence reader therefore
+halts the decision spine instead of producing a deceptively complete decision.
+The sealed dependency shape and a BLOCK->DEGRADE positive control pin that
+fail-closed policy without weakening the outage vocabulary checks.
 
 Everything runs against the REAL sealed Phase-9 catalog, the REAL production
 assembly, the REAL per-run subject projection and the REAL
 ``worker.execute_node``.  The outage is injected at the ONE production door
-(``adapters/data_world._BACKEND``) as a probe that answers ``status: planned``
-— the idiom ``test_production_data_provider.py::TestDegradationMatrix`` already
-uses.  Zero network, zero LLM (both vocabularies are decided BEFORE the model
-call at ``worker.py`` step 4b), zero ``var/`` writes.
+(``adapters/data_world._BACKEND``) as a strict, provenance-complete probe that
+answers the reviewed transient state ``status: rate_limited``.  Zero network,
+zero LLM (both vocabularies are decided BEFORE the model call at ``worker.py``
+step 4b), zero ``var/`` writes.
 
 Run: ``python -m pytest tests/orchestration/test_l3_d2_outage.py -q``
 """
@@ -120,6 +115,8 @@ from guanlan_v2.orchestration.pipeline.contracts import (
 )
 from guanlan_v2.orchestration.pipeline.deep_decide import (
     DEEP_DECIDE_PRESET_ID,
+    DeepRunSubject,
+    RUN_SUBJECT_SCHEMA_REF as DEEP_SUBJECT_SR,
     materialize_deep_decide_draft,
 )
 from guanlan_v2.orchestration.pipeline.screening import (
@@ -150,6 +147,7 @@ CODE = "000858"
 #: bit in :class:`TestTheVocabularySplitIsTheMethodSpec`, never assumed.
 CORE_PAIR = ("pv.technical", "verified_snapshot")
 OPTIONAL_PAIR = ("text.news", "news")
+SCREENING_CORE_PAIR = ("pv.price_action", "ohlcv")
 
 
 class _FixedClock:
@@ -168,22 +166,46 @@ class _PoisonedStores:
 
 
 class _OutageProbe:
-    """A ``live_client.probe`` that answers ``status: planned`` for every call.
+    """A strict live probe that answers ``rate_limited`` for every call.
 
-    The adapter turns that into ``NotConfiguredError`` per attempt, the frozen
+    The adapter turns that into ``RateLimitError`` per attempt, the frozen
     single-entry route exhausts, and ``data/registry.py::_exhaustion`` decides
     the vocabulary on the method spec's ``optional`` bit.  This is a real
-    outage shape (a source that answers but serves nothing), not a monkeypatched
-    exception at the seam under test.
+    reviewed outage shape, not a legacy status or a monkeypatched exception at
+    the seam under test.  Every provenance field required of an injected probe
+    is present, so a failure here cannot be a malformed-envelope false positive.
     """
+
+    _PROVIDER_BY_SOURCE = {
+        "tdx_kline": "tdx",
+        "tdx_realtime_quote": "tdx",
+        "tencent_realtime_quote": "tencent",
+        "eastmoney_stock_news": "eastmoney",
+    }
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
     def __call__(self, source, code="", date="", limit=20, timeout=90):
         self.calls.append({"source": source, "code": code, "date": date})
-        return {"ok": True, "status": "planned", "n": 0, "items": [],
-                "error": "", "note": "probe not implemented"}
+        provider = self._PROVIDER_BY_SOURCE[source]
+        return {
+            "ok": True,
+            "status": "rate_limited",
+            "source": source,
+            "provider": provider,
+            "actual_provider": provider,
+            "schema_version": "guanlan.live-source-result.v2",
+            "network_used": True,
+            "circuit_state": "closed",
+            "cache_hit": False,
+            "fallback_level": 0,
+            "attempted_sources": [],
+            "n": 0,
+            "items": [],
+            "error": "rate limited",
+            "note": "synthetic reviewed transient outage",
+        }
 
 
 class _RefusalSpy:
@@ -221,6 +243,19 @@ class _SubjectCommitter:
 
 def _subject_ref(code: str = CODE) -> TypedPayloadRef:
     return _SubjectCommitter()(RunSubject(code=code, as_of=AS_OF))
+
+
+def _deep_subject(code: str = CODE) -> DeepRunSubject:
+    return DeepRunSubject(code=code, as_of=AS_OF, evidence_tf="day")
+
+
+def _deep_subject_ref(code: str = CODE) -> TypedPayloadRef:
+    subject = _deep_subject(code)
+    return TypedPayloadRef(
+        schema_ref=DEEP_SUBJECT_SR,
+        payload_ref=PayloadRef(
+            namespace="main", object_id=f"deep-subject-{subject.code}",
+            content_digest=subject.semantic_digest()))
 
 
 def _recipe_capture(recipe, *, snapshot_id: str):
@@ -351,7 +386,7 @@ def deep_env(reg9, snap, bundle, view, recipe):
         request=request,
         preset_registry=load_phase10_preset_registry(PRODUCTION_PRESETS_DIR),
         preset_id=DEEP_DECIDE_PRESET_ID, context_snapshot_ref=base.ctx_ref,
-        subject_ref=_subject_ref(), subject=RunSubject(code=CODE, as_of=AS_OF),
+        subject_ref=_deep_subject_ref(), subject=_deep_subject(),
         clock=_FixedClock(), context=base.context,
         catalog=snap, schema_registry=reg9, draft_id="draft-l3d2-deep",
         run_id="run-l3d2-deep")
@@ -517,9 +552,10 @@ def _drive_under_outage(env, bundle, view, surface, worker_id, monkeypatch):
 # 0. the split itself — measured from the method specs, never assumed           #
 # =========================================================================== #
 class TestTheVocabularySplitIsTheMethodSpec:
-    def test_the_two_granted_methods_sit_on_opposite_sides_of_optional(
+    def test_the_driven_methods_cover_both_sides_of_optional(
             self, surface):
         assert surface.spec_by_method[CORE_PAIR[1]].optional is False
+        assert surface.spec_by_method[SCREENING_CORE_PAIR[1]].optional is False
         assert surface.spec_by_method[OPTIONAL_PAIR[1]].optional is True
 
     def test_every_granted_row_is_the_d2_shape(self, surface):
@@ -528,7 +564,7 @@ class TestTheVocabularySplitIsTheMethodSpec:
         precisely why an outage cannot end in a claimed success."""
         rows = {(r.worker_id, r.method_ref.id): r
                 for r in surface.prefetch_binding.operations}
-        for pair in (CORE_PAIR, OPTIONAL_PAIR):
+        for pair in (CORE_PAIR, OPTIONAL_PAIR, SCREENING_CORE_PAIR):
             row = rows[pair]
             assert row.invocation_mode == "always_invoke"
             assert row.success_requires_finalized_call is True
@@ -550,7 +586,7 @@ class TestTheFullDeepPresetUnderOutage:
         run = out.node_run
         assert run.status is NodeStatus.FAILED
         assert run.reason_code == "bridge_execution_error"
-        assert run.error_type == "NotConfiguredError", run.reason
+        assert run.error_type == "RateLimitError", run.reason
         assert out.artifact is None
         assert out.probe.calls, "the outage was never actually reached"
 
@@ -587,7 +623,7 @@ class TestTheFullDeepPresetUnderOutage:
 
 
 # =========================================================================== #
-# 3+4. the SCREENING lane — the optional arm live, the core arm unreachable      #
+# 3+4. the SCREENING lane — both outage vocabularies are live                     #
 # =========================================================================== #
 class TestTheScreeningLaneUnderOutage:
     def test_optional_news_outage_is_the_same_on_the_a_line(
@@ -605,94 +641,99 @@ class TestTheScreeningLaneUnderOutage:
         assert out.gateway.finalized_records() == ()
         assert out.probe.calls, "the outage was never actually reached"
 
-    def test_the_core_vocabulary_has_no_carrier_on_this_lane(self, surface):
-        """Cell 4, pinned as the structural fact it is rather than skipped.
+    def test_core_price_action_outage_fails_the_a_line_loudly(
+            self, screening_env, bundle, view, surface, monkeypatch):
+        """Cell 4.  The screening lane now schedules ``pv.price_action`` with
+        a reviewed CORE ``ohlcv`` row, so route exhaustion must be exercised on
+        this lane and must fail closed in the core vocabulary."""
+        out = _drive_under_outage(
+            screening_env, bundle, view, surface, SCREENING_CORE_PAIR[0],
+            monkeypatch)
+        run = out.node_run
+        assert run.status is NodeStatus.FAILED
+        assert run.reason_code == "bridge_execution_error"
+        assert run.error_type == "RateLimitError", run.reason
+        assert out.artifact is None
+        assert out.probe.calls, "the outage was never actually reached"
 
-        The screening lane schedules exactly ONE worker carrying a reviewed
-        prefetch row, and that row's method is OPTIONAL — so no scheduled seat
-        on this lane can reach the core-raise vocabulary.  The day a core-method
-        row enters this lane (a ``dec.pm`` / ``pv.technical`` seat, or a core
-        grant for an existing one) this pin reddens and cell 4 must be driven
-        for real instead of reasoned about."""
-        rows = {r.worker_id: r.method_ref.id
+    def test_the_screening_lane_carries_both_driven_rows(self, surface):
+        rows = {(r.worker_id, r.method_ref.id)
                 for r in surface.prefetch_binding.operations}
-        on_lane = {wid: mid for wid, mid in rows.items()
-                   if wid in set(SCREENING_LANE_WORKER_IDS)}
-        assert on_lane == {OPTIONAL_PAIR[0]: OPTIONAL_PAIR[1]}
-        assert all(surface.spec_by_method[mid].optional is True
-                   for mid in on_lane.values()), (
-            "a CORE-method row entered the screening lane: the core outage "
-            "vocabulary is now reachable here and must be pinned for real")
+        on_lane = {pair for pair in rows
+                   if pair[0] in set(SCREENING_LANE_WORKER_IDS)}
+        assert on_lane == {OPTIONAL_PAIR, SCREENING_CORE_PAIR}
+        assert surface.spec_by_method[OPTIONAL_PAIR[1]].optional is True
+        assert surface.spec_by_method[SCREENING_CORE_PAIR[1]].optional is False
 
 
 # =========================================================================== #
-# 5. the graph consequence — the trunk cannot be blocked by an aux outage        #
+# 5. graph consequence — evidence outages stop the decision spine fail-closed    #
 # =========================================================================== #
-class TestTheTrunkSurvivesTheOutage:
-    """The other half of D-2 Option A's "bounded consequence" claim.
+class TestTheDecisionSpineFailsClosedOnOutage:
+    """The evidence readers are mandatory inputs, not degradable decoration.
 
-    A hard aux failure is only acceptable because the two readers are AUX: they
-    reach the debate through ``DEGRADE`` dependencies and the decision spine
-    never touches them.  This is what makes "the trunk completes / the run ends
-    COMPLETED" true, and it is exactly what the mutation ``DEGRADE -> REQUIRED``
-    destroys.  (The end-to-end COMPLETED observation under a live outage is
-    Task 7's real run; this class pins the property that makes it possible.)
+    The current full preset routes technical and news evidence into both debate
+    sides and directly into the research manager with BLOCK edges.  Consequently
+    either outage vocabulary above stops downstream decision production.  This
+    is the intentional safety property: a run must not look complete after a
+    required evidence channel failed.
     """
 
-    TRUNK = ("text.sentiment", "dec.research_mgr", "dec.pm", "dec.trader")
+    EXPECTED_EDGES = {
+        ("bull-r1", "technical"),
+        ("bull-r1", "news"),
+        ("bear-r1", "technical"),
+        ("bear-r1", "news"),
+        ("research-mgr", "technical"),
+        ("research-mgr", "news"),
+    }
 
     def _record(self):
         return load_phase10_preset_registry(PRODUCTION_PRESETS_DIR).get(
             DEEP_DECIDE_PRESET_ID)
 
-    def test_neither_granted_reader_is_on_the_decision_spine(self):
-        record = self._record()
-        by_id = {n.id: n for n in record.nodes}
-        trunk_nodes = {n.id for n in record.nodes if n.worker_id in self.TRUNK}
-        aux_nodes = {n.id for n in record.nodes
-                     if n.worker_id in (CORE_PAIR[0], OPTIONAL_PAIR[0])}
-        assert len(aux_nodes) == 2, sorted(aux_nodes)
-        assert not (aux_nodes & trunk_nodes)
-        # …and no trunk node depends on either of them, at any policy.
-        for nid in trunk_nodes:
-            depends = {d.upstream_node_id for d in by_id[nid].dependencies}
-            assert not (depends & aux_nodes), (
-                f"trunk node {nid!r} depends on an aux evidence node: an outage "
-                "would stop being bounded")
+    @staticmethod
+    def _reader_edges(record):
+        reader_ids = {n.id for n in record.nodes
+                      if n.worker_id in (CORE_PAIR[0], OPTIONAL_PAIR[0])}
+        assert reader_ids == {"technical", "news"}
+        return [(n.id, d) for n in record.nodes for d in n.dependencies
+                if d.upstream_node_id in reader_ids]
 
-    def test_every_dependency_on_a_granted_reader_is_degrade(self):
-        """The load-bearing half: every edge OUT of the two aux readers is a
-        ``DEGRADE`` dependency, so a FAILED/INCOMPLETE aux node weakens the
-        debate instead of blocking the run.  Flip one to REQUIRED and this
-        reddens — that is the mutation D-2's bounded-consequence claim rests
-        on."""
+    def test_both_readers_feed_the_debate_and_research_manager(self):
         record = self._record()
-        aux_nodes = {n.id for n in record.nodes
-                     if n.worker_id in (CORE_PAIR[0], OPTIONAL_PAIR[0])}
-        edges = [(n.id, d.upstream_node_id, d.policy) for n in record.nodes
-                 for d in n.dependencies if d.upstream_node_id in aux_nodes]
-        assert edges, "the aux readers feed nothing; the preset changed shape"
-        offenders = [e for e in edges if e[2] is not DependencyPolicy.DEGRADE]
-        assert offenders == [], (
-            f"a non-DEGRADE dependency on an aux evidence node: {offenders}")
+        edges = self._reader_edges(record)
+        assert {(downstream, dep.upstream_node_id)
+                for downstream, dep in edges} == self.EXPECTED_EDGES
 
-    def test_the_degrade_policy_pin_is_load_bearing(self):
-        """Positive control for the mutation above: the same assertion run over
-        a record whose aux edge was flipped to REQUIRED DOES fail, so a green
-        result here is evidence rather than decoration."""
+    def test_every_dependency_on_a_required_reader_is_block(self):
+        """Every outgoing evidence edge accepts only a completed reader."""
         record = self._record()
-        aux_nodes = {n.id for n in record.nodes
-                     if n.worker_id in (CORE_PAIR[0], OPTIONAL_PAIR[0])}
-        victim = next(n for n in record.nodes
-                      if any(d.upstream_node_id in aux_nodes for d in n.dependencies))
+        edges = self._reader_edges(record)
+        assert all(dep.policy is DependencyPolicy.BLOCK
+                   for _downstream, dep in edges)
+        assert all(dep.accept_statuses == frozenset({NodeStatus.COMPLETED})
+                   for _downstream, dep in edges)
+
+    def test_the_block_policy_pin_is_load_bearing(self):
+        """Positive control: flipping one edge to DEGRADE violates the pin."""
+        record = self._record()
+        victim = next(n for n in record.nodes if n.id == "research-mgr")
+        flipped = False
+        dependencies = []
+        for dep in victim.dependencies:
+            if not flipped and dep.upstream_node_id == "technical":
+                dep = dep.model_copy(update={
+                    "policy": DependencyPolicy.DEGRADE,
+                    "accept_statuses": frozenset(
+                        {NodeStatus.COMPLETED, NodeStatus.DEGRADED}),
+                })
+                flipped = True
+            dependencies.append(dep)
         mutated = victim.model_copy(update={
-            "dependencies": tuple(
-                d.model_copy(update={"policy": DependencyPolicy.BLOCK,
-                                     "accept_statuses": frozenset(
-                                         {NodeStatus.COMPLETED})})
-                if d.upstream_node_id in aux_nodes else d
-                for d in victim.dependencies)})
-        edges = [(mutated.id, d.upstream_node_id, d.policy)
-                 for d in mutated.dependencies
-                 if d.upstream_node_id in aux_nodes]
-        assert any(p is not DependencyPolicy.DEGRADE for _n, _d, p in edges)
+            "dependencies": tuple(dependencies)})
+        assert flipped is True
+        edges = [(mutated.id, dep) for dep in mutated.dependencies
+                 if dep.upstream_node_id in {"technical", "news"}]
+        assert any(dep.policy is not DependencyPolicy.BLOCK
+                   for _downstream, dep in edges)

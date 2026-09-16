@@ -11,8 +11,9 @@ any hand edit or upstream tool-table change fails HONESTLY with a "re-run
 generator" message, never silently.
 
 FROZEN TABLE STATE: the committed material freezes against the WORKTREE
-``WW_TOOL_TABLE`` (77 rows after the workspace/media/realtime control surfaces
-and the reviewed deterministic data-screening read were added). The
+``WW_TOOL_TABLE`` (105 rows, including the reviewed research-workspace,
+watch-alert and workflow-authoring families plus the read-only ``ww_auction``
+local-TQ/TDX call-auction adapter). The
 generator keys on the live table, so a foreign commit that changes the row set
 trips both the drift guard and the dangling-intent test below — which is exactly
 what happened when ``b969c93`` added the four orchestration-router tools and left
@@ -53,7 +54,7 @@ _PLAN_ABI_METHODS = (
 )
 
 #: The worktree freeze this material was sealed against (documented, not derived).
-FROZEN_TOOL_COUNT = 77
+FROZEN_TOOL_COUNT = 105
 
 
 def _live_table():
@@ -149,7 +150,7 @@ def test_manifest_covers_the_section_7_1_seat_tools():
     supplied = {t for row in m.rows for t in row.real_tools}
     for tool in (
         "ww_news_live", "ww_newsradar", "ww_live_text", "ww_f10",
-        "ww_macro_pulse", "ww_sentiment", "ww_market_tape", "ww_overseas",
+        "ww_macro_pulse", "ww_sentiment", "ww_market_tape", "ww_overseas", "ww_auction",
     ):
         assert tool in supplied, f"§7.1 seat tool {tool!r} is not supplied by any capability"
 
@@ -163,7 +164,7 @@ def test_material_documents_the_frozen_table_state():
     # self-consistent with the live table it was regenerated from ...
     assert m.source_tool_count == len(ct.WW_TOOL_TABLE)
     assert m.source_tool_digest == content_digest(sorted(_live_names()))
-    # ... and pinned to the documented worktree freeze (77 rows).
+    # ... and pinned to the documented worktree freeze (105 rows).
     assert m.source_tool_count == FROZEN_TOOL_COUNT
 
 

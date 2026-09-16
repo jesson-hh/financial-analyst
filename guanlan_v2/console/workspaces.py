@@ -64,9 +64,8 @@ def normalize_security_code(value: Any) -> str:
     if code.isdigit() and len(code) == 6:
         # A-share conventional inference.  Explicit SH/SZ/BJ is retained when
         # supplied; bare codes stay convenient for the common UI path.
-        # New Beijing Exchange listings may use the 920xxx block.  Check that
-        # specific prefix before the broader Shanghai 9xxxxx convention; the
-        # browser and Seats deep-link normalizers use the same rule.
+        # Beijing Exchange also uses the 920xxx block.  Check that specific
+        # prefix before the broader Shanghai 9xxxxx convention.
         if code.startswith(("4", "8", "920")):
             return "BJ" + code
         if code.startswith(("5", "6", "9")):
@@ -271,10 +270,9 @@ class WorkspaceStore:
         if kind not in {"stock", "etf"} or not code:
             return
         for item in self.list(include_archived=False):
-            # Seats has one global assignment per canonical security code.  A
-            # stock/ETF label must therefore not create two active workspace
-            # owners for the same symbol.  Older metadata may predate this
-            # rule, so lookups below still detect ambiguity and fail closed.
+            # Seats assignments are keyed by canonical security code, not by
+            # the UI's stock/ETF label.  Keep one active owner across both
+            # kinds so the workspace projection can never select by list order.
             if (item.get("id") != excluding
                     and item.get("kind") in {"stock", "etf"}
                     and item.get("code") == code):
@@ -283,10 +281,9 @@ class WorkspaceStore:
     def find_active_security_workspace(self, code: Any) -> Optional[Dict[str, Any]]:
         """Resolve one canonical code to its sole active stock/ETF workspace.
 
-        This is the ownership check used by cross-surface projections such as
-        Seats -> Workspace.  It deliberately searches both security kinds:
-        the global Seats assignment is keyed by symbol, not by a UI label.  A
-        legacy/corrupt duplicate is never selected by list order.
+        Cross-surface projections are keyed by symbol rather than by the UI's
+        stock/ETF label.  Legacy or corrupt duplicates therefore fail closed
+        instead of being selected by list order.
         """
         canonical = normalize_security_code(code)
         if not canonical:
@@ -347,10 +344,9 @@ class WorkspaceStore:
                 "agent_mode": agent_mode,
                 "created": now,
                 "updated": now,
-                # The global Seats log is code-scoped.  These bounds make the
-                # workspace projection subject-scoped as well, so an archived
-                # space never starts showing future records for a code that is
-                # later reused by another workspace.
+                # The global Seats history is code-scoped.  Persist the period
+                # during which this workspace owned that code so re-binding or
+                # archiving cannot pull unrelated history into the Dock.
                 "subject_since": now,
                 "subject_until": None,
                 "archived": False,

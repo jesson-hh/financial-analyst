@@ -5,19 +5,65 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, List
 
+from guanlan_v2.channels.agent_tools import CHANNEL_TOOL_NAMES
 from guanlan_v2.console.workspace_tools import ALL_WORKSPACE_TOOLS
 
-# console-UI-only(改会话计划/往右栏弹页面)与前端信封类(靠 window.GL 落地,MCP 语境=空转假成功)
+# console-UI-only(改会话计划/返回浏览器顶栏导航提示)与前端信封类(靠 window.GL 落地,MCP 语境=空转假成功)
 # → 不暴露。ww_report_run/ww_etf_report_run 不在此列:其 background 信封经 dispatch_tool 的
 # _spawn_background_detached detached 子进程真跑(见 server.py)。
-_EXCLUDED = {"ww_plan_update", "ww_show_page", "ww_seats_bind"}
+_EXCLUDED = {
+    "ww_plan_update", "ww_show_page", "ww_seats_bind",
+} | set(CHANNEL_TOOL_NAMES)
 # 引擎 alpha-zoo 研究线(已在 CONSOLE_ALLOWED 放行)
 _ALPHA_ZOO = ["alpha_list", "alpha_show", "alpha_compare", "alpha_bench",
               "event_report", "alpha_forge", "factor_report"]
-# alpha-zoo 里唯一会写盘的(save 写引擎因子库)→ 锁;其余贵但只读
+# alpha_forge 的 save 会写引擎因子库，保留公共 MCP 写门。alpha_bench 与
+# factor_report 也有可选/隐式持久化，但公共 MCP 的历史契约没有确认回调；先把
+# annotations 诚实标为非只读，Codex 专用端再由 server.py 强制成 query-only。
 _ALPHA_WRITERS = {"alpha_forge"}
-# confirm=False 但写全局记忆 → 标非只读,但不锁(低危)
-_MUTATES_UNGATED = {"ww_memory_write"}
+_ALPHA_MUTATES_UNGATED = {
+    "alpha_bench", "factor_report",
+    # The legacy free-form expression DSL can call pandas Series writers;
+    # these are not safe to describe as read-only even though writing is not
+    # their advertised purpose.
+    "alpha_compare", "event_report",
+}
+# confirm=False 但会落持久状态 → 标非只读,但不锁。数据快照工具只把
+# 查询命中写入调用方显式选择的私有 workspace，不改 stocks/全局研究库。
+_MUTATES_UNGATED = {
+    # Default/public MCP news search writes the shared sentiment cache.  The
+    # dedicated Codex transport is safe only because server.py injects the
+    # private keyword-only _write_through=False argument.
+    "ww_news_search",
+    # /screen/run 的 v4 主路径会无条件追加 picks 记录。Codex 专用端通过
+    # 私有 _write_through=False 改走不落档、也不刷新缓存的查询路径。
+    "ww_screen_run",
+    # These legacy research endpoints pass model-controlled expressions to a
+    # permissive pandas-Series DSL.  Until a trusted-name adapter replaces it,
+    # their public annotations must not claim read-only semantics.
+    "ww_factor_analyze",
+    "ww_backtest",
+    "ww_factor_compose",
+    "ww_feature_build",
+    "ww_factor_tsic",
+    "ww_memory_write",
+    "ww_workspace_trade_disclosure_calendar",
+    "ww_workspace_tw_monthly_revenue",
+    "ww_workspace_cn_commodity_futures",
+    "ww_workspace_control_lists",
+    "ww_workspace_sec_filings_xbrl",
+    "ww_workspace_finra_short_volume",
+    "ww_workspace_us_treasury",
+    "ww_workspace_cftc_cot",
+    "ww_workspace_overseas_earnings_calendar",
+    "ww_workspace_newsradar",
+    "ww_workspace_company_research_prepare",
+    # Presentation creates media/download records or fresh derived chart
+    # files.  They remain non-destructive but must never advertise read-only.
+    "ww_workspace_quant_chart",
+    "ww_workspace_publish_image",
+    "ww_workspace_publish_document",
+}
 
 _WORKSPACE_ID_PROPERTY = {
     "type": "string",
@@ -84,8 +130,10 @@ def build_mcp_tools() -> List[Dict[str, Any]]:
         if tool is None:
             continue
         writer = name in _ALPHA_WRITERS
+        mutates_ungated = name in _ALPHA_MUTATES_UNGATED
         out.append({
             "name": name, "description": tool.description, "inputSchema": tool.input_schema,
-            "read_only": not writer, "destructive": writer, "gated": writer, "engine": True,
+            "read_only": not (writer or mutates_ungated),
+            "destructive": writer, "gated": writer, "engine": True,
         })
     return out

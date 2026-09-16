@@ -93,8 +93,6 @@ def _tokens(value: str) -> Set[str]:
     for chunk in _CN_RE.findall(text):
         if chunk not in _LOW_SIGNAL and len(chunk) <= 12:
             found.add(chunk)
-        # Bigrams make Chinese recall useful without a tokenizer dependency;
-        # trigrams reduce false positives for longer company/domain phrases.
         for width in (2, 3):
             for idx in range(max(0, len(chunk) - width + 1)):
                 token = chunk[idx:idx + width]
@@ -108,8 +106,6 @@ def _age_bonus(day: str) -> float:
         age = max(0, (date.today() - date.fromisoformat(day)).days)
     except (TypeError, ValueError):
         return 0.0
-    # Relevance always dominates.  Recency is only a gentle tie breaker, so an
-    # old holding cost can beat an unrelated note written today.
     return 0.35 / (1.0 + age / 45.0)
 
 
@@ -121,9 +117,6 @@ def recall_memories(query: str, sources: Mapping[str, str], *, top_k: int = 6,
     recency alone can never make an unrelated memory appear relevant.
     """
     entries = parse_memory_sources(sources)
-    # Curator archives old global rows without deleting them.  If a live row
-    # later reuses the same stable key (or exact unkeyed text), the active copy
-    # is authoritative; surfacing both would reintroduce superseded facts.
     live_keys = {entry.key for entry in entries
                  if entry.scope == "global" and entry.key}
     live_unkeyed = {entry.line for entry in entries

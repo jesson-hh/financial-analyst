@@ -11,6 +11,7 @@ Run: ``python -m pytest tests/orchestration/test_worker.py -v``
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -25,6 +26,7 @@ from guanlan_v2.orchestration.catalog import (
     WorkerSpec,
 )
 from guanlan_v2.orchestration.context import RunBudget, RunContext
+from guanlan_v2.orchestration.digest import content_digest
 from guanlan_v2.orchestration.enums import (
     ApprovalDecision,
     ExecutionKind,
@@ -882,6 +884,49 @@ def test_changing_trusted_order_changes_request_digest():
                       system_prompt=resolved.system_prompt, skills=resolved.skills,
                       guardrails=resolved.guardrails, trusted_input_digests=t2, untrusted_blocks=())
     assert r1.request_digest != r2.request_digest
+
+
+def test_opt_in_trusted_values_are_inlined_only_under_exact_digest_binding():
+    e = build_env()
+    resolved = e.sc.runtime.resolve_worker(e.node.worker_id)
+    values = {
+        "goal": "analyze semiconductor news",
+        "worker_roster": [{"worker_id": "text.news"}],
+    }
+    named = tuple(
+        W.NamedEvidenceDigest(name=name, digest=content_digest(value))
+        for name, value in sorted(values.items())
+    )
+    request = W.StaticPromptAssembler().assemble_with_trusted_values(
+        plan_digest=e.plan.plan_digest,
+        node_id=e.node.id,
+        worker_id=e.worker.id,
+        system_prompt=resolved.system_prompt,
+        skills=resolved.skills,
+        guardrails=resolved.guardrails,
+        trusted_input_digests=named,
+        untrusted_blocks=(),
+        trusted_input_values=values,
+    )
+    channel = json.loads(request.canonical_request_bytes)
+    assert channel["trusted_input_values"] == [
+        {"name": "goal", "value": values["goal"]},
+        {"name": "worker_roster", "value": values["worker_roster"]},
+    ]
+    assert request.prompt_record.model_request_digest == request.request_digest
+
+    with pytest.raises(ValueError, match="does not match its declared digest"):
+        W.StaticPromptAssembler().assemble_with_trusted_values(
+            plan_digest=e.plan.plan_digest,
+            node_id=e.node.id,
+            worker_id=e.worker.id,
+            system_prompt=resolved.system_prompt,
+            skills=resolved.skills,
+            guardrails=resolved.guardrails,
+            trusted_input_digests=named,
+            untrusted_blocks=(),
+            trusted_input_values={**values, "goal": "tampered"},
+        )
 
 
 # =========================================================================== #

@@ -1352,7 +1352,19 @@ function _universeForNode(nodeId, nodes, edges) {
     if (sources.size > 1) throw new Error('多个等距数据源，请显式指定 context_source_id');
     if (sources.size === 1) {
       const p = sources.values().next().value.params || {};
-      return { universe: _universeOf(p), start: (p.start || '').trim(), end: (p.end || '').trim(), codes: _parseCodes(p.codes), benchmark: (p.benchmark || '').trim(), leader: (p.leader || '').trim(), oos_frac: parseFloat(p.oos_frac) || 0, wf_refit: p.wf_refit === '是' || p.wf_refit === true, wired: true };
+      let codes = _parseCodes(p.codes);
+      if (['single', '个股'].includes(String(p.scope || '').trim().toLowerCase())) {
+        if (!codes.length) codes = [String(p.code || '').trim()];
+        if (codes.length !== 1 || !/^(?:(?:SH|SZ|BJ)?\d{6}|\d{6}\.(?:SH|SZ|BJ))$/i.test(codes[0])) throw new Error('单股 source 必须明确一个合法股票代码；拒绝回落到默认股票池');
+        const canonicalCode = value => {
+          const text = String(value || '').trim().toUpperCase();
+          if (text.includes('.')) { const [digits, exchange] = text.split('.'); return exchange + digits; }
+          if (/^\d{6}$/.test(text)) return (/^(4|8|92)/.test(text) ? 'BJ' : text.startsWith('6') ? 'SH' : 'SZ') + text;
+          return text;
+        };
+        if (String(p.code || '').trim() && canonicalCode(p.code) !== canonicalCode(codes[0])) throw new Error('单股 source 的 code 与 codes 冲突；拒绝猜测范围');
+      }
+      return { universe: _universeOf(p), start: (p.start || '').trim(), end: (p.end || '').trim(), codes, benchmark: (p.benchmark || '').trim(), leader: (p.leader || '').trim(), oos_frac: parseFloat(p.oos_frac) || 0, wf_refit: p.wf_refit === '是' || p.wf_refit === true, wired: true };
     }
     frontier = next;
   }
@@ -3977,8 +3989,8 @@ function ResultsDrawer({ result, loading, error, durableWaiting, onStopWaiting, 
       <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: expanded ? 'calc(100vh - 90px)' : 304, background: 'var(--paper)', borderTop: '1px solid var(--ink)', boxShadow: '0 -12px 32px rgba(28,24,20,0.12)', zIndex: 8, display: 'flex', flexDirection: 'column', animation: 'fadeIn .3s ease', transition: 'height .2s ease' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 18px', borderBottom: '1px solid var(--line-soft)' }}>
           <span style={{ width: 20, height: 20, borderRadius: 5, background: 'var(--dai)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✓</span>
-          <span className="serif" style={{ fontSize: 14, fontWeight: 600 }}>运行完成 · 关系稳定度</span>
-          <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{result._universe + ' · ' + result._label}</span>
+          <span className="serif" style={{ fontSize: 14, fontWeight: 600 }}>诊断完成 · 描述统计 / 关系稳定度</span>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{((result.requested_codes || []).join(', ') || result._universe) + ' · ' + result._label}</span>
           <span style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
             <span onClick={() => setExpanded(e => !e)} className="serif" style={{ fontSize: 12, color: 'var(--ink-1)', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 11px', cursor: 'pointer' }}>{expanded ? '⤡ 收起' : '⤢ 展开'}</span>
             <span onClick={onExport} className="serif" style={{ fontSize: 12, color: 'var(--ink-1)', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 11px', cursor: 'pointer' }}>↧ 导出报告</span>
@@ -3991,7 +4003,12 @@ function ResultsDrawer({ result, loading, error, durableWaiting, onStopWaiting, 
               <div key={i}><div className="mono" style={{ fontSize: 8.5, letterSpacing: '.08em', color: 'var(--ink-3)' }}>{l}</div><div className="mono" style={{ fontSize: 17, fontWeight: 600, color: c, marginTop: 2 }}>{v}</div></div>
             ))}
           </div>
-          <RCard title={'逐股票关系强度 · 均值水平(中线=0)· 粘=lag1自相关 · %=正占比'}>
+          <div style={{ fontSize: 10, color: 'var(--ink-2)', marginBottom: 10 }}>
+            仅描述统计，不是回测或策略晋级通过。
+            {' 请求区间 ' + (result.start || '未记录') + ' → ' + (result.end || '未记录')}
+            {' · 实际有效样本 ' + (result.sample_start || '未记录') + ' → ' + (result.sample_end || '未记录')}
+          </div>
+          <RCard title={'逐股票描述统计 · 均值水平(中线=0)· 粘=lag1自相关 · %=正占比'}>
             <div style={{ display: 'grid', gap: '6px 16px' }}>
               {rows.slice(0, 40).map((r, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10 }}>
@@ -4002,6 +4019,7 @@ function ResultsDrawer({ result, loading, error, durableWaiting, onStopWaiting, 
                   </span>
                   <span className="mono" style={{ width: 52, textAlign: 'right', color: (r.level >= 0 ? 'var(--zhu)' : 'var(--dai)'), fontWeight: 600 }}>{r.level != null ? ((r.level >= 0 ? '+' : '') + r.level.toFixed(3)) : '样本不足'}</span>
                   <span className="mono" style={{ width: 60, textAlign: 'right', color: 'var(--ink-3)', fontSize: 9 }}>{r.stickiness != null ? '粘 ' + (+r.stickiness).toFixed(2) : ''}</span>
+                  <span className="mono" style={{ width: 75, textAlign: 'right', color: 'var(--ink-3)', fontSize: 9 }}>{r.vol != null ? '波动 ' + (+r.vol).toFixed(4) : ''}</span>
                   <span className="mono" style={{ width: 40, textAlign: 'right', color: 'var(--ink-3)', fontSize: 9 }}>{r.pos_ratio != null ? Math.round(r.pos_ratio * 100) + '%' : ''}</span>
                 </div>
               ))}

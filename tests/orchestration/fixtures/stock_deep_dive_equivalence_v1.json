@@ -8,7 +8,7 @@
     "legacy_contract_fixture": "legacy_contract_samples.json",
     "source_config_digest": "5a175cb91de0cff8358da93272a4ac26fb29013a833a062a096fae56be5b9dbb",
     "legacy_mapping_semantic_digest": "85c190c72ca482e76e46f88e9255666c711b048e878e023b4e5b0726f34cda03",
-    "phase2_static_catalog_digest": "b41bf223f0dd0b05c5a4f4f7bbd32960eef90d7176a17300dbe576f6b61bf0d3",
+    "phase2_static_catalog_digest": "a9bf5b88e3f4b2d1065fcd734d0e2ec1d7ae220787a97cca96d051b3e6a82709",
     "phase1_schema_registry_digest": "75f7920db13cdcaac89a70e0103812a29348ab3caaa98b9c1020429bb4e18b03"
   },
   "core": {

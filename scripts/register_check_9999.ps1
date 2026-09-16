@@ -2,8 +2,18 @@
 # Idempotent. Removes the old resident watchdog (Run key + running instances),
 # sets Run key for check_9999.ps1, and starts the first generation via WMI now.
 # NEVER Task Scheduler (Schedule-service children freeze on this box, 2026-06-10).
-$CheckPs1  = 'G:\guanlan-v2\scripts\check_9999.ps1'
-$LaunchCmd = 'C:\Windows\System32\conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File ' + $CheckPs1
+param([string]$CheckScript = $env:GUANLAN_CHECK_9999_SCRIPT)
+$ErrorActionPreference = 'Stop'
+$CheckPs1 = if ([string]::IsNullOrWhiteSpace($CheckScript)) {
+    Join-Path $PSScriptRoot 'check_9999.ps1'
+} else {
+    (Resolve-Path -LiteralPath $CheckScript).Path
+}
+if (-not (Test-Path -LiteralPath $CheckPs1 -PathType Leaf)) {
+    throw "check_9999.ps1 not found: $CheckPs1"
+}
+$Conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+$LaunchCmd = '"{0}" --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{1}"' -f $Conhost, $CheckPs1
 
 # 1) retire old resident watchdog: Run key + live instances (frozen ones hold the old mutex)
 try { Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `

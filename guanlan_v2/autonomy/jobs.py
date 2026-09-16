@@ -4,12 +4,16 @@ append 吞异常返 bool(落盘失败不阻断 job,由调用方显形);read 侧�
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-JOBS_DIR = Path(__file__).resolve().parents[2] / "var" / "jobs"
+_AUTONOMY_ROOT = Path(os.environ.get("GUANLAN_AUTONOMY_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var"
+))
+JOBS_DIR = _AUTONOMY_ROOT / "jobs"
 JOBS_PATH = JOBS_DIR / "jobs.jsonl"
 
 

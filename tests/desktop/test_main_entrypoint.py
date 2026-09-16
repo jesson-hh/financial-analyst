@@ -122,3 +122,9 @@ def test_main_returns_zero_when_the_body_succeeds(monkeypatch) -> None:
     from guanlan_v2.desktop import __main__ as entry
 
     assert entry._run_and_log_crashes(lambda: None) == 0
+
+
+def test_desktop_entrypoint_does_not_force_enable_telegram() -> None:
+    """The operator environment is the only opt-in source for Channels."""
+    source = _MAIN_PY.read_text(encoding="utf-8")
+    assert "GUANLAN_TELEGRAM_ENABLED" not in source

@@ -101,9 +101,8 @@ def client() -> TestClient:
 
 
 def test_endpoint_basket_perf(monkeypatch):
-    import financial_analyst.data.loader_factory as _lf
     import guanlan_v2.strategy.compute.eqw_market as EQ
-    monkeypatch.setattr(_lf, "get_default_loader", lambda: _FakeLoader())
+    monkeypatch.setattr(seats_api, "local_query_loader", lambda: _FakeLoader())
     monkeypatch.setattr(EQ, "load_eqw_ret", lambda: _BENCH)
     j = _client().get("/seats/basket_perf?codes=600001,999999&start=2026-06-02&horizon=3").json()
     assert j["ok"] is True and j["n"] == 1 and j["matured_n"] == 1
@@ -123,9 +122,8 @@ def test_basket_perf_default_behavior_unchanged(client):
 
 
 def test_basket_perf_rerank_ab_pairs(tmp_path, monkeypatch, client):
-    import financial_analyst.data.loader_factory as _lf
     import guanlan_v2.strategy.compute.eqw_market as EQ
-    monkeypatch.setattr(_lf, "get_default_loader", lambda: _FakeLoader())
+    monkeypatch.setattr(seats_api, "local_query_loader", lambda: _FakeLoader())
     monkeypatch.setattr(EQ, "load_eqw_ret", lambda: _BENCH)
     from guanlan_v2.screen import picks as pk
     monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
@@ -147,11 +145,10 @@ def test_basket_perf_rerank_ab_pairs(tmp_path, monkeypatch, client):
 
 def test_rerank_ab_uses_per_pair_start(tmp_path, monkeypatch, client):
     """缺陷A 的精确反面:取数起始日=每对 pick ts;查询参数 start 被忽略(docstring 契约)。"""
-    import financial_analyst.data.loader_factory as _lf
     import guanlan_v2.strategy.compute.eqw_market as EQ
     from guanlan_v2.screen import picks as pk
     rec = _RecordingLoader()
-    monkeypatch.setattr(_lf, "get_default_loader", lambda: rec)
+    monkeypatch.setattr(seats_api, "local_query_loader", lambda: rec)
     monkeypatch.setattr(EQ, "load_eqw_ret", lambda: _BENCH)
     monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
     ts = "2026-06-01T18:00:00"                      # 早于 _SER 首根 06-02 → 首根即入场
@@ -174,9 +171,8 @@ def test_rerank_ab_survives_tail_window(tmp_path, monkeypatch, client):
     """录音回归(2026-07-12 单元二 Task 8):旧实现 read_picks(limit=500) 按『行数』开尾窗——
     当天量 snapshot 行涌入时,最老的 rerank_ab 对会被挤出 500 行窗口而彻底读不到。
     新实现改按 kind 全文件流式扫描,与档案总行数、其余 kind 的行数无关。"""
-    import financial_analyst.data.loader_factory as _lf
     import guanlan_v2.strategy.compute.eqw_market as EQ
-    monkeypatch.setattr(_lf, "get_default_loader", lambda: _FakeLoader())
+    monkeypatch.setattr(seats_api, "local_query_loader", lambda: _FakeLoader())
     monkeypatch.setattr(EQ, "load_eqw_ret", lambda: _BENCH)
     from guanlan_v2.screen import picks as pk
     monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
@@ -196,11 +192,9 @@ def test_default_path_validation_first(monkeypatch, client):
     """codes/start 必填校验须先于任何 I/O 构造(loader 等)执行——即便 loader 会抛异常,
     默认路径(无 kind)仍必须先给出确定性的「codes 与 start 必填」,不能被 loader 异常劫持。
     """
-    import financial_analyst.data.loader_factory as _lf
-
     def _boom():
         raise RuntimeError("loader 故意炸——证明校验没抢在它前面跑")
 
-    monkeypatch.setattr(_lf, "get_default_loader", _boom)
+    monkeypatch.setattr(seats_api, "local_query_loader", _boom)
     r = client.get("/seats/basket_perf").json()
     assert r == {"ok": False, "reason": "codes 与 start 必填"}

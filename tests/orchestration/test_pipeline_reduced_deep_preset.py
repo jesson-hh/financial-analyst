@@ -96,7 +96,6 @@ from guanlan_v2.orchestration.pipeline.assembly import (
     build_phase10_preset_registry,
     load_phase10_preset_registry,
 )
-from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 from guanlan_v2.orchestration.pipeline.deep_decide import (
     DEEP_DECIDE_PRESET_ID,
     DEEP_DECIDE_PRESET_IDS,
@@ -110,7 +109,9 @@ from guanlan_v2.orchestration.pipeline.deep_decide import (
     REDUCED_EVIDENCE_DROPPED_WORKER_IDS,
     REDUCED_EVIDENCE_MISSING_BADGE,
     REDUCED_EVIDENCE_NOTE,
+    RUN_SUBJECT_SCHEMA_REF,
     SUBJECT_RUN_SCOPED_BADGE,
+    DeepRunSubject,
     DeepDecideError,
     EvidenceScopeMismatch,
     PresetSelectionRefused,
@@ -136,12 +137,12 @@ PHASE7_BASELINE = "main.research_baseline"
 #: Hand-frozen 2026-07-29 over the reviewed eight-node graph — the test only
 #: READS it; it is never regenerated from the artifact under test.
 REDUCED_RECORD_DIGEST = (
-    "f44646dcd0448dee79a49f50748343c255bda30fe95114d981802613ba29d91c"
+    "3d3cdb5ea1a0a4ef5143c584d9fabe65aa0727493d79435b162486f34a3e3b6e"
 )
 #: The sealed TEN-node record digest — must stay byte-identical now that a second
 #: v2 deep preset sits beside it in the same committed directory.
 DEEP_DECIDE_RECORD_DIGEST = (
-    "696daf8044e55039a6c5d82ccb4e815d678d4952462ba0d1f971dc5f6a5cf6ca"
+    "b7980f5f9089f63dcc1b152095be18fc9d1ec56e2443b90c0d4499097ff36923"
 )
 PHASE7_BASELINE_RECORD_DIGEST = (
     "028ff5246ac97988ec2b778c994fe8a782c776098c1edb7d725d646ceff6704e"
@@ -187,16 +188,16 @@ def env():
 
 
 def _subject_ref(code: str = "600519", as_of: datetime = NOW) -> TypedPayloadRef:
-    subject = RunSubject(code=code, as_of=as_of)
+    subject = DeepRunSubject(code=code, as_of=as_of, evidence_tf="day")
     return TypedPayloadRef(
         payload_ref=PayloadRef(
             namespace="main", object_id=f"subject-{code}",
             content_digest=subject.semantic_digest()),
-        schema_ref=SchemaRef(name="RunSubject", version="1"))
+        schema_ref=RUN_SUBJECT_SCHEMA_REF)
 
 
 def _materialize(env, *, preset_id=REDUCED_DEEP_DECIDE_PRESET_ID,
-                 registry_override=None, subject=...):
+                 registry_override=None, subject=..., run_subject=None):
     presets = registry_override or load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
     return materialize_deep_decide_draft(
         request=env["request"],
@@ -210,6 +211,7 @@ def _materialize(env, *, preset_id=REDUCED_DEEP_DECIDE_PRESET_ID,
         schema_registry=env["registry"],
         draft_id="draft-reduced-1",
         run_id="run-reduced-1",
+        subject=run_subject,
     )
 
 
@@ -524,8 +526,7 @@ class TestReducedGraph:
                 assert dep.upstream_node_id not in {"technical", "news"}, node.id
 
     def test_no_dependency_points_at_a_removed_node(self, record, full):
-        """The two pruned edges were the ONLY references, and both were
-        ``degrade`` — pruning them changes no other node's semantics."""
+        """Only the explicitly omitted readers and their blocking edges vanish."""
         node_ids = {n.id for n in record.nodes}
         for node in record.nodes:
             for dep in node.dependencies:
@@ -535,18 +536,17 @@ class TestReducedGraph:
         for node in full.nodes:
             for dep in node.dependencies:
                 if dep.upstream_node_id in removed:
-                    assert dep.policy.value == "degrade", (node.id, dep)
+                    assert dep.policy.value == "block", (node.id, dep)
         assert removed == {"technical", "news"}
         assert {full_by_id[nid].worker_id for nid in removed} == set(
             REDUCED_EVIDENCE_DROPPED_WORKER_IDS)
 
-    def test_every_surviving_node_is_byte_identical_to_the_full_preset_except_the_two_debate_seats(
+    def test_every_surviving_node_is_byte_identical_except_consumers_of_the_two_removed_readers(
             self, record, full):
-        """Structural sameness: only ``bull-r1`` / ``bear-r1`` differ, and only
-        by having lost the two degrade dependencies."""
+        """Structural sameness: only direct consumers lose the two inputs."""
         full_by_id = {n.id: n for n in full.nodes}
         differing = {n.id for n in record.nodes if n != full_by_id[n.id]}
-        assert differing == {"bull-r1", "bear-r1"}
+        assert differing == {"bull-r1", "bear-r1", "research-mgr"}
         for nid in sorted(differing):
             before = {(d.upstream_node_id, d.inject_as)
                       for d in full_by_id[nid].dependencies}
@@ -562,10 +562,9 @@ class TestReducedGraph:
         assert record.reducers == full.reducers
         assert record.max_concurrency == full.max_concurrency
 
-    def test_the_llm_budget_equals_the_analyzers_exact_requirement(
+    def test_the_llm_budget_equals_the_v2_retry_repair_upper_bound(
             self, record, env):
-        """The same equality discipline the sealed preset holds: an over-request
-        would pass the analyzer while reserving budget nobody can spend."""
+        """Six primary seats plus one bounded schema repair for each seat."""
         workers = {w.id: w for w in env["snapshot"].workers}
         seats = sum(1 for n in record.nodes if n.debate_id is not None)
         non_debate_llm = sum(
@@ -573,7 +572,10 @@ class TestReducedGraph:
             if n.debate_id is None
             and workers[n.worker_id].execution.kind is ExecutionKind.LLM)
         assert (seats, non_debate_llm) == (2, 4)
-        assert record.budget_request_llm_invocations == seats + non_debate_llm == 6
+        primary_llm = seats + non_debate_llm
+        assert primary_llm == 6
+        assert record.budget_request_llm_invocations == primary_llm * 2 == 12
+        assert record.budget_request_tokens == 12 * W.DEFAULT_LLM_ATTEMPT_TOKEN_RESERVATION
 
     def test_the_reduced_preset_carries_no_code_anywhere(self, record):
         for node in record.nodes:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import json
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -103,6 +103,7 @@ class TestApiPitGuard:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
         from guanlan_v2.seats import api as seats_api
+        from guanlan_v2.seats import decision_evidence
         import financial_analyst.data.loader_factory as _lf
         import financial_analyst.llm.client as _llm
 
@@ -126,7 +127,7 @@ class TestApiPitGuard:
 
         class _DayLoader:
             def fetch_quote(self, code, start, end, freq):
-                ts = pd.date_range(end=datetime.now().strftime("%Y-%m-%d"), periods=60, freq="D")
+                ts = pd.date_range(end=end, periods=60, freq="D")
                 return pd.DataFrame({"trade_date": ts,
                                      "open": [50 + i * 0.1 for i in range(60)],
                                      "high": [50 + i * 0.1 + 0.5 for i in range(60)],
@@ -137,6 +138,12 @@ class TestApiPitGuard:
         monkeypatch.setattr(seats_api, "_DEC_LOG", tmp_path / "dec.jsonl")
         monkeypatch.setattr(_lf, "get_default_loader", lambda: _DayLoader())
         monkeypatch.setattr(_llm, "LLMClient", _CapLLM)
+        monkeypatch.setattr(decision_evidence, "build_decision_evidence", lambda code, anchor, **kw: {
+            "status": "empty", "source": "test", "asof": str(anchor),
+            "coverage": {"included_count": 0}, "news": {}, "microstructure": {},
+            "items": [], "errors": [], "prompt": "",
+            "mode": "pit" if kw.get("replay") else "live",
+        })
         app = FastAPI()
         app.include_router(seats_api.build_seats_router())
         return TestClient(app)
@@ -157,12 +164,37 @@ class TestApiPitGuard:
         assert r["t_ref"]["daytype"]["tier"] == "T30"
 
     def test_historical_date_never_calls_realtime(self, monkeypatch, tmp_path):
-        def _boom(code, df):
-            raise AssertionError("realtime module called on historical date (PIT violation)")
-        monkeypatch.setattr(intraday, "build_intraday_context", _boom)
+        calls = []
+        monkeypatch.setattr(
+            intraday, "build_intraday_context",
+            lambda code, df: calls.append((code, df)) or None)
         client = self._client(monkeypatch, tmp_path)
         r = client.post("/seats/decide", json={
             "code": "SH600519", "name": "茅台", "date": "2026-04-01",
             "seat_cn": "动量席", "creed": "x", "mode": "fast", "hold_entry": 52.0}).json()
         assert r["ok"]
+        assert calls == []
+        assert "日型判定" not in TestApiPitGuard.captured
+
+    def test_same_day_replay_never_calls_latest_five_minute_context(
+            self, monkeypatch, tmp_path):
+        calls = []
+        monkeypatch.setattr(
+            intraday, "build_intraday_context",
+            lambda code, df: calls.append((code, df)) or None)
+        client = self._client(monkeypatch, tmp_path)
+        now = datetime.now().replace(microsecond=0)
+        base = {
+            "code": "SH600519", "name": "茅台", "seat_cn": "动量席",
+            "creed": "x", "mode": "fast", "hold_entry": 52.0,
+        }
+        replay_cases = [
+            {"date": (now - timedelta(minutes=10)).isoformat(timespec="seconds")},
+            {"date": now.strftime("%Y-%m-%d"), "history_replay": True},
+            {"date": now.strftime("%Y-%m-%d"), "run_id": "run-same-day-replay"},
+        ]
+        for extra in replay_cases:
+            r = client.post("/seats/decide", json={**base, **extra}).json()
+            assert r["ok"]
+        assert calls == []
         assert "日型判定" not in TestApiPitGuard.captured

@@ -100,7 +100,6 @@ from guanlan_v2.orchestration.pipeline.assembly import (
     load_phase10_preset_registry,
 )
 from guanlan_v2.orchestration.data.runtime import SubjectParams
-from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 from guanlan_v2.orchestration.pipeline import deep_decide as deep_decide_mod
 from guanlan_v2.orchestration.pipeline.deep_decide import (
     CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX,
@@ -110,9 +109,11 @@ from guanlan_v2.orchestration.pipeline.deep_decide import (
     DEEP_DECIDE_PRESET_ID,
     DEEP_DECIDE_TERMINAL_NODE_ID,
     DEEP_DECIDE_WORKER_IDS,
+    RUN_SUBJECT_SCHEMA_REF,
     SUBJECT_RUN_SCOPED_BADGE,
     ClockRefused,
     ContextSnapshotRefused,
+    DeepRunSubject,
     DeepDecideError,
     MaterializedDeepDecide,
     SubjectRefused,
@@ -132,7 +133,7 @@ PHASE7_BASELINE = "main.research_baseline"
 #: (node, dependency, debate, reducer, sink, budget, description) moves it.
 #: Frozen 2026-07-28 over the reviewed ten-worker graph.
 DEEP_DECIDE_RECORD_DIGEST = (
-    "696daf8044e55039a6c5d82ccb4e815d678d4952462ba0d1f971dc5f6a5cf6ca"
+    "b7980f5f9089f63dcc1b152095be18fc9d1ec56e2443b90c0d4499097ff36923"
 )
 #: The Phase-7 baseline record digest — must stay byte-identical after Phase 10
 #: adds its own committed preset (the "Phase 7 golden byte-identical" invariant).
@@ -184,13 +185,13 @@ def env():
 
 
 def _subject_ref(code: str = "600519", as_of: datetime = NOW) -> TypedPayloadRef:
-    """A committed ``RunSubject@1`` typed ref (the run-scoped subject authority)."""
-    subject = RunSubject(code=code, as_of=as_of)
+    """A committed ``RunSubject@2`` typed ref (including evidence timeframe)."""
+    subject = DeepRunSubject(code=code, as_of=as_of, evidence_tf="day")
     return TypedPayloadRef(
         payload_ref=PayloadRef(
             namespace="main", object_id=f"subject-{code}",
             content_digest=subject.semantic_digest()),
-        schema_ref=SchemaRef(name="RunSubject", version="1"))
+        schema_ref=RUN_SUBJECT_SCHEMA_REF)
 
 
 def _materialize(env, *, clock=None, context=..., ctx_ref=..., subject=...,
@@ -467,18 +468,48 @@ class TestSealedGraph:
         assert reducer.output_schema_ref == SchemaRef(
             name="DebateTranscript", version="1")
 
-    def test_evidence_and_debate_nodes_are_auxiliary_and_honestly_described(
+    def test_every_critical_seat_reaches_research_manager_and_none_is_auxiliary(
             self, record):
         auxiliary = {n.id for n in record.nodes if n.auxiliary}
-        reaching = {n.id for n in record.nodes if not n.auxiliary}
-        # the sink chain is the only non-auxiliary path.
-        assert DEEP_DECIDE_TERMINAL_NODE_ID in reaching
-        for node in record.nodes:
-            if node.worker_id in {"pv.price_action", "pv.technical",
-                                  "pv.microstructure", "text.news",
-                                  "dec.bull", "dec.bear"}:
-                assert node.id in auxiliary, node.id
-        assert "auxiliary" in record.description
+        assert auxiliary == set()
+        by_id = {n.id: n for n in record.nodes}
+        rm_edges = {
+            (d.upstream_node_id, d.inject_as, d.policy.value)
+            for d in by_id["research-mgr"].dependencies
+        }
+        assert rm_edges == {
+            ("price-action", "price_action", "block"),
+            ("technical", "technical", "block"),
+            ("microstructure", "microstructure", "block"),
+            ("news", "news_digest", "block"),
+            ("sentiment", "sentiment", "block"),
+            ("bull-r1", "bull_case", "block"),
+            ("bear-r1", "bear_case", "block"),
+        }
+        assert "No evidence seat is auxiliary decoration" in record.description
+
+    def test_budget_covers_the_v2_worst_case_for_eight_primary_llm_nodes(
+            self, record):
+        # The clean path has eight primary LLM calls. Technical and News each
+        # permit a second explicit cycle; every cycle may have one strict schema
+        # resample. Technical/Bear retain their reviewed 64K envelopes.
+        assert record.budget_request_llm_invocations == 20
+        technical = next(n for n in record.nodes if n.id == "technical")
+        news = next(n for n in record.nodes if n.id == "news")
+        bear = next(n for n in record.nodes if n.id == "bear-r1")
+        assert technical.max_attempts == news.max_attempts == 2
+        assert all(
+            n.max_attempts == 1
+            for n in record.nodes
+            if n.id not in {"technical", "news"}
+        )
+        assert technical.token_reservation == 65_536
+        assert bear.token_reservation == 65_536
+        assert record.budget_request_tokens == (
+            14 * W.DEFAULT_LLM_ATTEMPT_TOKEN_RESERVATION
+            + 4 * technical.token_reservation
+            + 2 * bear.token_reservation)
+        assert record.budget_request_tokens == 851_968
 
     def test_the_preset_carries_no_code_anywhere(self, record):
         """Structurally code-free: no node params at all, and no six-digit run in
@@ -565,8 +596,7 @@ class TestMaterializeHappy:
     def test_it_returns_the_composite_with_the_bound_subject(self, materialized):
         assert isinstance(materialized, MaterializedDeepDecide)
         assert materialized.subject_ref == _subject_ref()
-        assert materialized.subject_ref.schema_ref == SchemaRef(
-            name="RunSubject", version="1")
+        assert materialized.subject_ref.schema_ref == RUN_SUBJECT_SCHEMA_REF
 
     def test_the_draft_is_a_preset_sourced_main_draft(self, materialized, env):
         draft = materialized.draft
@@ -621,7 +651,7 @@ class TestMaterializeHappy:
 class TestSubjectParamsStamp:
     """L1 Task 2 — the D-0 verbatim seam: at materialize time the ONE reviewed
     recipe (``SubjectParams.project``) projects the run's committed
-    ``RunSubject@1`` into the closed two-key document, carried BESIDE the draft
+    ``RunSubject@2`` into the closed subject-parameter document, carried BESIDE the draft
     on :class:`MaterializedDeepDecide`. The sealed record stays code-free:
     ``PlanNode.params`` stays empty and the draft's executable projection does
     not move a byte — the stamp is out-of-band by construction.
@@ -633,12 +663,13 @@ class TestSubjectParamsStamp:
         subject's ``as_of`` differs from the clock's instant, so a stamp
         fabricated from ref metadata, goal text or the clock cannot equal the
         ONE recipe's projection of the verified subject object."""
-        subject = RunSubject(code="600519", as_of=NOW - timedelta(hours=5))
+        subject = DeepRunSubject(
+            code="600519", as_of=NOW - timedelta(hours=5), evidence_tf="day")
         ref = TypedPayloadRef(
             payload_ref=PayloadRef(
                 namespace="main", object_id="deep-artifact-0007",
                 content_digest=subject.semantic_digest()),
-            schema_ref=SchemaRef(name="RunSubject", version="1"))
+            schema_ref=RUN_SUBJECT_SCHEMA_REF)
         result = _materialize(env, subject=ref, run_subject=subject)
         assert result.subject_params == SubjectParams.project(
             code=subject.code, as_of=subject.as_of)
@@ -649,7 +680,7 @@ class TestSubjectParamsStamp:
         subject_ref.payload_ref.content_digest``, the SAME equality the
         screening lane enforces on its committed subjects (screening.py's
         SubjectRefused) — is verified, never assumed."""
-        mismatched = RunSubject(code="000001", as_of=NOW)
+        mismatched = DeepRunSubject(code="000001", as_of=NOW, evidence_tf="day")
         with pytest.raises(SubjectRefused, match="does not bind"):
             _materialize(env, run_subject=mismatched)  # default ref binds 600519
 
@@ -668,7 +699,8 @@ class TestSubjectParamsStamp:
         draft, so ``PlanNode.params`` stays empty and the executable projection
         is byte-identical to an unstamped run's — and across stocks."""
         stamped = _materialize(
-            env, run_subject=RunSubject(code="600519", as_of=NOW))
+            env, run_subject=DeepRunSubject(
+                code="600519", as_of=NOW, evidence_tf="day"))
         unstamped = _materialize(env)
         blob = canonical_json(stamped.draft.executable_projection())
         for node in stamped.draft.nodes:
@@ -677,7 +709,8 @@ class TestSubjectParamsStamp:
         assert "600519" not in blob
         other = _materialize(
             env, subject=_subject_ref("000001"),
-            run_subject=RunSubject(code="000001", as_of=NOW))
+            run_subject=DeepRunSubject(
+                code="000001", as_of=NOW, evidence_tf="day"))
         assert canonical_json(other.draft.executable_projection()) == blob
         assert other.subject_params != stamped.subject_params
 
@@ -687,7 +720,7 @@ class TestSubjectParamsStamp:
         still outranks everything the context block would say."""
         with pytest.raises(SubjectRefused):
             _materialize(env, subject=None, context=None, ctx_ref=None)
-        mismatched = RunSubject(code="000001", as_of=NOW)
+        mismatched = DeepRunSubject(code="000001", as_of=NOW, evidence_tf="day")
         with pytest.raises(SubjectRefused):
             _materialize(env, run_subject=mismatched, context=None, ctx_ref=None)
 
@@ -751,12 +784,14 @@ class TestValidationAndRuntimeSupport:
         assert support.supported is True, [
             (i.code, i.node_id, i.explanation) for i in support.issues]
 
-    def test_the_llm_budget_equals_the_analyzers_exact_requirement(
+    def test_the_llm_budget_covers_primary_count_and_v2_repair_upper_bound(
             self, materialized, env):
-        """`analyze_debates`' exact pre-reservation rule (debate.py:384-398):
-        `budget_request_llm_invocations >= expanded debate seats + non-debate LLM
-        nodes`. The sealed preset is pinned to EQUALITY — an over-request would
-        pass the analyzer while silently reserving budget nobody can spend."""
+        """Separate the eight-call clean path from v2's 20-call hard envelope.
+
+        ``analyze_debates`` establishes the primary floor (expanded debate seats
+        plus non-debate LLM nodes). The v2 retry/repair contract then reserves
+        ``max_attempts * (1 + schema_repairs_per_attempt)`` for every LLM node.
+        """
         draft = materialized.draft
         workers = {w.id: w for w in env["snapshot"].workers}
         seats = sum(1 for n in draft.nodes if n.debate_id is not None)
@@ -765,7 +800,51 @@ class TestValidationAndRuntimeSupport:
             if n.debate_id is None
             and workers[n.worker_id].execution.kind is ExecutionKind.LLM)
         assert (seats, non_debate_llm) == (2, 6)
-        assert draft.budget_request_llm_invocations == seats + non_debate_llm == 8
+        primary_llm_nodes = seats + non_debate_llm
+        v2_worst_case = sum(
+            W.retry_llm_invocation_upper_bound(
+                is_llm=(workers[node.worker_id].execution.kind
+                        is ExecutionKind.LLM),
+                max_attempts=node.max_attempts,
+                schema_repairs_per_attempt=(
+                    STATIC_RUNTIME_PROFILE_V2.schema_repairs_per_attempt),
+            )
+            for node in draft.nodes
+        )
+        assert primary_llm_nodes == 8
+        assert v2_worst_case == 20
+        assert draft.budget_request_llm_invocations == v2_worst_case
+        required_tokens = sum(
+            W.retry_llm_invocation_upper_bound(
+                is_llm=(workers[node.worker_id].execution.kind
+                        is ExecutionKind.LLM),
+                max_attempts=node.max_attempts,
+                schema_repairs_per_attempt=(
+                    STATIC_RUNTIME_PROFILE_V2.schema_repairs_per_attempt),
+            ) * (node.token_reservation
+                 or W.DEFAULT_LLM_ATTEMPT_TOKEN_RESERVATION)
+            for node in draft.nodes
+            if workers[node.worker_id].execution.kind is ExecutionKind.LLM
+        )
+        assert draft.budget_request_tokens == required_tokens == 851_968
+
+    def test_runtime_support_refuses_one_token_below_the_reviewed_envelope(
+            self, materialized, phase9_runtime):
+        """The 851,968 total is a computed hard bound, not a generous label."""
+        draft = materialized.draft
+        assert analyze_retry_repair(
+            draft,
+            catalog=phase9_runtime,
+            profile=STATIC_RUNTIME_PROFILE_V2,
+        ) == ()
+        under = draft.model_copy(update={"budget_request_tokens": 851_967})
+        issues = analyze_retry_repair(
+            under,
+            catalog=phase9_runtime,
+            profile=STATIC_RUNTIME_PROFILE_V2,
+        )
+        assert [issue.code for issue in issues] == [
+            "retry_repair_token_budget_under_requested"]
 
 
 # =========================================================================== #

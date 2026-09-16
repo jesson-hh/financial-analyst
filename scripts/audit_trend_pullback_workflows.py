@@ -209,7 +209,10 @@ def summarize(live: Path, receipts_path: Path, out: Path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--live-root", type=Path, default=Path("G:/guanlan-v2"))
+    parser.add_argument(
+        "--live-root", type=Path, default=CHECKOUT,
+        help="Guanlan source checkout to audit (default: this checkout)",
+    )
     parser.add_argument("--receipts", type=Path, default=DEFAULT_OUT / "workflow_receipts.json")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()

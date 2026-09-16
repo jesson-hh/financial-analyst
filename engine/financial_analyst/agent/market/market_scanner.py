@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from pydantic import BaseModel
 from financial_analyst.agent.base import SubAgent
+from financial_analyst.data.pit import PitUnavailableError, is_historical_asof
 
 
 # Market-cap tier -> daily pct_change threshold (% absolute)
@@ -122,6 +123,11 @@ class MarketScanner(SubAgent[MarketScannerOutput]):
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         asof = inputs.get("asof_date") or pd.Timestamp.today().strftime("%Y-%m-%d")
         universe = inputs.get("universe", "all")
+        if is_historical_asof(asof):
+            raise PitUnavailableError(
+                "market-scanner unavailable: current market pack/universe/loader "
+                f"cannot prove a point-in-time snapshot for {asof}"
+            )
 
         pack = self._read_evidence_pack()
         if pack is not None:

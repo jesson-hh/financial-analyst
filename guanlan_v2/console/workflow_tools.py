@@ -181,7 +181,8 @@ def _result_summary(result):
     """Only measured fields; exclude huge arrays but retain failures and lineage."""
     if not isinstance(result, dict):
         return None
-    out = {k: result.get(k) for k in ("ok", "reason", "node_results", "node_errors", "warnings")}
+    out = {k: result.get(k) for k in ("ok", "reason", "result_kind", "gate_eligible",
+                                     "node_results", "node_errors", "warnings")}
     terminals = []
     items = result.get("all_terminals") or ([result["terminal"]] if isinstance(result.get("terminal"), dict) else [])
     for item in items:
@@ -203,6 +204,15 @@ def _result_summary(result):
             terminal["candidates"] = candidates[:30]
             terminal["candidate_rows_total"] = len(candidates)
             terminal["candidate_rows_truncated"] = len(candidates) > 30
+        if item.get("kind") == "relstat":
+            terminal.update({k: payload.get(k) for k in (
+                "expr_or_name", "summary", "sample_start", "sample_end", "requested_codes",
+                "selection_mode", "configured_universe")})
+            rows = payload.get("codes_relstat") or []
+            terminal["codes_relstat"] = rows[:30]
+            terminal["diagnostic_rows_total"] = len(rows)
+            terminal["diagnostic_rows_truncated"] = len(rows) > 30
+            terminal["interpretation"] = "时序描述统计，不是预测收益能力、回测成绩或晋级通过。"
         terminals.append(terminal)
     out["terminals"] = terminals
     return out

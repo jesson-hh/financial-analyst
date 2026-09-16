@@ -8,9 +8,10 @@ registry/catalog lineage (P2 → … → P8 → P9 → P10) — built as a pure 
 over the sealed Phase-9 chain (never a fork, never a "latest" alias), mirroring
 the ``adapters.chain`` (P9) / ``lane_catalog`` (P8) precedents:
 
-* :data:`PHASE10_PUBLIC_MODELS` — the six public pipeline payloads the Phase-10
-  cumulative registry resolves a :class:`SchemaRef` to. Five register at ``@1``
-  under their own class names; the sixth,
+* :data:`PHASE10_PUBLIC_MODELS` — the seven public pipeline payload contracts the
+  Phase-10 cumulative registry resolves to six logical schema families. Five
+  register at ``@1`` under their own class names, deep decisions add the reviewed
+  ``RunSubject@2`` alongside screening's frozen ``RunSubject@1``, and the seventh,
   :class:`~guanlan_v2.orchestration.pipeline.assembly.PlanPresetRecordV2`,
   registers under the REVIEWED identity **``PlanPresetRecord@2``** (Amendment 3;
   ``assembly.PLAN_PRESET_RECORD_V2_SCHEMA_REF`` pins ``name="PlanPresetRecord"``)
@@ -97,6 +98,7 @@ from guanlan_v2.orchestration.pipeline.contracts import (
     RunSubject,
     TaSubmission,
 )
+from guanlan_v2.orchestration.pipeline.deep_decide import DeepRunSubject
 from guanlan_v2.orchestration.refs import ContentRef, SchemaRef
 
 if TYPE_CHECKING:  # pragma: no cover - typing only (avoids an import cycle)
@@ -129,8 +131,8 @@ __all__ = [
 # =========================================================================== #
 # The reviewed Phase-10 public / internal contract partition                    #
 # =========================================================================== #
-#: the exactly-six registered Phase-10 payload contracts. Ordered by the
-#: candidate → recommendation → escalation → inbox → subject → preset
+#: the exactly-seven registered Phase-10 payload contracts. Ordered by the
+#: candidate → recommendation → escalation → inbox → subject@1 → subject@2 → preset
 #: consumption chain the phase reads them in. ``PlanPresetRecordV2`` registers
 #: as ``PlanPresetRecord@2`` (module docstring).
 PHASE10_PUBLIC_MODELS: tuple[type[ContractModel], ...] = (
@@ -139,6 +141,7 @@ PHASE10_PUBLIC_MODELS: tuple[type[ContractModel], ...] = (
     EscalationReport,
     TaSubmission,
     RunSubject,
+    DeepRunSubject,
     PlanPresetRecordV2,
 )
 
@@ -258,7 +261,7 @@ def build_phase10_registry(
     Verifies ``expected_phase9_digest`` against the actual sealed Phase-9
     cumulative registry digest first — any other base digest is rejected
     *before any registration* — then registers the complete inherited
-    cumulative set (Phase 1 → Phase 9) followed by the six Phase-10 publics
+    cumulative set (Phase 1 → Phase 9) followed by the seven Phase-10 publics
     (:data:`PHASE10_PUBLIC_MODELS`; ``PlanPresetRecordV2`` through its
     ``PlanPresetRecord@2`` registration identity) into a *fresh*
     :class:`~guanlan_v2.orchestration.runtime_contracts.Phase2RuntimeRegistry`

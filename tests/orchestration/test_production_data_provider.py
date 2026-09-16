@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -112,7 +112,7 @@ from guanlan_v2.orchestration.data.catalog import (
 from guanlan_v2.orchestration.data.errors import (
     FutureDataRefused,
     MissingAvailabilityRefused,
-    NotConfiguredError,
+    SourceBrokenError,
 )
 from guanlan_v2.orchestration.data.pit import DataFetchRefusalDetails
 from guanlan_v2.orchestration.data.schema_registry import PHASE3_PUBLIC_MODELS
@@ -137,9 +137,10 @@ from guanlan_v2.orchestration.pipeline.assembly import (
     load_phase10_preset_registry,
     production_bridge_view,
 )
-from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 from guanlan_v2.orchestration.pipeline.deep_decide import (
+    DeepRunSubject,
     REDUCED_DEEP_DECIDE_PRESET_ID,
+    RUN_SUBJECT_SCHEMA_REF,
     materialize_deep_decide_draft,
 )
 from guanlan_v2.orchestration.refs import PayloadRef, SchemaRef, TypedPayloadRef
@@ -250,12 +251,12 @@ def _sealed_base_detail_registry():
 
 
 def _subject_ref(code: str = "833509") -> TypedPayloadRef:
-    subject = RunSubject(code=code, as_of=NOW)
+    subject = DeepRunSubject(code=code, as_of=NOW, evidence_tf="day")
     return TypedPayloadRef(
         payload_ref=PayloadRef(
             namespace="main", object_id=f"subject-{code}",
             content_digest=subject.semantic_digest()),
-        schema_ref=SchemaRef(name="RunSubject", version="1"))
+        schema_ref=RUN_SUBJECT_SCHEMA_REF)
 
 
 def _summary_for(report, node_id: str, bridge_id: str):
@@ -780,9 +781,9 @@ class TestRowlessLicensedEmpty:
 
     @pytest.mark.parametrize("kind", [ExecutionKind.DETERMINISTIC,
                                       ExecutionKind.LLM])
-    @pytest.mark.parametrize("wid", ["pv.price_action", "pv.microstructure"])
+    @pytest.mark.parametrize("wid", ["dec.research_mgr", "dec.trader"])
     def test_a_rowless_worker_freezes_the_licensed_empty(self, wid, kind):
-        """The sealed binding grants the pv aux workers NO row: the analyzer
+        """The sealed binding grants these decision workers NO row: the analyzer
         summed bounds over zero rows (0/0), so the EMPTY completed contribution
         is exactly what the sealed summary licenses — no refusal, no world
         resolution (poisoned resolver proves the partition is row-count ONLY),
@@ -819,7 +820,7 @@ class TestRowlessLicensedEmpty:
                     operations=(surf.prefetch_binding.operations[0],))))
         req = SimpleNamespace(
             plan=None, node=SimpleNamespace(id="n", params={}),
-            worker=SimpleNamespace(id="pv.price_action"), bridge=foreign,
+            worker=SimpleNamespace(id="dec.research_mgr"), bridge=foreign,
             summary=summary, handle=None, input_snapshot=None,
             capability_gateway=None,
             evidence_writer=_ForbiddenEvidenceWriter(), reader=None,
@@ -1053,20 +1054,12 @@ class TestPmThroughTheRealResolver:
         assert gateway.begun_count() == 0
         assert gateway.finalized_records() == ()
 
-    def test_the_pv_aux_nodes_freeze_empty_through_the_real_resolver(
+    def test_the_pv_aux_nodes_with_rows_refuse_the_pilot_context(
             self, env_pilot, bundle, view):
-        """The rowless arm at the REAL seam: both pv aux workers complete their
-        data bridge with the catalog-licensed EMPTY contribution — no
-        ``bridge_execution_error`` on this path, and the pilot context is
-        never even read (rowless partitions BEFORE world resolution).
-
-        TRUED UP (L2-b Task 8 sweep — Task-5 review I3). The docstring used to
-        say "RED today: the worldless incumbent refuses loudly", which described
-        the pre-Task-4 registration: while the worldless provider was the
-        registered one, this drive really did refuse. Task 4 registered
-        ``ProductionDataProvider`` and Task 5 deleted the worldless trio, so the
-        parenthetical has been false since — and a reader who believed it would
-        read a GREEN production invariant as a known-red intermediate."""
+        """Both pv workers now have reviewed data rows.  They therefore take
+        the rows-present arm and resolve the production world; a pilot-era
+        context must refuse before any source execution rather than silently
+        receiving the rowless EMPTY contribution."""
         factories = _registered_factories(env_pilot, bundle)
         runtime = _exec_runtime(bundle, view, env_pilot.report, factories)
         for wid in ("pv.price_action", "pv.microstructure"):
@@ -1082,18 +1075,18 @@ class TestPmThroughTheRealResolver:
             prepared = resolver.prepare_input(
                 plan=env_pilot.plan, context_snapshot_ref=env_pilot.ctx_typed,
                 evidence_writer=_ForbiddenEvidenceWriter())
-            contributions = resolver.open_execution(
-                plan=env_pilot.plan, prepared=prepared, input_snapshot=None,
-                capability_gateway=None,
-                evidence_writer=_ForbiddenEvidenceWriter(), reader=None,
-                kind=ExecutionKind.DETERMINISTIC)
-            assert len(contributions) == 1
-            c = contributions[0]
-            assert c.bridge_id == "data.runtime"
-            assert c.tool_call_records == ()
-            assert c.data_result_refs == ()
-            assert c.direct_evidence_refs == ()
-            assert c.untrusted_blocks == ()
+            with pytest.raises(RT.DataRuntimeError) as exc:
+                resolver.open_execution(
+                    plan=env_pilot.plan, prepared=prepared,
+                    input_snapshot=SimpleNamespace(
+                        context_snapshot_ref=env_pilot.ctx_typed),
+                    capability_gateway=None,
+                    evidence_writer=_ForbiddenEvidenceWriter(),
+                    reader=env_pilot.stores.payloads,
+                    kind=ExecutionKind.DETERMINISTIC)
+            msg = str(exc.value)
+            assert "predates the production data world" in msg
+            assert "re-run Lane 0" in msg
 
 
 # =========================================================================== #
@@ -1153,23 +1146,76 @@ def _synthetic_schema_registry() -> Phase2RuntimeRegistry:
     return reg
 
 
+_PULLED_MISSING = object()
+
+
+def _strict_probe_envelope(
+    *, source: str, provider: str, items: list[dict], status: str = "ok",
+    pulled_at: object = "2026-07-16T14:59:00",
+) -> dict:
+    """Production-shape synthetic envelope; injected probes get no shortcut."""
+    env = {
+        "ok": True,
+        "status": status,
+        "source": source,
+        "provider": provider,
+        "actual_provider": provider,
+        "schema_version": "guanlan.live-source-result.v2",
+        "network_used": True,
+        "circuit_state": "closed",
+        "cache_hit": False,
+        "fallback_level": 0,
+        "attempted_sources": [],
+        "n": len(items),
+        "items": items,
+        "error": "",
+        "note": "",
+    }
+    if pulled_at is not _PULLED_MISSING:
+        env["pulled_at"] = pulled_at
+    return env
+
+
 def _snapshot_envelope(*, pulled_at="2026-07-16T14:59:00"):
     """A ``tencent_realtime_quote``-shaped envelope: the two fields
     ``VerifiedSnapshotRecord.from_candidate`` consumes, nothing fabricated
     beyond them."""
-    return {"ok": True, "status": "ok", "n": 1, "error": "", "note": "",
-            "pulled_at": pulled_at,
-            "items": [{"name": "贵州茅台", "last_price": 1487.3,
-                       "prev_close": 1470.0}]}
+    return _strict_probe_envelope(
+        source="tencent_realtime_quote",
+        provider="tencent",
+        pulled_at=pulled_at,
+        items=[{"name": "贵州茅台", "last_price": 1487.3,
+                "prev_close": 1470.0}],
+    )
 
 
 def _tape_envelope(*, pulled_at="2026-07-16T14:59:00"):
-    env = {"ok": True, "status": "ok", "n": 1, "error": "", "note": "",
-           "items": [{"name": "全市场", "open": 1480.0, "high": 1490.0,
-                      "low": 1470.0, "close": 1487.3, "volume": 100}]}
-    if pulled_at is not None:
-        env["pulled_at"] = pulled_at
-    return env
+    rows: list[dict] = []
+    cursor = datetime(2026, 7, 16, 15, 0)
+    while len(rows) < 20:
+        if cursor.weekday() < 5:
+            rows.append({
+                "code": "600519", "stock_code": "600519", "freq": "day",
+                "datetime": cursor.strftime("%Y-%m-%d %H:%M"),
+                "open": 1480.0, "high": 1490.0, "low": 1470.0,
+                "close": 1487.3, "vol": 100.0,
+            })
+        cursor -= timedelta(days=1)
+    rows.reverse()
+    return _strict_probe_envelope(
+        source="tdx_kline", provider="tdx", items=rows,
+        pulled_at=(_PULLED_MISSING if pulled_at is None else pulled_at),
+    )
+
+
+def _news_envelope(
+    *, pulled_at: object = "2026-07-16T14:59:00", status: str = "ok",
+) -> dict:
+    items = [] if status != "ok" else [{"title": "synthetic headline"}]
+    return _strict_probe_envelope(
+        source="eastmoney_stock_news", provider="eastmoney", items=items,
+        status=status, pulled_at=pulled_at,
+    )
 
 
 def _build_synthetic_env(monkeypatch, *, method_id: str, probe,
@@ -1475,11 +1521,12 @@ class TestSyntheticLiveRowEndToEnd:
         assert block.method == "ohlcv"
         assert "1487.3" in block.rendered_text
 
-        # one probe call under the canonical vendor id (the market-wide tape
-        # source; no per-code arg) — the reviewed adapter, not a stub of it.
+        # one probe call under the exact reviewed physical binding — the
+        # reviewed adapter, not a stub of it.
         assert len(probe.calls) == 1
-        assert probe.calls[0]["source"] == "eastmoney_market_fund_flow"
-        assert probe.calls[0]["code"] == ""
+        assert probe.calls[0]["source"] == "tdx_kline"
+        assert probe.calls[0]["code"] == "600519"
+        assert probe.calls[0]["limit"] == 120
 
     def test_the_read_params_echo_the_node_params(self, monkeypatch):
         """The delegated session's param assembly is the REAL one: the
@@ -1659,8 +1706,9 @@ class TestPitHonestyAtTheSeam:
         authority (PitGuard, never the adapter) ends the read
         ``FutureDataRefused`` — the adapter forwarded the row (probe called
         once), the guard refused it."""
-        probe = _ProbeStub(_tape_envelope(pulled_at="2026-07-16T15:00:01"))
-        env = _build_synthetic_env(monkeypatch, method_id="ohlcv", probe=probe)
+        probe = _ProbeStub(_news_envelope(
+            pulled_at="2026-07-16T15:00:01"))
+        env = _build_synthetic_env(monkeypatch, method_id="news", probe=probe)
         with pytest.raises(FutureDataRefused):
             env.drive(kind=ExecutionKind.LLM)
         assert len(probe.calls) == 1
@@ -1670,8 +1718,8 @@ class TestPitHonestyAtTheSeam:
         """No ``pulled_at`` ⇒ ``available_at=None`` is forwarded honestly and
         the guard refuses ``MissingAvailabilityRefused`` — never a fabricated
         availability."""
-        probe = _ProbeStub(_tape_envelope(pulled_at=None))
-        env = _build_synthetic_env(monkeypatch, method_id="ohlcv", probe=probe)
+        probe = _ProbeStub(_news_envelope(pulled_at=_PULLED_MISSING))
+        env = _build_synthetic_env(monkeypatch, method_id="news", probe=probe)
         with pytest.raises(MissingAvailabilityRefused):
             env.drive(kind=ExecutionKind.LLM)
         assert len(probe.calls) == 1
@@ -1680,33 +1728,30 @@ class TestPitHonestyAtTheSeam:
 class TestDegradationMatrix:
     def test_core_method_outage_raises_after_chain_exhaustion(
             self, monkeypatch):
-        """``ohlcv`` is a CORE method (``optional=False``, like
-        ``verified_snapshot``): a ``status:planned`` probe advances the
-        (single-entry) frozen chain via ``NotConfiguredError`` and exhaustion
-        RAISES it — no fabricated row, no silent fallback, the refusal
-        audited through the one sink.
+        """``ohlcv`` is a CORE method (``optional=False``): the legacy
+        ``status:planned`` state is outside the closed envelope state machine,
+        so it is a broken source — no fabricated row and no silent fallback,
+        with the refusal audited through the one sink.
 
         「控制器已裁」the production consequence is ACCEPTED for this phase:
         a ``verified_snapshot`` outage ⇒ pm node hard-fail ⇒ the deep run
         fails/refuses honestly (the fast chain stands) — cross-referenced
         into L3's D-2 ruling packet as the same-family precedent."""
-        probe = _ProbeStub({"ok": True, "status": "planned", "n": 0,
-                            "items": [], "error": "",
-                            "note": "probe not implemented"})
+        probe = _ProbeStub(_strict_probe_envelope(
+            source="tdx_kline", provider="tdx", items=[], status="planned"))
         env = _build_synthetic_env(monkeypatch, method_id="ohlcv", probe=probe)
-        with pytest.raises(NotConfiguredError, match="planned"):
+        with pytest.raises(SourceBrokenError,
+                           match="unsupported exact status 'planned'"):
             env.drive(kind=ExecutionKind.LLM)
         reasons = [r.reason_code for r in env.sink.records()]
-        assert reasons.count("not_configured") == 1
+        assert reasons.count("source_error") == 1
 
     def test_optional_method_outage_exhausts_to_a_named_unavailable(
             self, monkeypatch):
-        """``news`` is OPTIONAL: the same outage exhausts to an honest named
+        """``news`` is OPTIONAL: a reviewed transient outage exhausts to an honest named
         ``UNAVAILABLE`` result — persisted, typed, zero fabricated success
         record — and the bridge completes."""
-        probe = _ProbeStub({"ok": True, "status": "planned", "n": 0,
-                            "items": [], "error": "",
-                            "note": "probe not implemented"})
+        probe = _ProbeStub(_news_envelope(status="rate_limited"))
         env = _build_synthetic_env(monkeypatch, method_id="news", probe=probe)
         contributions = env.drive(kind=ExecutionKind.DETERMINISTIC)
         assert len(contributions) == 1
@@ -1718,7 +1763,7 @@ class TestDegradationMatrix:
             expected_schema_ref=SchemaRef(name="NewsDataResult", version="1"))
         assert result.status is DataStatus.UNAVAILABLE
         assert result.data is None
-        assert [a.outcome for a in result.attempts] == ["not_configured"]
+        assert [a.outcome for a in result.attempts] == ["rate_limited"]
         # the un-represented request ref surfaces as direct evidence.
         assert len(c.direct_evidence_refs) == 1
         assert c.direct_evidence_refs[0].schema_ref.name == "DataRequest"

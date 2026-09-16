@@ -1,5 +1,6 @@
 {
- "_attribution": "RSS source list vendored from simonlin1212/Vibe-Research (MIT, Copyright 2026 simonlin1212). Fetcher/parser is guanlan's own (redline 词表与 vibe 的截断顺序 bug 均未沿用).",
+ "_attribution": "106-source publisher catalogue audited against simonlin1212/Vibe-Research main commit 952497c8830ba12036b4d471b206f9a4c30fdfeb (MIT, Copyright 2026 simonlin1212), with five canonical/official endpoint availability repairs recorded in upstream_url. Fetcher/parser is Guanlan's own; the upstream redline list and missing future-time upper bound are not copied.",
+ "_catalog_version": "guanlan-newsradar-sources@2",
  "industries": [
   {
    "key": "ai",
@@ -127,7 +128,9 @@
    "name": "BAIR Blog",
    "hint": "ai",
    "type": "rss",
-   "url": "https://bair.berkeley.edu/blog/feed.xml"
+   "url": "https://bairblog.github.io/feed.xml",
+   "upstream_url": "https://bair.berkeley.edu/blog/feed.xml",
+   "url_note": "official BAIR GitHub Pages feed; TLS-verified fallback"
   },
   {
    "name": "Import AI",
@@ -337,7 +340,9 @@
    "name": "Endpoints News",
    "hint": "bio",
    "type": "rss",
-   "url": "https://endpts.com/feed/"
+   "url": "https://endpoints.news/feed/",
+   "upstream_url": "https://endpts.com/feed/",
+   "url_note": "canonical redirected domain"
   },
   {
    "name": "FierceBiotech",
@@ -466,12 +471,6 @@
    "url": "https://www.wired.com/feed/rss"
   },
   {
-   "name": "Engadget",
-   "hint": "tech",
-   "type": "rss",
-   "url": "https://www.engadget.com/rss.xml"
-  },
-  {
    "name": "Techmeme",
    "hint": "tech",
    "type": "rss",
@@ -481,19 +480,15 @@
    "name": "36氪",
    "hint": "tech",
    "type": "rss",
-   "url": "https://36kr.com/feed"
+   "url": "https://www.36kr.com/feed",
+   "upstream_url": "https://36kr.com/feed",
+   "url_note": "canonical RSS host; bare host returns HTML challenge"
   },
   {
    "name": "钛媒体",
    "hint": "tech",
    "type": "rss",
    "url": "https://www.tmtpost.com/rss.xml"
-  },
-  {
-   "name": "少数派",
-   "hint": "tech",
-   "type": "rss",
-   "url": "https://sspai.com/feed"
   },
   {
    "name": "IT之家",
@@ -520,10 +515,13 @@
    "url": "https://rss.huxiu.com/"
   },
   {
-   "name": "动点科技",
+   "name": "TechNode（动点科技英文站）",
    "hint": "tech",
    "type": "rss",
-   "url": "https://cn.technode.com/feed/"
+   "url": "https://technode.com/feed/",
+   "upstream_url": "https://cn.technode.com/feed/",
+   "replacement_version": "technode-official-en@2026-09-03",
+   "url_note": "official feed of the same bilingual publisher; the Chinese feed is live but Cloudflare returns HTTP 403 to the Guanlan runtime egress"
   },
   {
    "name": "月光博客",
@@ -618,8 +616,12 @@
   {
    "name": "华尔街见闻",
    "hint": "macro",
-   "type": "rss",
-   "url": "https://dedicated.wallstreetcn.com/rss.xml"
+   "type": "json",
+   "url": "https://api.wscn.net/apiv1/content/information-flow?channel=global&accept=article&limit=20&action=init",
+   "adapter": "wallstreetcn_information_flow_v1",
+   "upstream_url": "https://dedicated.wallstreetcn.com/rss.xml",
+   "replacement_version": "wallstreetcn-official-information-flow@2026-09-03",
+   "url_note": "public JSON endpoint called by wallstreetcn.com's own web application; article resources only; the official RSS remains live but returns an HTML challenge to the Guanlan runtime egress"
   },
   {
    "name": "Finextra",

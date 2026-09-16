@@ -91,6 +91,7 @@ from guanlan_v2.orchestration.adapters import chain
 from guanlan_v2.orchestration.catalog_runtime import TrustedFactoryRegistry
 from guanlan_v2.orchestration.data.catalog import (
     data_capability_refs,
+    parse_prefetch_binding,
     phase3_data_surface,
     serialize_prefetch_binding,
 )
@@ -116,9 +117,10 @@ from guanlan_v2.orchestration.pipeline.assembly import (
     load_phase10_preset_registry,
     production_bridge_view,
 )
-from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 from guanlan_v2.orchestration.pipeline.deep_decide import (
+    DeepRunSubject,
     REDUCED_DEEP_DECIDE_PRESET_ID,
+    RUN_SUBJECT_SCHEMA_REF,
     materialize_deep_decide_draft,
 )
 
@@ -214,12 +216,12 @@ def view(bundle):
 
 
 def _subject_ref(code: str = "833509") -> TypedPayloadRef:
-    subject = RunSubject(code=code, as_of=NOW)
+    subject = DeepRunSubject(code=code, as_of=NOW, evidence_tf="day")
     return TypedPayloadRef(
         payload_ref=PayloadRef(
             namespace="main", object_id=f"subject-{code}",
             content_digest=subject.semantic_digest()),
-        schema_ref=SchemaRef(name="RunSubject", version="1"))
+        schema_ref=RUN_SUBJECT_SCHEMA_REF)
 
 
 @pytest.fixture(scope="module")
@@ -830,48 +832,41 @@ class TestFullTrunkShape:
             "trader": (),
         }
 
-    def test_the_aux_nodes_freeze_the_catalog_licensed_empty(
+    def test_the_aux_nodes_are_sealed_as_required_data_readers(
             self, bundle, view, reduced, env):
-        """CONSCIOUS FLIP (L2-b Task 4 — shape 1's chartered fate).
+        """The later pv-aux wiring replaced the old rowless L2-b posture.
 
-        PRE-FLIP (recorded): both pv aux nodes kept DEGRADING — the worldless
-        provider raised ``DataRuntimeError`` matching ``"L2-b"`` at bridge
-        execution (``bridge_execution_error``), and this test asserted that
-        raise. POST-FLIP: the world-bound provider partitions on row COUNT
-        only, and the sealed prefetch binding carries NO row for either aux
-        worker, so the reviewed analyzer summed 0/0 bounds over them — an empty
-        completed ``BridgeContribution`` is exactly what the sealed summary
-        LICENSES. They now freeze the catalog-licensed EMPTY: no refusal, no
-        degradation, and (proven, not assumed) zero gateway, zero reader, zero
-        evidence writes — the world is not even resolved for a rowless worker.
-
-        This is NOT the retired dead-row empty-complete: that one completed
-        empty over a row that COULD have been read (a silenced outage). Here
-        there is no row at all."""
+        Both deterministic seats now have exact sealed rows, every row is
+        mandatory, and runtime support must carry the same positive minimum.
+        This keeps an unavailable data world loud instead of accidentally
+        preserving the retired licensed-empty behavior in this older seam
+        suite; execution over the rows is owned by ``test_pv_aux_nodes``.
+        """
         factories = _production_registered_factories(bundle, env)
         runtime = _exec_runtime(bundle, view, reduced.report, factories=factories)
-        for wid in ("pv.price_action", "pv.microstructure"):
+        binding = parse_prefetch_binding(view.resolve("data.runtime").config_bytes)
+        expected = {
+            "pv.price_action": ("ohlcv",),
+            "pv.microstructure": ("indicators", "verified_snapshot"),
+        }
+        for wid, method_ids in expected.items():
             node = _node_for_worker(reduced.draft, wid)
             worker = _worker_of(env, wid)
             sequencer = W.ExecutionEvidenceSequencer(node_id=node.id, attempt=1)
             resolver = W.ExecutionBridgeResolver(
                 runtime=runtime, node=node, worker=worker, sequencer=sequencer)
             assert resolver.required_bridge_ids == ("data.runtime",)
-            prepared = resolver.prepare_input(
-                plan=None, context_snapshot_ref=None,
-                evidence_writer=_ForbiddenEvidenceWriter())
-            contributions = resolver.open_execution(
-                plan=None, prepared=prepared, input_snapshot=None,
-                capability_gateway=None,
-                evidence_writer=_ForbiddenEvidenceWriter(), reader=None,
-                kind=ExecutionKind.DETERMINISTIC)
-            assert len(contributions) == 1
-            c = contributions[0]
-            assert c.bridge_id == "data.runtime"
-            assert c.tool_call_records == ()
-            assert c.data_result_refs == ()
-            assert c.direct_evidence_refs == ()
-            assert c.untrusted_blocks == ()
+            rows = tuple(op for op in binding.operations if op.worker_id == wid)
+            assert tuple(op.method_ref.id for op in rows) == method_ids
+            assert all(op.invocation_mode == "always_invoke" for op in rows)
+            assert all(op.success_requires_finalized_call is True for op in rows)
+            summaries = tuple(
+                summary for summary in reduced.report.bridge_support_summaries
+                if summary.node_id == node.id and summary.bridge_id == "data.runtime"
+            )
+            assert len(summaries) == 1
+            assert summaries[0].min_finalized_tool_calls_on_success == len(rows)
+            assert summaries[0].max_capability_invocations >= len(rows)
 
     def test_the_live_failure_string_never_occurs_on_the_bound_path(
             self, bundle, view, reduced, env):

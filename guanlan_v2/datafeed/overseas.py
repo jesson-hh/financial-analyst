@@ -47,6 +47,37 @@ _LOCK = threading.Lock()
 _INFLIGHT = [False]
 _MEM_CACHE: Dict[str, Any] = {"data": None}
 
+# The generic facade's publish/visible timestamps can be local fetch time. Only
+# explicit upstream quote/trade fields may prove a market timestamp.
+_SOURCE_TRADE_TS_FIELDS = (
+    "source_trade_ts", "quote_ts", "trade_ts", "quote_time", "trade_time",
+)
+
+
+def _with_quote_time_semantics(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach conservative quote-time semantics without inventing freshness."""
+    out = dict(row)
+    source_trade_ts = next(
+        (
+            str(out[field]).strip()
+            for field in _SOURCE_TRADE_TS_FIELDS
+            if out.get(field) is not None and str(out[field]).strip()
+        ),
+        "",
+    )
+    if source_trade_ts:
+        out["source_trade_ts"] = source_trade_ts
+        out["quote_time_status"] = "source_reported"
+        out["quote_time_note"] = "成交时间由上游显式提供；抓取时间仍不等于成交时间"
+    else:
+        out["source_trade_ts"] = None
+        out["quote_time_status"] = "unknown"
+        out["quote_time_note"] = (
+            "上游未提供成交时间；publish_ts/visible_ts 仅是抓取或可见时间，"
+            "不得据此称实时成交价"
+        )
+    return out
+
 
 def _now_ts() -> int:
     return int(datetime.now().timestamp())
@@ -86,12 +117,15 @@ def probe_one(code: str) -> Optional[Dict[str, Any]]:
     if not (r.get("ok") and r.get("status") == "ok"):   # 真成功恒 "ok";"" 是机械失败
         return None
     rows = _lc.native_rows(r.get("items")) or []
-    return rows[0] if rows and isinstance(rows[0], dict) else None
+    return _with_quote_time_semantics(rows[0]) \
+        if rows and isinstance(rows[0], dict) else None
 
 
 def _placeholder(w: Dict[str, str]) -> Dict[str, Any]:
-    return {"code": w["code"], "label": w["label"], "market": w["market"],
-            "name": w["label"], "price": None, "change_pct": None, "note": "缺价/不可达"}
+    return _with_quote_time_semantics({
+        "code": w["code"], "label": w["label"], "market": w["market"],
+        "name": w["label"], "price": None, "change_pct": None, "note": "缺价/不可达",
+    })
 
 
 def _fetch_all_percode() -> List[Dict[str, Any]]:
@@ -119,7 +153,7 @@ def _fetch_all() -> List[Dict[str, Any]]:
         if r.get("ok") and r.get("status") == "ok":
             for row in _lc.native_rows(r.get("items")) or []:
                 if isinstance(row, dict) and row.get("code"):
-                    rows_by_code[str(row["code"])] = row
+                    rows_by_code[str(row["code"])] = _with_quote_time_semantics(row)
     except Exception:  # noqa: BLE001
         rows_by_code = {}
     if not rows_by_code:
@@ -180,5 +214,9 @@ def read_overseas(fresh_within_s: int = _TTL_S) -> Dict[str, Any]:
     stale = (_now_ts() - int(data.get("pulled_ts") or 0)) >= fresh_within_s
     if stale:
         _trigger()
+    rows = [
+        _with_quote_time_semantics(row) if isinstance(row, dict) else row
+        for row in (data.get("rows") or [])
+    ]
     return {"warming": False, "stale": stale, "pulled_at": data.get("pulled_at"),
-            "n": data.get("n"), "rows": data.get("rows") or [], "watchlist": WATCHLIST}
+            "n": data.get("n"), "rows": rows, "watchlist": WATCHLIST}

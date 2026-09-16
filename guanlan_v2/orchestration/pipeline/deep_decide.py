@@ -52,10 +52,10 @@ recorded here rather than papered over:
 4. **The subject is RUN-SCOPED, not plan-scoped.** ``InputArtifactBinding`` is a
    dispatch-time, intra-plan structure built only from upstream plan-node outputs
    (dag.py:380-430); a ``PlanDraft`` has no external-input field and no worker in
-   the sealed catalog declares a ``RunSubject@1`` input. So this materializer
+   the sealed catalog declares a ``RunSubject@2`` input. So this materializer
    REQUIRES and schema-pins ``subject_ref`` and carries it beside the draft on
    :class:`MaterializedDeepDecide` — it never forges an ``InputArtifactBinding``
-   and never invents a subject worker. The committed ``RunSubject@1`` artifact
+   and never invents a subject worker. The committed ``RunSubject@2`` artifact
    stays the digest-bound authority; both halves of clause E2b have LANDED:
    the prompt-assembly half in Task 7 (the per-run ``SubjectPromptAssembler``
    occupying the ``prompt_assembler`` injection seam of
@@ -98,7 +98,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
+
+from pydantic import create_model
 
 from guanlan_v2.orchestration.catalog import WorkerCatalogSnapshot
 from guanlan_v2.orchestration.context import ContextSnapshot
@@ -131,6 +133,7 @@ __all__ = [
     "REDUCED_DEEP_DECIDE_WORKER_IDS",
     "REDUCED_EVIDENCE_DROPPED_WORKER_IDS",
     "RUN_SUBJECT_SCHEMA_REF",
+    "DeepRunSubject",
     # committed source
     "DEEP_DECIDE_PRESET_FILE",
     "REDUCED_DEEP_DECIDE_PRESET_FILE",
@@ -188,8 +191,21 @@ DEEP_DECIDE_WORKER_IDS: tuple[str, ...] = (
     "dec.trader",
 )
 
-#: the committed subject artifact's schema identity (Task 1's ``RunSubject@1``).
-RUN_SUBJECT_SCHEMA_REF: SchemaRef = SchemaRef(name="RunSubject", version="1")
+#: Deep runs use a second generation of the same subject contract so the exact
+#: evidence timeframe is content-bound instead of riding as an unverified
+#: payload hint.  ``create_model`` deliberately names the class ``RunSubject``;
+#: SchemaRegistry keys by model name + declared version, yielding the proper
+#: ``RunSubject@2`` identity while retaining ``isinstance(..., RunSubject)`` for
+#: the shared subject prompt machinery.  Screening remains on its frozen @1.
+DeepRunSubject = create_model(
+    "RunSubject",
+    __base__=RunSubject,
+    schema_version=(Literal["2"], "2"),
+    evidence_tf=(Literal["day", "30min", "5min", "1min"], ...),
+)
+DeepRunSubject.__module__ = __name__
+
+RUN_SUBJECT_SCHEMA_REF: SchemaRef = SchemaRef(name="RunSubject", version="2")
 
 
 # --------------------------------------------------------------------------- #
@@ -297,7 +313,7 @@ class DeepDecideError(ValueError):
 
 
 class SubjectRefused(DeepDecideError):
-    """No committed ``RunSubject@1`` artifact was supplied, or the ref is not one.
+    """No committed ``RunSubject@2`` artifact was supplied, or the ref is not one.
 
     Materialization without a subject is refused rather than defaulted: the
     committed subject artifact is the ONLY sanctioned way a Phase-10 plan names
@@ -417,7 +433,7 @@ class MaterializedDeepDecide:
     preset_id: LogicalId = DEEP_DECIDE_PRESET_ID
     #: L1 / D-0 — the closed subject-params document, materialization-stamped by
     #: the ONE reviewed recipe (``SubjectParams.project``) from THE committed
-    #: ``RunSubject@1`` the ``subject_ref`` digest-binds. Out-of-band beside the
+    #: ``RunSubject@2`` the ``subject_ref`` digest-binds. Out-of-band beside the
     #: draft, never inside it: ``PlanNode.params`` stays empty, the sealed record
     #: stays code-free. Defaulted to None (the ``preset_id`` convention) so every
     #: pre-L1 construction keeps meaning exactly what it meant — the data bridge
@@ -498,7 +514,7 @@ def materialize_deep_decide_draft(
     # -- 1. the run-scoped subject (required, schema-pinned) ------------------ #
     if subject_ref is None:
         raise SubjectRefused(
-            "a committed RunSubject@1 artifact ref is required — the sealed "
+            "a committed RunSubject@2 artifact ref is required — the sealed "
             f"{DEEP_DECIDE_PRESET_ID!r} graph carries no code, so a run without a "
             "subject has no subject at all")
     if not isinstance(subject_ref, TypedPayloadRef):
@@ -519,9 +535,9 @@ def materialize_deep_decide_draft(
     # order stays subject-before-context.
     subject_params: SubjectParams | None = None
     if subject is not None:
-        if not isinstance(subject, RunSubject):
+        if not isinstance(subject, DeepRunSubject):
             raise SubjectRefused(
-                "subject must be the committed RunSubject the subject_ref "
+                "subject must be the committed RunSubject@2 the subject_ref "
                 f"names; got {type(subject).__name__}")
         if subject.semantic_digest() != subject_ref.payload_ref.content_digest:
             raise SubjectRefused(
@@ -529,7 +545,8 @@ def materialize_deep_decide_draft(
                 "supplied RunSubject content; a params stamp from an unbound "
                 "subject would not be an authority")
         subject_params = SubjectParams.project(
-            code=subject.code, as_of=subject.as_of)
+            code=subject.code, as_of=subject.as_of,
+            evidence_tf=subject.evidence_tf)
 
     # -- 2. the latest committed Lane-0 ContextSnapshot ---------------------- #
     if context is None or context_snapshot_ref is None:

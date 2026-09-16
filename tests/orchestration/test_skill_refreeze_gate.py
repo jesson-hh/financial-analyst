@@ -578,7 +578,7 @@ class TestGate1FEMeasurement:
             "the 预取行 column is what makes 'receives a RenderedDataBlock' a "
             f"structural fact rather than an opinion: {recorded} != {measured}")
         # …and the standalone row table (which also records invocation_mode /
-        # finalized-call shape) must name exactly the same four workers.
+        # finalized-call shape) must name exactly the same workers.
         assert _recorded_prefetch_rows() == prefetch_rows
 
     def test_the_recorded_class_equals_the_measured_class(self, prefetch_rows):
@@ -654,7 +654,7 @@ class TestGate1FEMeasurement:
         assert gaps == set(prefetch_rows), (
             "GAP-CONFIRMED must be derivable from the sealed binding alone "
             "(no skill names the block today), so the two sets are the same set")
-        assert len(gaps) == 4
+        assert len(gaps) == 6
 
     def test_the_promise_supply_lint_scans_only_ww_tokens(self):
         """T2's hard constraint, pinned where T2 will read it.
@@ -666,7 +666,8 @@ class TestGate1FEMeasurement:
         """
         from guanlan_v2.orchestration import capability_manifest as CM
         assert "ww_" in CM._WW_TOKEN.pattern
-        for sid in ("text.news", "pv.technical", "text.policy"):
+        for sid in ("text.news", "pv.microstructure", "pv.price_action",
+                    "pv.technical", "text.policy"):
             section = _dsp_section(sid)
             assert CM._promised_tools((_TREE / sid / "SKILL.md")
                                       .read_text(encoding="utf-8"))

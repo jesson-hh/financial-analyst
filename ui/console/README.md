@@ -6,14 +6,11 @@
 
 ## 模块定位
 
-帷幄是观澜平台的**唯一统帅 agent 入口**。一个对话框操控全平台:选股、因子分析、回测、落子研判一句话下令,右栏自动滑出真实页面结果(不新建渲染器,直接嵌入既有选股/工作流页的同源 iframe)。
+帷幄是观澜平台的**唯一统帅 agent 入口**。一个对话框操控全平台:选股、因子分析、回测、落子研判一句话下令。工具过程、摘要和研报卡直接留在对话中;选股、工作流、席位等完整页面从全局顶栏进入。
 
 架构是**统帅—哨兵双层**:帷幄统帅负责跨模块编排,落子哨兵(`ui/seats/`)保留自己的专职 agent,两者不合并。其余各页散落的 agent 窗口全局隐藏(`?legacy=1` 找回)。
 
-布局:三栏 grid(二级 masthead 已于 2026-06-11 裁掉——与顶部 nav 重复;⇋ 布局切换移入工作台头部,「● 运筹中」并入左栏脚注,`?v=20260613e`)  
-- 右栏关闭时:`264px 1fr`(纯对话)  
-- 右栏打开后工作台优先:`264px 460px 1fr`  
-- ⇋ 对话优先:`264px 1fr 560px`
+当前布局固定为两栏:`264px 1fr`(会话栏 + 主对话)。旧的 iframe 右栏工作台已于 2026-08-13 停载,不再因 artifact 自动弹出、压缩对话或保存宽度状态。
 
 ## 文件清单
 
@@ -23,8 +20,8 @@
 | `console-data.jsx` | 事件流客户端:`EventSource`(原生,自动重连)+ `wwApply` reducer + 会话/计划/产物状态;导出 `window.WW`(API/TOOL_CN/PAGES/initState/apply/connect/send/confirm/sessions/newSession) |
 | `console-rail.jsx` | 左栏:`WwRail` — 「新对话」按钮 + 会话列表(当前朱砂竖线)+ 已连流/档案件数脚注 |
 | `console-thread.jsx` | 中栏:`WwThread` — 事件流按序渲染(用户消息右对齐卡 / agent 消息「觀」印章头像 / 工具调用卡摘要行+展开摘要 / 确认门「准/驳回」面板);`WwToolCard` 工具卡子组件 |
-| `console-bench.jsx` | 右栏:`WwBench` — tab(仅激活过的页)+ 同源 iframe 原样嵌入 + `?embed=1&_t=ts` 强制重载 + `scale(panelWidth/1280)` 自适应缩放 + ⌖钉住 + ↗独立页 + ✕收起 |
-| `console-app.jsx` | 主壳:`WeiwoApp` — `useReducer` 管全局状态、布局三栏 grid、会话切换/新建、`onSend`/`onConfirm` |
+| `console-bench.jsx` | 历史文件:旧 iframe 工作台,当前 HTML 不再加载 |
+| `console-app.jsx` | 主壳:`WeiwoApp` — `useReducer` 管全局状态、固定两栏 grid、会话切换/新建、`onSend`/`onConfirm` |
 
 所有文件当前 `?v=20260612a`。
 
@@ -53,9 +50,9 @@
 
 连接后先推一条 `event: snapshot`(含 `meta` + 全量 `events` 数组),再逐条推 `event: ev`。`EventSource` 内置自动重连:断线重连即重收 snapshot,前端 `wwApply` reducer 重放全量事件恢复到一致状态,刷新无损。SSE 每 15s 发 `: heartbeat` 注释心跳保活,分段直播总超时 300s(配合看门狗重启)。
 
-## WW_PAGES 注册表与 handoff 驱动协议
+## 历史:WW_PAGES 注册表与 handoff 驱动协议(已停用)
 
-`console-data.jsx` 中 `WW_PAGES` 登记当前可激活的两个工作台页:
+以下为 2026-06 的历史设计。当前 `console-data.jsx` 已不再维护 `WW_PAGES`/artifact 激活状态,HTML 也不加载 `WwBench`;完整页面统一走全局顶栏。
 
 | key | label | file | channel |
 |-----|-------|------|---------|
@@ -147,7 +144,7 @@
 - **右上角任务面板**:完整显示本会话计划(✓/▶/○)与完成进度;按 `kind` 事件字段聚合 `bgTasks`,显示进度条。左栏不再承载任务信息。
 - **右栏左缘拖宽把手**:分隔条拖动,存 `localStorage` 键 `guanlan:ww:benchw`,clamp 范围 480 ~ (innerWidth - 700)
 
-### 功能呼出器 ◫(2026-06-11 追加,?v=20260613d)
+### 历史:功能呼出器 ◫(2026-08-13 已停用)
 
 输入坞左侧 `◫` 按钮(`WwLauncher`,console-thread.jsx):点开向上弹菜单,列 `WW_PAGES` 四功能(选股/工作流/经验卡/图谱)+ 「● 已开/○」状态,点选手动呼出右栏对应页——与对 agent 说「调出选股」等价,但不占一轮对话。
 
@@ -159,7 +156,7 @@
 - **会话改名/分组/状态**(console-rail.jsx):行悬停出 ✎改名 / ⊟分组,行内 input,Enter 提交 Escape 取消,经 `PATCH /console/sessions/{sid}`(白名单 title/group,group 空串=取消分组);左栏按 `meta.group` 归并渲组头(未分组平铺在前);行首状态点 = sessions 列表下发的 `running`(进程内实时态,8s 轻轮询保鲜)∪ 当前会话 busy。
 - **用户消息靠左**(console-thread.jsx):UserBubble 黑卡从右对齐改 `flex-start`(用户拍板)。
 
-### 会话级工作台隔离(2026-06-11,?v=20260613h / workflow.jsx?v=74)
+### 历史:会话级工作台隔离(2026-08-13 已停用)
 
 每个帷幄会话一套独立工作台,显式隔离边界:
 

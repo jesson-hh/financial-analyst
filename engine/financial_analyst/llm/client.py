@@ -2,7 +2,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import yaml
 # litellm 懒导入(2026-07-30 启动提速):模块级 import litellm 单独吃 ~2.7s,是 9999
 # 冷启动 9s 里最大单项;它只被 _chat_litellm 回落路径(anthropic 等非 OpenAI 兼容
@@ -36,9 +36,9 @@ def _is_transient(exc: BaseException) -> bool:
 #
 # Three network_profiles:
 #   - domestic    : trust_env=False, bypass system proxy. For domestic CN endpoints (qwen/dashscope).
-#   - intl_clash  : explicit proxy=HTTPS_PROXY (default 127.0.0.1:7890) + verify=False
-#                   (Clash MITM replaces the cert). For deepseek / openai / openrouter.
-#   - intl_system : trust_env=True, let httpx read the system proxy itself. For the rare no-MITM env.
+#   - intl_clash  : explicit proxy=HTTPS_PROXY (default 127.0.0.1:7890), with TLS
+#                   verification on unless FA_INTL_VERIFY is explicitly disabled.
+#   - intl_system : trust_env=True, let httpx use the system proxy and trust store.
 #
 # OpenAI-compatible providers (qwen/deepseek/openai/openrouter) all go through
 # AsyncOpenAI + base_url switching. Non-compatible providers (anthropic) keep the
@@ -54,8 +54,8 @@ def _build_http_client(network_profile: str):
 
     Env overrides:
     - HTTPS_PROXY: proxy URL for intl_clash (default http://127.0.0.1:7890).
-    - FA_INTL_VERIFY: 'true' to enforce SSL verify for intl_clash (default
-      False because Clash MITM replaces the cert chain).
+    - FA_INTL_VERIFY: set to 'false' only for a deliberately configured local
+      MITM proxy; TLS verification is enabled by default.
     """
     import httpx
     if network_profile == "domestic":
@@ -64,7 +64,7 @@ def _build_http_client(network_profile: str):
         return httpx.AsyncClient(trust_env=False, timeout=600)
     if network_profile == "intl_clash":
         proxy = os.environ.get("HTTPS_PROXY") or "http://127.0.0.1:7890"
-        verify_env = os.environ.get("FA_INTL_VERIFY", "false").lower()
+        verify_env = os.environ.get("FA_INTL_VERIFY", "true").lower()
         verify = verify_env in ("true", "1", "yes")
         return httpx.AsyncClient(
             trust_env=False, proxy=proxy, verify=verify, timeout=120,
@@ -287,6 +287,8 @@ class LLMClient:
         timeout: Optional[float] = None,
         thinking: Optional[bool] = None,
         reasoning_effort: Optional[str] = None,
+        transport_max_retries: Optional[int] = None,
+        on_dispatch: Optional[Callable[[], None]] = None,
     ) -> Any:
         """OpenAI-compatible providers (qwen / deepseek / openai / openrouter).
         Goes through AsyncOpenAI + provider-specific http_client."""
@@ -324,7 +326,13 @@ class LLMClient:
             kwargs["max_tokens"] = int(max_tokens)
         if timeout is not None:
             kwargs["timeout"] = float(timeout)   # openai SDK per-request 项,压过 httpx client 默认 120s
-        response = await client.chat.completions.create(**kwargs)
+        request_client = (
+            client.with_options(max_retries=transport_max_retries)
+            if transport_max_retries is not None else client
+        )
+        if on_dispatch is not None:
+            on_dispatch()
+        response = await request_client.chat.completions.create(**kwargs)
         self._accumulate_usage(response)
         # v1.9.6: 21+ callers do response["choices"][0]["message"]["content"]
         # dict-style access — litellm.ModelResponse is dict-like, but AsyncOpenAI
@@ -339,6 +347,8 @@ class LLMClient:
         temperature: float,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        transport_max_retries: Optional[int] = None,
+        on_dispatch: Optional[Callable[[], None]] = None,
     ) -> Any:
         """Fallback path via litellm for non-OpenAI-compatible providers
         (e.g. anthropic)."""
@@ -355,6 +365,8 @@ class LLMClient:
             kwargs["max_tokens"] = int(max_tokens)
         if timeout is not None:
             kwargs["timeout"] = float(timeout)   # per-request 项,压过默认超时
+        if transport_max_retries is not None:
+            kwargs["num_retries"] = int(transport_max_retries)
 
         provider_cfg = self.config.get("providers", {}).get(self.provider, {})
         if "base_url" in provider_cfg:
@@ -373,6 +385,8 @@ class LLMClient:
         await asyncio.to_thread(importlib.import_module, "litellm")
         from litellm import acompletion
 
+        if on_dispatch is not None:
+            on_dispatch()
         response = await acompletion(**kwargs)
         self._accumulate_usage(response)
         return response
@@ -387,6 +401,8 @@ class LLMClient:
         timeout: Optional[float] = None,
         thinking: Optional[bool] = None,
         reasoning_effort: Optional[str] = None,
+        max_retries: Optional[int] = None,
+        on_dispatch: Optional[Callable[[], None]] = None,
     ) -> Any:
         # 座席级思考预算(2026-07-12 思考预算层):显式参 > 座席默认(for_agent 解析的
         # agent_overrides.max_tokens/timeout)> 不传。两者都 None 时两条路径 kwargs 不出现
@@ -403,7 +419,21 @@ class LLMClient:
         # 瞬时错误(SSL hiccup / 超时 / 5xx / 429)指数退避重试。此前 chat() 零重试,
         # 任何抖动直接冒泡 → seats/decide、各研报 SubAgent、wisdom 等单次失败即判失败
         # (重试只在交互式 buddy 循环有)。鉴权/请求错(401/400)不重试,立即抛。
-        attempts = max(0, int(self.config.get("max_retries", 2))) + 1
+        # Most callers keep the repository default retry policy.  Audited
+        # orchestration attempts pass ``max_retries=0`` because every provider
+        # dispatch has its own durable budget reservation; hidden transport
+        # retries would otherwise turn one accounted invocation into several.
+        retry_count = (
+            self.config.get("max_retries", 2)
+            if max_retries is None else max_retries
+        )
+        if type(retry_count) is not int or retry_count < 0:
+            raise ValueError("max_retries must be a non-negative integer")
+        attempts = retry_count + 1
+        # When a caller explicitly owns retry policy, disable the OpenAI SDK /
+        # LiteLLM transport layer's hidden retries.  ``None`` preserves the
+        # legacy behavior for all existing non-orchestration callers.
+        transport_max_retries = 0 if max_retries is not None else None
         last_exc: Optional[BaseException] = None
         for i in range(attempts):
             try:
@@ -413,10 +443,14 @@ class LLMClient:
                         max_tokens=eff_mt, timeout=eff_timeout,
                         thinking=eff_thinking,
                         reasoning_effort=eff_reasoning_effort,
+                        transport_max_retries=transport_max_retries,
+                        on_dispatch=on_dispatch,
                     )
                 return await self._chat_litellm(
                     messages, tools, response_format, temperature,
                     max_tokens=eff_mt, timeout=eff_timeout,
+                    transport_max_retries=transport_max_retries,
+                    on_dispatch=on_dispatch,
                 )
             except asyncio.CancelledError:
                 raise

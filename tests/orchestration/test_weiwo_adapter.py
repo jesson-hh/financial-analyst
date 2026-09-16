@@ -128,8 +128,17 @@ def _pulled(dt: datetime) -> str:
 
 
 def _ok_env(*, items, pulled_at=None, status="ok"):
-    return {"ok": True, "status": status, "items": list(items), "n": len(items),
-            "error": "", "note": "", "pulled_at": pulled_at}
+    return {
+        "ok": True, "status": status,
+        "source": "eastmoney_stock_news",
+        "provider": "eastmoney", "actual_provider": "eastmoney",
+        "fallback_level": 0, "attempted_sources": [],
+        "cache_hit": False, "network_used": True,
+        "circuit_state": "closed",
+        "schema_version": "guanlan.live-source-result.v2",
+        "items": list(items), "n": len(items),
+        "error": "", "note": "", "pulled_at": pulled_at,
+    }
 
 
 class _ProbeStub:
@@ -614,7 +623,7 @@ def test_no_write_capabilities_in_binding():
     existing = {s.method_ref for s in surface.method_specs}
     assert set(cap.data_method_refs) <= existing
     bound = {s.method_id for s in surface.method_specs if s.method_ref in set(cap.data_method_refs)}
-    assert bound == {"verified_snapshot", "news", "ohlcv"}
+    assert bound == {"verified_snapshot", "news", "ohlcv", "indicators"}
     for s in surface.method_specs:
         if s.method_id in bound:
             assert s.read_only is True

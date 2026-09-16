@@ -1,6 +1,7 @@
 import sys
 import pathlib
 import asyncio
+from datetime import date
 _ENGINE = pathlib.Path(__file__).resolve().parents[1] / "engine"
 if str(_ENGINE) not in sys.path:
     sys.path.insert(0, str(_ENGINE))
@@ -25,7 +26,7 @@ def test_news_sentiment_maps_single_code(tmp_path, monkeypatch):
     monkeypatch.setattr(news_pulse, "judge_sentiment", fake_judge)
 
     agent = NewsSentiment(memory_root=tmp_path)
-    res = asyncio.run(agent.run({"code": "SZ300750", "asof_date": "2026-06-13"}))
+    res = asyncio.run(agent.run({"code": "SZ300750", "asof_date": date.today().isoformat()}))
     assert res.ok is True
     out: NewsSentimentOutput = res.output
     assert out.code == "SZ300750" and out.market_read == "偏多"
@@ -45,7 +46,7 @@ def test_news_sentiment_honest_when_fetch_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(news_pulse, "judge_sentiment", judge_empty)
 
     agent = NewsSentiment(memory_root=tmp_path)
-    res = asyncio.run(agent.run({"code": "SZ300750", "asof_date": "2026-06-13"}))
+    res = asyncio.run(agent.run({"code": "SZ300750", "asof_date": date.today().isoformat()}))
     assert res.ok is True and res.output.covered is False
     assert "无相关" in res.output.honest_note
 
@@ -55,7 +56,7 @@ def test_news_sentiment_honest_when_fetch_raises(tmp_path, monkeypatch):
         raise RuntimeError("timeout")
     monkeypatch.setattr(news_pulse, "fetch_kuaixun", boom)
     agent = NewsSentiment(memory_root=tmp_path)
-    res = asyncio.run(agent.run({"code": "SZ300750", "asof_date": "2026-06-13"}))
+    res = asyncio.run(agent.run({"code": "SZ300750", "asof_date": date.today().isoformat()}))
     assert res.ok is True and res.output.covered is False
     assert "快讯拉取失败" in res.output.honest_note
 

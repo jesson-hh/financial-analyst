@@ -436,7 +436,10 @@ def test_catalog_matches_new_context_and_replayable_backtest_params():
     assert ["src", "series"] in wapi._CATALOG["orthogonalize"]["in"]
     for key in ("start", "end", "rebalance", "commission", "stamp_tax", "slippage"):
         assert key in wapi._CATALOG["backtest"]["params"]
-    assert "上述 27 类" in wapi.SYSTEM_PROMPT
+    # The prompt deliberately refers to the live catalog instead of embedding
+    # a count that drifts whenever a reviewed node type is added.
+    assert "上述当前目录" in wapi.SYSTEM_PROMPT
+    assert len(wapi._CATALOG) >= 27
     assert wex._split_factor_controls("correlation(close,volume,20)") == [
         "correlation(close,volume,20)"
     ]

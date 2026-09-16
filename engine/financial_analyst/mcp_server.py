@@ -26,6 +26,7 @@ Wire into Claude Desktop with:
 from __future__ import annotations
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -41,14 +42,21 @@ for _s in (sys.stdout, sys.stderr):
 
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+# Importing an entrypoint is intentionally side-effect free in Guanlan's
+# explicit test mode.  This keeps real user credentials, output paths and
+# private plugins outside the test process while preserving production startup.
+_EXPLICIT_TEST_MODE = os.environ.get("GUANLAN_TESTING") == "1"
+
+if not _EXPLICIT_TEST_MODE:
+    load_dotenv(override=True)
 
 # Load user plugins (BYOM models, collectors, etc.)
-try:
-    from financial_analyst.plugins import load_plugins
-    load_plugins()
-except Exception:
-    pass
+if not _EXPLICIT_TEST_MODE:
+    try:
+        from financial_analyst.plugins import load_plugins
+        load_plugins()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

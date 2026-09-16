@@ -163,10 +163,10 @@ from guanlan_v2.orchestration.pipeline.assembly import (
     ProductionCatalogRuntime,
     build_production_plan_runner,
 )
-from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 from guanlan_v2.orchestration.pipeline.deep_decide import (
     DEEP_DECIDE_PRESET_ID,
     DEEP_DECIDE_WORKER_IDS,
+    DeepRunSubject,
     materialize_deep_decide_draft,
     session_date_of,
 )
@@ -221,7 +221,7 @@ _LLM_WORKERS = tuple(w for w in DEEP_DECIDE_WORKER_IDS if w not in _DETERMINISTI
 
 #: the plan-side / admission evidence the "code-free" claim covers (Task 7's set).
 #: Worker OUTPUT artifacts are excluded — their payloads legitimately carry the
-#: symbol the scripted model wrote — and ``RunSubject@1`` is the ONE carrier.
+#: symbol the scripted model wrote — and ``RunSubject@2`` is the ONE carrier.
 _PLAN_SIDE_SCHEMAS = (
     "Plan@1", "AdmissionCandidate@1", "PlanValidationReport@1",
     "RuntimeSupportReport@1", "PlanAdmitted@1", "PlanApproval@1",
@@ -233,18 +233,10 @@ _PLAN_SIDE_SCHEMAS = (
 #: ``"plan-approval:<64hex>"`` produced a false positive on a quoted-only pattern
 #: (found while arming tripwire T2).
 _DIGEST_RE = re.compile(r'[0-9a-f]{32,}')
-#: ANY six-digit run with digit boundaries on both sides — catches a code embedded
-#: mid-string (a goal, a rationale, a node id), which a quoted-exact pattern misses,
-#: while rejecting the sealed preset's own ``budget_request_tokens: 6000000``
-#: (seven digits ⇒ the right-hand boundary fails). Proven by tripwire T2.
-#:
-#: KNOWN-BENIGN six-digit shapes this WOULD trip on if they ever reached the
-#: plan-side evidence (none do today): a round token/budget figure written with
-#: exactly six digits (``100000``, ``500000``), a microsecond field, or a
-#: six-digit port/ordinal. A future trip on one of those is a false positive to
-#: be narrowed here — it is NOT evidence of a leaked stock code. The assertion
-#: prints the offending run so the two are distinguishable at a glance.
-_CODE_RUN_RE = re.compile(r'(?<!\d)\d{6}(?!\d)')
+#: The fixture stock identity with digit boundaries. V2's honest retry/repair
+#: envelopes are themselves six-digit integers, so a generic ``\d{6}`` pattern
+#: would confuse budget evidence with a symbol leak.
+_CODE_RUN_RE = re.compile(rf'(?<!\d){re.escape(CODE)}(?!\d)')
 
 
 def _code_free(blob: str) -> str | None:
@@ -445,7 +437,7 @@ def _pa_handler_factory_for(as_of: datetime):
                 payload=lp.PriceActionFeatureReport(
                     symbol=SYM, as_of=as_of, feature_set_version="pa-15key-v1",
                     features={k: float(i) for i, k in enumerate(keys)}),
-                rendered_text="pa det", input_tokens=0, output_tokens=1)
+                rendered_text="pa det", input_tokens=0, output_tokens=0)
         return handler
 
     return factory
@@ -460,7 +452,7 @@ def _ms_handler_factory_for(as_of: datetime):
                     bid_ask_imbalance=None, break_ratio=None, whale_net_inflow=None,
                     degradation=("scripted: all optional feeds stood down",),
                     narrative="scripted microstructure (nothing imputed)"),
-                rendered_text="ms det", input_tokens=0, output_tokens=1)
+                rendered_text="ms det", input_tokens=0, output_tokens=0)
         return handler
 
     return factory
@@ -644,14 +636,16 @@ class _DeepPresetReplayCoordinator:
         # the run-scoped subject: the ONLY sanctioned carrier of the stock code.
         session_dt = datetime.strptime(
             session_date_of(clock.now()), "%Y-%m-%d").replace(tzinfo=_SESSION_TZ)
-        subject = RunSubject(code=CODE, as_of=session_dt)
+        subject = DeepRunSubject(
+            code=CODE, as_of=session_dt, evidence_tf="day")
         subject_ref = live_decide._commit_run_subject(stores, subject, run_id)
 
         materialized = materialize_deep_decide_draft(
             request=request, preset_registry=heavy.presets,
             context_snapshot_ref=ctx_ref, subject_ref=subject_ref, clock=clock,
             context=context, catalog=heavy.snapshot,
-            schema_registry=heavy.registry, draft_id=f"plan-{run_id}", run_id=run_id)
+            schema_registry=heavy.registry, draft_id=f"plan-{run_id}", run_id=run_id,
+            subject=subject)
         draft = materialized.draft
 
         approvals: dict = {}
@@ -737,7 +731,8 @@ class _DeepPresetReplayCoordinator:
             run_context_factory=_run_context_factory,
             request_id=request.request_id, clock=clock,
             runtime_registry_digest=rt_digest, runtime_limit=4, catalog=bundle,
-            prompt_assembler=assembler)
+            prompt_assembler=assembler,
+            subject_params=materialized.subject_params)
         artifact = runner(
             lane="main", point=point, approval=None,
             data_context=context.data_context, memory_binding=None,
@@ -930,13 +925,13 @@ class TestTheDeepPresetReplaysPerDecisionPoint:
 
     def test_the_run_subject_is_the_only_carrier_of_the_code(self, replay):
         """Task 6's invariant survives the replay: the code enters through the
-        committed ``RunSubject@1`` and the per-run assembler, never the draft."""
+        committed ``RunSubject@2`` and the per-run assembler, never the draft."""
         stored_by_schema: dict[str, list] = {}
         for stores in replay.coordinator.stores_by_point.values():
             for stored in dict(stores._shared.backend.payloads).values():
                 stored_by_schema.setdefault(stored.schema_key, []).append(stored)
         assert stored_by_schema.get("Plan@1")
-        assert stored_by_schema.get("RunSubject@1")
+        assert stored_by_schema.get("RunSubject@2")
         # no six-digit code-shaped run survives ANYWHERE in the plan-side evidence
         # — not as a field value, not embedded in a goal/rationale string.
         for schema_key in _PLAN_SIDE_SCHEMAS:
@@ -944,7 +939,7 @@ class TestTheDeepPresetReplaysPerDecisionPoint:
                 found = _code_free(stored.model.model_dump_json())
                 assert found is None, (schema_key, found)
         # ...and the subject really IS committed — carried, not implied.
-        subjects = stored_by_schema.get("RunSubject@1", ())
+        subjects = stored_by_schema.get("RunSubject@2", ())
         assert subjects and all(
             f'"{CODE}"' in s.model.model_dump_json() for s in subjects)
 

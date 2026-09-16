@@ -20,7 +20,7 @@ plus the controller's Task-3-round correction clause, ledger §11.1):
   evidence-anchor requirement CONDITIONALLY, because the contract licenses an
   empty citation list exactly when the runtime measured nothing citable;
 * the deep preset description must describe what ``pv.microstructure``
-  actually does in THIS preset (nothing downstream reads its report);
+  actually does in THIS preset (its typed report blocks ``dec.research_mgr``);
 * ``text.news``'s SKILL must not promise ``ww_f10`` — D-1 removed the only
   capability that supplied it, and a promise without supply is the same paper
   fiction as a grant without a row;
@@ -340,9 +340,8 @@ class TestThePresetDescriptionMatchesWhatTheWorkerDoes:
     def preset(self) -> dict:
         return json.loads(_text(_PRESETS / "luozi_deep_decide_v1.json"))
 
-    def test_no_node_of_this_preset_reads_the_microstructure_report(self, preset):
-        """The measurement the description must match (Task-6 review fact,
-        re-measured here against the real Phase-8 catalog)."""
+    def test_the_preset_routes_microstructure_to_research_manager(self, preset):
+        """Measure the reviewed direct-input wiring against the real catalog."""
         workers = {w.id: w for w in LC.phase8_catalog_snapshot().workers}
         scheduled = {n["worker_id"] for n in preset["nodes"]}
         produced = {
@@ -353,14 +352,25 @@ class TestThePresetDescriptionMatchesWhatTheWorkerDoes:
             wid for wid in scheduled
             for i in workers[wid].inputs
             if i.schema_ref.name == "MicrostructureReport"}
-        assert consumers_in_preset == set()
-        # …while the catalog DOES hold one consumer, which this preset omits:
-        # the honest statement is "not scheduled here", not "nothing can read it".
+        assert consumers_in_preset == {"dec.research_mgr"}
+        # The catalog also holds the generic quality-gate consumer; this preset
+        # intentionally injects the report directly into its research manager.
         consumers_in_catalog = {
             w.id for w in workers.values()
             for i in w.inputs if i.schema_ref.name == "MicrostructureReport"}
-        assert consumers_in_catalog == {"x.quality_gate"}
+        assert consumers_in_catalog == {"dec.research_mgr", "x.quality_gate"}
         assert "x.quality_gate" not in scheduled
+
+        research_mgr = next(n for n in preset["nodes"]
+                            if n["worker_id"] == "dec.research_mgr")
+        micro_edges = [d for d in research_mgr.get("dependencies", [])
+                       if d.get("inject_as") == "microstructure"]
+        assert micro_edges == [{
+            "upstream_node_id": "microstructure",
+            "artifact_slot": "slot.microstructure",
+            "inject_as": "microstructure",
+            "policy": "block",
+        }]
 
     def test_the_description_no_longer_lists_it_among_what_feeds_the_debate(
             self, preset):
@@ -371,8 +381,8 @@ class TestThePresetDescriptionMatchesWhatTheWorkerDoes:
     def test_the_description_states_what_it_actually_does(self, preset):
         desc = preset["description"]
         assert "pv.microstructure" in desc
-        assert "slot.microstructure" in desc
-        assert "x.quality_gate" in desc
+        assert "blocking typed inputs to dec.research_mgr" in desc
+        assert "No evidence seat is auxiliary decoration" in desc
 
     def test_the_reduced_preset_carries_the_same_correction(self):
         """The reduced preset repeated the overstatement verbatim. Truing one
@@ -380,20 +390,29 @@ class TestThePresetDescriptionMatchesWhatTheWorkerDoes:
         a different preset id."""
         reduced = json.loads(_text(_PRESETS / "luozi_deep_decide_reduced_v1.json"))
         desc = reduced["description"]
-        assert "pv.price_action + pv.microstructure " not in desc, (
-            "the reduced preset still lists pv.microstructure among what feeds "
-            "the debate")
-        assert "slot.microstructure" in desc
-        assert "x.quality_gate" in desc
+        assert "remaining price-action, microstructure, sentiment" in desc
+        assert "blocking typed inputs to dec.research_mgr" in desc
+        assert "No retained evidence seat is auxiliary decoration" in desc
 
-    def test_no_node_of_the_reduced_preset_reads_it_either(self):
+    def test_the_reduced_preset_routes_it_to_research_manager_too(self):
         workers = {w.id: w for w in LC.phase8_catalog_snapshot().workers}
         reduced = json.loads(_text(_PRESETS / "luozi_deep_decide_reduced_v1.json"))
         scheduled = {n["worker_id"] for n in reduced["nodes"]}
-        assert "pv.microstructure" in scheduled     # it IS in the graph…
+        assert "pv.microstructure" in scheduled
         assert {wid for wid in scheduled
                 for i in workers[wid].inputs
-                if i.schema_ref.name == "MicrostructureReport"} == set()
+                if i.schema_ref.name == "MicrostructureReport"} == {"dec.research_mgr"}
+        research_mgr = next(n for n in reduced["nodes"]
+                            if n["worker_id"] == "dec.research_mgr")
+        assert any(
+            d == {
+                "upstream_node_id": "microstructure",
+                "artifact_slot": "slot.microstructure",
+                "inject_as": "microstructure",
+                "policy": "block",
+            }
+            for d in research_mgr.get("dependencies", [])
+        )
 
 
 # =========================================================================== #
@@ -447,7 +466,7 @@ class TestTheScreeningSeamCommentIsTrue:
         row_workers = {
             op.worker_id
             for op in phase3_data_surface().prefetch_binding.operations}
-        assert scheduled & row_workers == {"text.news"}
+        assert scheduled & row_workers == {"pv.price_action", "text.news"}
 
     def test_the_comment_names_the_worker_that_makes_it_non_vacuous(self):
         """Scoped to the ``subject_params`` field comment itself — the seam the
@@ -458,6 +477,7 @@ class TestTheScreeningSeamCommentIsTrue:
         comment = "\n".join(
             line for line in src.splitlines() if line.strip().startswith("#:"))
         assert "text.news" in comment, comment
+        assert "pv.price_action" in comment, comment
 
 
 # =========================================================================== #

@@ -39,6 +39,7 @@ the Phase 1 registered-contract surface and not exported from the Phase 1
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import RLock
 from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -57,6 +58,7 @@ __all__ = [
     "BudgetExceeded",
     "InvalidBudgetTransition",
     "IdempotencyConflict",
+    "IdempotencyReplayRefused",
     "BudgetRequest",
     "AvailableBudget",
     "ReservePlanArgs",
@@ -99,6 +101,17 @@ class IdempotencyConflict(BudgetError):
     Task 2's production event store owns the canonical persist-then-publish
     idempotency contract; this ledger enforces the same rule over the injected
     sink so the fake and production paths agree.
+    """
+
+
+class IdempotencyReplayRefused(BudgetError):
+    """A caller requiring a fresh side-effect reservation found an old one.
+
+    Retrying a durable budget command is normally safe and remains the default.
+    Provider dispatch is different: an existing attempt reservation after a
+    crash is ambiguous evidence that the external call may already have begun.
+    Such callers request a fresh-only reservation and fail closed instead of
+    repeating a possibly billed provider invocation.
     """
 
 
@@ -759,23 +772,44 @@ class BudgetLedger:
             )
         self._sink = sink
         self._run_budget = run_budget
+        # Serialize check+append for fresh-only provider reservations in the
+        # single production process.  The durable sink still owns persistence
+        # and ordinary idempotency across restarts.
+        self._command_lock = RLock()
 
     # -- fold-on-read helpers ------------------------------------------------ #
     def _state(self) -> LedgerState:
         return fold_budget_events(self._sink.budget_events())
 
-    def _apply(self, command: BudgetTransitionCommand) -> BudgetEvent:
+    def _apply(
+        self,
+        command: BudgetTransitionCommand,
+        *,
+        reject_replay: bool = False,
+    ) -> BudgetEvent:
         """Idempotency -> validate-against-live-head -> append, atomically."""
-        existing = self._sink.find_by_idempotency_key(command.idempotency_key)
-        if existing is not None:
-            if not _same_semantics(existing.command, command):
-                raise IdempotencyConflict(
-                    f"idempotency key {command.idempotency_key!r} was reused with "
-                    "different semantic content"
-                )
-            return existing  # idempotent replay: no re-validation, no new event
-        validate_budget_command(command, self._state(), run_budget=self._run_budget)
-        return self._sink.append(command)
+        with self._command_lock:
+            existing = self._sink.find_by_idempotency_key(command.idempotency_key)
+            if existing is not None:
+                if not _same_semantics(existing.command, command):
+                    raise IdempotencyConflict(
+                        f"idempotency key {command.idempotency_key!r} was reused with "
+                        "different semantic content"
+                    )
+                if reject_replay:
+                    raise IdempotencyReplayRefused(
+                        "fresh-only reservation found an existing durable "
+                        f"idempotency key {command.idempotency_key!r}"
+                    )
+                return existing  # ordinary idempotent replay
+            validate_budget_command(command, self._state(), run_budget=self._run_budget)
+            if reject_replay:
+                append_fresh = getattr(self._sink, "append_fresh", None)
+                if callable(append_fresh):
+                    # Production performs the final same-key check + append
+                    # under its shared backend lock, across ledger instances.
+                    return append_fresh(command)
+            return self._sink.append(command)
 
     # -- public reservation API --------------------------------------------- #
     def reserve_plan(
@@ -810,6 +844,7 @@ class BudgetLedger:
         llm_invocations: int,
         concurrency: int,
         idempotency_key: str,
+        reject_replay: bool = False,
     ) -> BudgetReservation:
         command = BudgetTransitionCommand(
             operation="reserve_node",
@@ -823,7 +858,7 @@ class BudgetLedger:
             ),
             idempotency_key=idempotency_key,
         )
-        event = self._apply(command)
+        event = self._apply(command, reject_replay=reject_replay)
         return self._state().reservations[event.reservation_id]
 
     def reserve_planner(
@@ -871,6 +906,7 @@ class BudgetLedger:
         llm_invocations: int,
         concurrency: int,
         idempotency_key: str,
+        reject_replay: bool = False,
     ) -> BudgetReservation:
         """Phase 8 (Task 8) additive: reserve one bounded-*retry* attempt of a node.
 
@@ -893,7 +929,7 @@ class BudgetLedger:
             ),
             idempotency_key=idempotency_key,
         )
-        event = self._apply(command)
+        event = self._apply(command, reject_replay=reject_replay)
         return self._state().reservations[event.reservation_id]
 
     def reserve_schema_repair(
@@ -906,6 +942,7 @@ class BudgetLedger:
         llm_invocations: int,
         concurrency: int,
         idempotency_key: str,
+        reject_replay: bool = False,
     ) -> BudgetReservation:
         """Phase 8 (Task 8) additive: reserve one bounded *schema-repair* invocation.
 
@@ -924,7 +961,7 @@ class BudgetLedger:
             ),
             idempotency_key=idempotency_key,
         )
-        event = self._apply(command)
+        event = self._apply(command, reject_replay=reject_replay)
         return self._state().reservations[event.reservation_id]
 
     def settle(

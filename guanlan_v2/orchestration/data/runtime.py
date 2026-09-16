@@ -37,7 +37,7 @@ schemas through the existing owners.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from pydantic import ValidationError
@@ -365,7 +365,16 @@ class _DataEvidenceWriterAdapter:
 #: The CLOSED set of source pointers the run-subject projection may serve.
 #: Exactly the two pointers the ONE reviewed prefetch row binds; widening this
 #: set is a reviewed decision, never a convenience edit.
-SUBJECT_PARAM_POINTERS: frozenset[str] = frozenset({"/asof_date", "/code"})
+SUBJECT_PARAM_POINTERS: frozenset[str] = frozenset({
+    "/asof_date", "/code", "/evidence_tf", "/symbol", "/window_start",
+})
+
+_EVIDENCE_TF_LOOKBACK: dict[str, timedelta] = {
+    "day": timedelta(days=120),
+    "30min": timedelta(days=20),
+    "5min": timedelta(days=5),
+    "1min": timedelta(days=2),
+}
 
 
 @dataclass(frozen=True)
@@ -387,10 +396,14 @@ class SubjectParams:
     """
 
     code_value: Any
+    symbol_value: Any
     asof_value: str
+    window_start_value: str
+    evidence_tf_value: str
 
     @classmethod
-    def project(cls, *, code: str, as_of: datetime) -> "SubjectParams":
+    def project(cls, *, code: str, as_of: datetime,
+                evidence_tf: str = "day") -> "SubjectParams":
         """Project a committed subject's primitives into the closed document.
 
         Layering-clean: takes primitives, imports nothing from ``pipeline/``.
@@ -426,14 +439,29 @@ class SubjectParams:
             raise DataRuntimeError(
                 "subject as_of must be tz-aware; a naive datetime cannot prove "
                 "PIT and is rejected")
+        tf = str(evidence_tf or "").strip().lower()
+        if tf not in _EVIDENCE_TF_LOOKBACK:
+            raise DataRuntimeError(
+                f"subject evidence_tf must be one of "
+                f"{tuple(_EVIDENCE_TF_LOOKBACK)}, got {evidence_tf!r}")
+        utc_asof = as_of.astimezone(timezone.utc)
         return cls(
             code_value=(sym,),
-            asof_value=as_of.astimezone(timezone.utc).isoformat(),
+            symbol_value=sym,
+            asof_value=utc_asof.isoformat(),
+            window_start_value=(utc_asof - _EVIDENCE_TF_LOOKBACK[tf]).isoformat(),
+            evidence_tf_value=tf,
         )
 
     def as_document(self) -> dict:
-        """The CLOSED two-key document — no extension point."""
-        return {"asof_date": self.asof_value, "code": self.code_value}
+        """The CLOSED subject document — no caller extension point."""
+        return {
+            "asof_date": self.asof_value,
+            "code": self.code_value,
+            "evidence_tf": self.evidence_tf_value,
+            "symbol": self.symbol_value,
+            "window_start": self.window_start_value,
+        }
 
 
 # --------------------------------------------------------------------------- #

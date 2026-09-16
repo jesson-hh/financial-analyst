@@ -21,7 +21,9 @@ Run: ``python -m pytest tests/orchestration/test_eventstore.py -v``
 from __future__ import annotations
 
 import inspect
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Barrier
 
 import pytest
 from pydantic import ValidationError
@@ -32,6 +34,7 @@ from guanlan_v2.orchestration.budget import (
     BudgetLedger,
     BudgetRequest,
     BudgetTransitionCommand,
+    IdempotencyReplayRefused,
     ReserveNodeArgs,
     fold_budget_events,
 )
@@ -1040,6 +1043,64 @@ def test_production_sink_is_a_budget_event_sink_and_conflicts_on_drift():
         idempotency_key="k1")
     with pytest.raises(IdempotencyConflict):
         sink.append(drift)
+
+
+def test_fresh_only_child_reservation_has_one_winner_across_ledgers(monkeypatch):
+    """Two run owners cannot both acquire the same provider-attempt key."""
+    stores, _ = _stores()
+    rb = RunBudget(
+        ledger_id="ledger-1", max_tokens=10_000,
+        max_llm_invocations=10, max_concurrency=2)
+    owner = BudgetLedger(
+        sink=stores.budget_event_sink(run_id="run-1", ledger_id="ledger-1"),
+        run_budget=rb)
+    plan = owner.reserve_plan(
+        request_id="req-1", candidate_plan_digest=DA,
+        budget_request=BudgetRequest(
+            tokens=10_000, llm_invocations=10, concurrency=2),
+        idempotency_key="plan")
+
+    sinks = [
+        stores.budget_event_sink(run_id="run-1", ledger_id="ledger-1")
+        for _ in range(2)
+    ]
+    both_read_old_head = Barrier(2)
+    for sink in sinks:
+        original_find = sink.find_by_idempotency_key
+
+        def _synchronized_find(key, *, _find=original_find):
+            found = _find(key)
+            both_read_old_head.wait(timeout=5)
+            return found
+
+        monkeypatch.setattr(
+            sink, "find_by_idempotency_key", _synchronized_find)
+
+    ledgers = [BudgetLedger(sink=sink, run_budget=rb) for sink in sinks]
+
+    def _reserve(ledger):
+        try:
+            return ledger.reserve_node(
+                plan_reservation_id=plan.reservation_id,
+                node_id="llm-node", attempt=1,
+                tokens=1_000, llm_invocations=1, concurrency=1,
+                idempotency_key="provider-attempt:1",
+                reject_replay=True)
+        except Exception as exc:  # returned for exact winner/loser assertions
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(_reserve, ledgers))
+
+    assert sum(not isinstance(x, Exception) for x in outcomes) == 1
+    losers = [x for x in outcomes if isinstance(x, Exception)]
+    assert len(losers) == 1
+    assert isinstance(losers[0], IdempotencyReplayRefused)
+    matching = [
+        event for event in sinks[0].budget_events()
+        if event.command.idempotency_key == "provider-attempt:1"
+    ]
+    assert len(matching) == 1
 
 
 # =========================================================================== #

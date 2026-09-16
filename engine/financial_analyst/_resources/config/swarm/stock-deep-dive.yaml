@@ -45,7 +45,7 @@ agents:
     input_keys: [code, asof_date]
   - name: evidence-loader           # 平台证据包(十数据面,guanlan_v2 侧构建·零LLM)
     deps: []
-    input_keys: []
+    input_keys: []                   # loader.py 运行时补入 code/asof_date；保持封印映射兼容
 
   # ── Tier 2 — Tier 1 之后并行 ──
   - name: fundamental-analyst

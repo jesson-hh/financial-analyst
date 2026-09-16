@@ -163,7 +163,7 @@ def test_judge_card_displays_and_submits_effective_evidence_without_silent_fallb
     assert "assignment={currentAssignment}" in app
     assert "freq: effectiveTF || 'day'" in panels
     assert "未接通 · 未降级日线" in panels
-    assert "依据 ·" in panels and "自动思考 ·" in panels
+    assert "Agent ·" in panels and "依据 ·" in panels and "自动研判 ·" in panels
     assert "day + 'T'" in panels
 
 
@@ -212,11 +212,17 @@ def test_manual_decide_preserves_stale_evidence_details_for_the_ui():
     assert "数据截至 ' + decide.data_asof" in panels
 
 
-def test_all_changed_seats_assets_are_cache_busted_together():
+def test_changed_seats_assets_have_current_cache_busters():
     html = _read("观澜 · 落子.html")
-    for name in ("luozi-data.jsx", "luozi-panels.jsx", "luozi-fleet.jsx", "luozi-foundry.jsx"):
-        assert f'{name}?v=20260815w2' in html
-    assert 'luozi-app.jsx?v=20260817n1' in html
+    expected = {
+        "luozi-data.jsx": "20260831evidence2",
+        "luozi-panels.jsx": "20260831evidence2",
+        "luozi-fleet.jsx": "20260815session1",
+        "luozi-foundry.jsx": "20260815w2",
+        "luozi-app.jsx": "20260831evidence2",
+    }
+    for name, version in expected.items():
+        assert f'{name}?v={version}' in html
 
 
 def test_news_popover_has_readable_information_hierarchy():

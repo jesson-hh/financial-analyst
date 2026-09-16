@@ -421,8 +421,6 @@ def test_deleted_memory_id_is_tombstoned_and_never_reused(tmp_path, monkeypatch)
     deleted = client.delete(f"/console/memories/{first['id']}")
     assert deleted.status_code == 200 and deleted.json()["recoverable"] is True
 
-    # Simulate a later legacy writer recreating the byte-identical row at the
-    # same position.  Its identity must not collide with durable trash/audit.
     memory.write_text(original, encoding="utf-8")
     second = client.get("/console/memories").json()["memories"][0]
     assert second["id"] != first["id"]

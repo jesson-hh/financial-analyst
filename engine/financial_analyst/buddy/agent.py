@@ -25,10 +25,11 @@ Anthropic-style ``input_schema`` form; LiteLLM converts when needed.
 """
 from __future__ import annotations
 import asyncio
+import contextvars
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from financial_analyst.buddy.tools import (
     Tool, ToolResult, TOOL_REGISTRY, get_tool,
@@ -36,6 +37,15 @@ from financial_analyst.buddy.tools import (
 from financial_analyst.llm.client import LLMClient
 
 log = logging.getLogger(__name__)
+
+
+# Host applications may install a per-context, fail-closed policy for tool
+# arguments. The default remains ``None`` so non-Console Buddy callers retain
+# their existing behaviour. A guard returns a safe reason to block, or None.
+ToolArgumentGuard = Callable[[str, Any], Optional[str]]
+CTX_TOOL_ARGUMENT_GUARD: contextvars.ContextVar[Optional[ToolArgumentGuard]] = (
+    contextvars.ContextVar("buddy_tool_argument_guard", default=None)
+)
 
 
 SYSTEM_PROMPT = """You are 金融助手 — a conversational A-share research assistant.
@@ -191,14 +201,7 @@ class TurnEvent:
 
 def _bounded_compaction_transcript(messages: List[Message], transcript: Optional[str] = None,
                                    max_chars: int = 12000) -> str:
-    """Keep the previous digest *and* the newest turns inside the compact prompt.
-
-    The old implementation sliced ``convo[:12000]``.  On a long research turn
-    that retained the oldest tool output and silently dropped the latest user
-    correction or TODO.  This bounded projection reserves a small head for an
-    existing roll-up and spends the remaining budget from the newest message
-    backwards.
-    """
+    """Keep the previous digest and the newest turns inside the compact prompt."""
     if transcript and transcript.strip():
         body = transcript.strip()
         if len(body) <= max_chars:
@@ -213,9 +216,10 @@ def _bounded_compaction_transcript(messages: List[Message], transcript: Optional
     joined = "\n\n".join(rendered)
     if len(joined) <= max_chars:
         return joined
-
     first = rendered[0]
-    keep_head = first if any(flag in first for flag in ("前情摘要", "历史摘要", "conversation-rollup")) else ""
+    keep_head = first if any(flag in first for flag in (
+        "前情摘要", "历史摘要", "conversation-rollup",
+    )) else ""
     if keep_head:
         keep_head = keep_head[:min(2600, max_chars // 3)]
     marker = "\n\n[中间较旧内容已省略，以下保留最近进展]\n\n"
@@ -229,8 +233,6 @@ def _bounded_compaction_transcript(messages: List[Message], transcript: Optional
             budget -= cost
             continue
         if not tail and budget > 80:
-            # Preserve the newest suffix when one giant tool result consumes the
-            # whole budget; the role label makes the truncation explicit.
             tail.insert(0, "[最新消息尾部] …" + row[-(budget - 12):])
         break
     return (keep_head + marker + "\n\n".join(tail)).strip()
@@ -545,6 +547,32 @@ class BuddyAgent:
                     args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
                 except json.JSONDecodeError:
                     args = {}
+
+                argument_guard = CTX_TOOL_ARGUMENT_GUARD.get()
+                blocked_reason: Optional[str] = None
+                if argument_guard is not None:
+                    try:
+                        blocked_reason = argument_guard(name, args)
+                    except Exception:
+                        # A broken host policy must fail closed without echoing
+                        # rejected arguments into either event stream.
+                        log.exception("tool argument guard failed for %s", name)
+                        blocked_reason = "工具参数未通过宿主安全检查，工具未执行。"
+                if blocked_reason:
+                    safe_reason = str(blocked_reason)[:500]
+                    yield TurnEvent("tool_call", {"name": name, "args": {}})
+                    yield TurnEvent("tool_result", {
+                        "name": name,
+                        "content": safe_reason,
+                        "is_error": True,
+                        "side_effect": None,
+                    })
+                    tool_result_messages.append({
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "content": f"[ERROR] {safe_reason}",
+                    })
+                    continue
 
                 yield TurnEvent("tool_call", {"name": name, "args": args})
 

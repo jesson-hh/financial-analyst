@@ -150,7 +150,7 @@
       }
     }
   ],
-  "budget_request_tokens": 4500000,
-  "budget_request_llm_invocations": 6,
+  "budget_request_tokens": 393216,
+  "budget_request_llm_invocations": 12,
   "max_concurrency": 4
 }

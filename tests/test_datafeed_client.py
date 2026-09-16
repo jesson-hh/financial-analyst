@@ -3,6 +3,7 @@
 import json
 import re
 import subprocess as _sp
+import threading
 import types
 from pathlib import Path
 
@@ -20,6 +21,35 @@ def _envelope(source_id="cninfo_irm", status="ok", items=None, error=""):
                        "query": {}, "fetched_ts": "2026-07-07T01:00:00", "items": items or [],
                        "status": status, "error": error, "write_enabled": False},
                       ensure_ascii=False)
+
+
+def _dataset_result(**overrides):
+    payload = {
+        "dataset_id": "market.quote",
+        "requested_mode": "live",
+        "effective_mode": "live",
+        "queried_at": "2026-08-16T12:00:00+08:00",
+        "as_of": None,
+        "status": "ok",
+        "items": [{"dataset_id": "market.quote", "raw": {"code": "600519"}}],
+        "canonical_fetched": 0,
+        "live_fetched": 1,
+        "network_used": True,
+        "actual_provider": "tencent",
+        "fallback_level": 0,
+        "stale_age": None,
+        "schema_version": "guanlan.data-query.v2",
+        "write_enabled": False,
+        "canonical_write": False,
+        "diagnostics": {
+            "live_status": "ok",
+            "cache_hit": False,
+            "circuit_state": "closed",
+            "attempted_sources": [],
+        },
+    }
+    payload.update(overrides)
+    return payload
 
 
 @pytest.fixture(autouse=True)
@@ -99,6 +129,303 @@ def test_probe_planned_and_error_passthrough(monkeypatch):
     assert out2["ok"] is True and out2["status"] == "error" and "boom" in out2["note"]
 
 
+def test_probe_exposes_operational_state_and_last_good_metadata(monkeypatch):
+    payload = {
+        "source_id": "tdx_realtime_quote",
+        "provider": "tdx",
+        "actual_provider": "tencent",
+        "status": "stale",
+        "error_kind": "network_error",
+        "error": "ConnectionError: reset",
+        "fallback_level": 1,
+        "stale_age": 42.5,
+        "schema_version": "guanlan.live-source-result.v2",
+        "cache_hit": True,
+        "network_used": True,
+        "circuit_state": "open",
+        "attempted_sources": [{"source_id": "tdx_realtime_quote", "status": "network_error"}],
+        "write_enabled": False,
+        "items": [{"raw": {"code": "600519", "price": 1400}}],
+    }
+    monkeypatch.setattr("subprocess.run", lambda cmd, **kw: _proc(stdout=json.dumps(payload)))
+    out = lc.probe("tdx_quote", code="600519")
+    assert out["status"] == "stale" and out["error_kind"] == "network_error"
+    assert out["actual_provider"] == "tencent" and out["fallback_level"] == 1
+    assert out["cache_hit"] is True and out["stale_age"] == 42.5
+    assert out["circuit_state"] == "open" and "last-good" in out["note"]
+
+
+def test_probe_never_invents_missing_provenance_attestations(monkeypatch):
+    payload = {
+        "source_id": "tencent_realtime_quote",
+        "provider": "tencent",
+        "status": "ok",
+        "write_enabled": False,
+        "items": [],
+    }
+    monkeypatch.setattr(
+        "subprocess.run", lambda cmd, **kw: _proc(stdout=json.dumps(payload))
+    )
+
+    out = lc.probe("tencent_realtime_quote", code="600519")
+
+    assert out["provider"] == "tencent"
+    for field in (
+        "actual_provider",
+        "fallback_level",
+        "attempted_sources",
+        "cache_hit",
+    ):
+        assert field not in out
+
+
+@pytest.mark.parametrize("status", [None, "", 0, "new_unreviewed_status"])
+def test_probe_requires_an_explicit_reviewed_status(monkeypatch, status):
+    payload = {
+        "source_id": "tencent_realtime_quote",
+        "provider": "tencent",
+        "write_enabled": False,
+        "items": [],
+    }
+    if status is not None:
+        payload["status"] = status
+    monkeypatch.setattr(
+        "subprocess.run", lambda cmd, **kw: _proc(stdout=json.dumps(payload))
+    )
+
+    out = lc.probe("tencent_realtime_quote", code="600519")
+
+    assert out["ok"] is False
+    assert out["status"] == "schema_error" and out["items"] == []
+    assert "status" in out["note"]
+
+
+def test_dataset_query_uses_router_protocol_and_exposes_attempts(monkeypatch):
+    seen = {}
+    payload = {
+        "dataset_id": "market.quote",
+        "requested_mode": "live",
+        "effective_mode": "live",
+        "queried_at": "2026-08-16T12:00:00",
+        "status": "ok",
+        "items": [{"dataset_id": "market.quote", "raw": {"code": "600519", "price": 1400}}],
+        "canonical_fetched": 0,
+        "live_fetched": 1,
+        "network_used": True,
+        "actual_provider": "tencent",
+        "fallback_level": 1,
+        "stale_age": None,
+        "schema_version": "guanlan.data-query.v2",
+        "write_enabled": False,
+        "canonical_write": False,
+        "diagnostics": {
+            "live_status": "ok",
+            "actual_provider": "tencent",
+            "fallback_level": 1,
+            "error_kind": "",
+            "cache_hit": False,
+            "circuit_state": "closed",
+            "attempted_sources": [
+                {"source_id": "tdx_realtime_quote", "status": "network_error"},
+                {"source_id": "tencent_realtime_quote", "status": "ok"},
+            ],
+        },
+    }
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return _proc(stdout=json.dumps(payload))
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    out = lc.query_dataset("market.quote", code="600519", limit=5)
+    assert out["ok"] is True and out["n"] == 1 and out["status"] == "ok"
+    assert out["actual_provider"] == "tencent" and out["fallback_level"] == 1
+    assert len(out["attempted_sources"]) == 2
+    assert "--dataset=market.quote" in seen["cmd"] and "--mode=live" in seen["cmd"]
+
+
+@pytest.mark.parametrize(("mutation", "note"), [
+    ({"schema_version": "guanlan.data-query.v3"}, "schema_version"),
+    ({"status": "bogus"}, "status"),
+    ({"status": 1}, "status"),
+    ({"diagnostics": None}, "diagnostics"),
+    ({"requested_mode": "canonical"}, "requested_mode"),
+    ({"effective_mode": "canonical"}, "effective_mode"),
+    ({"canonical_fetched": True}, "canonical_fetched"),
+    ({"live_fetched": -1}, "canonical_fetched"),
+    ({"canonical_fetched": 0, "live_fetched": 0}, "items/fetched count"),
+    ({"actual_provider": None}, "actual_provider"),
+    ({"fallback_level": "0"}, "fallback_level"),
+    ({"network_used": 1}, "network_used"),
+    ({"queried_at": ""}, "queried_at"),
+])
+def test_dataset_query_rejects_schema_status_count_or_provenance_drift(
+    mutation, note,
+):
+    payload = _dataset_result(**mutation)
+
+    out = lc._shape_dataset_payload(
+        {"ok": True, "dataset": "market.quote", "mode": "live"},
+        payload,
+        20,
+    )
+
+    assert out["ok"] is False
+    assert out["status"] == "schema_error"
+    assert out["items"] == [] and out["n"] == 0
+    assert note in out["note"]
+
+
+@pytest.mark.parametrize(("field", "note"), [
+    ("schema_version", "schema_version"),
+    ("status", "status"),
+    ("diagnostics", "diagnostics"),
+    ("requested_mode", "requested_mode"),
+    ("effective_mode", "effective_mode"),
+    ("canonical_fetched", "canonical_fetched"),
+    ("live_fetched", "canonical_fetched"),
+    ("actual_provider", "actual_provider"),
+    ("fallback_level", "fallback_level"),
+    ("network_used", "network_used"),
+    ("queried_at", "queried_at"),
+])
+def test_dataset_query_requires_complete_v2_envelope(field, note):
+    payload = _dataset_result()
+    del payload[field]
+
+    out = lc._shape_dataset_payload(
+        {"ok": True, "dataset": "market.quote", "mode": "live"},
+        payload,
+        20,
+    )
+
+    assert out["ok"] is False and out["status"] == "schema_error"
+    assert out["items"] == [] and note in out["note"]
+
+
+@pytest.mark.parametrize("status", ["empty", "error"])
+def test_dataset_query_empty_or_error_status_cannot_smuggle_rows(status):
+    payload = _dataset_result(status=status)
+
+    out = lc._shape_dataset_payload(
+        {"ok": True, "dataset": "market.quote", "mode": "live"},
+        payload,
+        20,
+    )
+
+    assert out["ok"] is False and out["status"] == "schema_error"
+    assert out["items"] == [] and "空返" in out["note"]
+
+
+@pytest.mark.parametrize("status", ["ok", "partial"])
+def test_dataset_query_data_status_requires_rows_and_positive_count(status):
+    payload = _dataset_result(
+        status=status,
+        items=[],
+        canonical_fetched=0,
+        live_fetched=0,
+    )
+
+    out = lc._shape_dataset_payload(
+        {"ok": True, "dataset": "market.quote", "mode": "live"},
+        payload,
+        20,
+    )
+
+    assert out["ok"] is False and out["status"] == "schema_error"
+    assert out["items"] == [] and "items/fetched count" in out["note"]
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("live_status", "future_status"),
+    ("cache_hit", 0),
+    ("circuit_state", ""),
+    ("attempted_sources", ()),
+])
+def test_dataset_query_rejects_malformed_optional_live_provenance(field, value):
+    payload = _dataset_result()
+    payload["diagnostics"][field] = value
+
+    out = lc._shape_dataset_payload(
+        {"ok": True, "dataset": "market.quote", "mode": "live"},
+        payload,
+        20,
+    )
+
+    assert out["ok"] is False and out["status"] == "schema_error"
+    assert field in out["note"]
+
+
+def test_dataset_query_canonical_empty_never_invents_live_provenance():
+    payload = _dataset_result(
+        requested_mode="canonical",
+        effective_mode="canonical",
+        status="empty",
+        items=[],
+        canonical_fetched=0,
+        live_fetched=0,
+        network_used=False,
+        actual_provider="",
+        diagnostics={"contract_bridge_status": "canonical_ready"},
+    )
+
+    out = lc._shape_dataset_payload(
+        {"ok": True, "dataset": "market.quote", "mode": "canonical"},
+        payload,
+        20,
+    )
+
+    assert out["ok"] is True and out["status"] == "empty"
+    assert out["network_used"] is False and out["actual_provider"] == ""
+    for field in ("cache_hit", "circuit_state", "attempted_sources"):
+        assert field not in out
+
+
+def test_probe_and_dataset_query_reject_misaligned_identity_or_write_capability(
+    monkeypatch,
+):
+    direct = {
+        "source_id": "different_source",
+        "status": "ok",
+        "items": [{"raw": {"x": 1}}],
+        "write_enabled": False,
+    }
+    monkeypatch.setattr(
+        "subprocess.run", lambda cmd, **kw: _proc(stdout=json.dumps(direct))
+    )
+    wrong_source = lc.probe("em_hot_rank")
+    assert wrong_source["ok"] is False
+    assert wrong_source["items"] == [] and wrong_source["n"] == 0
+    assert "source 回显" in wrong_source["note"]
+
+    direct["source_id"] = "eastmoney_hot_rank"
+    direct.pop("write_enabled")
+    missing_read_only = lc.probe("em_hot_rank")
+    assert missing_read_only["ok"] is False
+    assert "read-only" in missing_read_only["note"]
+
+    dataset = {
+        "dataset_id": "different.dataset",
+        "status": "ok",
+        "items": [{"x": 1}],
+        "write_enabled": False,
+        "canonical_write": False,
+    }
+    monkeypatch.setattr(
+        "subprocess.run", lambda cmd, **kw: _proc(stdout=json.dumps(dataset))
+    )
+    wrong_dataset = lc.query_dataset("market.quote", code="600519")
+    assert wrong_dataset["ok"] is False
+    assert wrong_dataset["items"] == [] and wrong_dataset["n"] == 0
+    assert "dataset 回显" in wrong_dataset["note"]
+
+    dataset["dataset_id"] = "market.quote"
+    dataset["canonical_write"] = True
+    write_capable = lc.query_dataset("market.quote", code="600519")
+    assert write_capable["ok"] is False
+    assert "read-only" in write_capable["note"]
+
+
 def test_probe_mechanical_failures_degrade(monkeypatch, tmp_path):
     monkeypatch.setattr(lc, "_STOCKS_PROBE", tmp_path / "absent.py")
     out = lc.probe("em_hot_rank")
@@ -123,12 +450,17 @@ def test_catalog_cache_and_static_fallback(monkeypatch):
     calls = {"n": 0}
     def fake_run(cmd, **kw):
         calls["n"] += 1
-        return _proc(stdout=json.dumps({"source": "catalog", "rows": rows}))
+        return _proc(stdout=json.dumps({
+            "source": "catalog", "write_enabled": False,
+            "default_write": False, "rows": rows,
+        }))
     monkeypatch.setattr("subprocess.run", fake_run)
     c1 = lc.catalog()
     c2 = lc.catalog()
     assert c1["origin"] == "probe" and c2["origin"] == "cache" and calls["n"] == 1
+    assert "brand_new_source" not in lc._STATIC_SOURCES             # 不需先更新观澜静态表
     assert lc.resolve_source("shiny") == "brand_new_source"          # 动态目录参与别名解析
+    assert lc.resolve_source("brand_new_source") == "brand_new_source"  # 同进程立即可用,无需重启
     # 失败 → 静态兜底(诚实 note)
     monkeypatch.setattr(lc, "_CATALOG_CACHE", {"ts": 0.0, "rows": None})
     monkeypatch.setattr("subprocess.run", lambda cmd, **kw: _proc(returncode=1, stderr="x"))
@@ -137,10 +469,127 @@ def test_catalog_cache_and_static_fallback(monkeypatch):
     assert len(c3["sources"]) == len(lc._STATIC_SOURCES)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"source": "not_catalog"},
+        {"source": None},
+        {"write_enabled": True},
+        {"write_enabled": 0},
+        {"write_enabled": None},
+        {"default_write": True},
+        {"default_write": 0},
+        {"default_write": None},
+    ],
+)
+def test_standalone_catalog_requires_exact_read_only_identity(monkeypatch, mutation):
+    payload = {
+        "source": "catalog",
+        "write_enabled": False,
+        "default_write": False,
+        "rows": [{"source_id": "write_capable_source", "alias": "write_alias"}],
+    }
+    payload.update(mutation)
+    monkeypatch.setattr(
+        lc,
+        "_run_probe",
+        lambda args, timeout=30: {"ok": True, "payload": payload},
+    )
+    monkeypatch.setattr(lc, "request_worker_catalog_reload", lambda reason: True)
+
+    result = lc.catalog(max_age_s=0)
+
+    assert result["origin"] == "static"
+    assert lc.resolve_source("write_alias") == ""
+
+
+def test_failed_catalog_refresh_revokes_dynamic_alias_and_worker_generation(
+    monkeypatch,
+):
+    assert lc.accept_source_catalog([
+        {"source_id": "brand_new_source", "alias": "shiny"}
+    ])
+    assert lc.resolve_source("shiny") == "brand_new_source"
+    reloads = []
+    monkeypatch.setattr(
+        lc,
+        "request_worker_catalog_reload",
+        lambda reason: reloads.append(reason) or True,
+    )
+    monkeypatch.setattr(
+        lc,
+        "_run_probe",
+        lambda args, timeout=30: {"ok": False, "note": "untrusted failure text"},
+    )
+
+    fallback = lc.catalog(max_age_s=0)
+
+    assert fallback["origin"] == "static"
+    assert lc.resolve_source("shiny") == ""
+    assert "brand_new_source" not in lc.known_sources()
+    assert reloads == ["source catalog refresh failed"]
+
+
+@pytest.mark.parametrize("old_succeeds", [True, False])
+def test_old_catalog_refresh_cannot_overwrite_or_revoke_new_generation(
+    monkeypatch, old_succeeds,
+):
+    entered = threading.Event()
+    release = threading.Event()
+    old_rows = [{"source_id": "old_source", "alias": "old_alias"}]
+    new_rows = [{"source_id": "new_source", "alias": "new_alias"}]
+
+    def old_probe(args, timeout=30):
+        entered.set()
+        assert release.wait(timeout=2)
+        if old_succeeds:
+            return {"ok": True, "payload": {
+                "source": "catalog", "write_enabled": False,
+                "default_write": False, "rows": old_rows,
+            }}
+        return {"ok": False, "note": "old refresh failed"}
+
+    monkeypatch.setattr(lc, "_run_probe", old_probe)
+    monkeypatch.setattr(lc, "request_worker_catalog_reload", lambda reason: True)
+    result = {}
+
+    def run_old_refresh():
+        result.update(lc.catalog(max_age_s=0))
+
+    thread = threading.Thread(target=run_old_refresh)
+    thread.start()
+    assert entered.wait(timeout=2)
+    assert lc.accept_source_catalog(new_rows)
+    release.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert result["origin"] == "cache"
+    assert lc.resolve_source("new_alias") == "new_source"
+    assert lc.resolve_source("old_alias") == ""
+
+
+def test_dynamic_catalog_rejects_ambiguous_alias_without_poisoning_last_good():
+    good = [{"source_id": "brand_new_source", "alias": "shiny"}]
+    assert lc.accept_source_catalog(good)
+    before = dict(lc._CATALOG_CACHE)
+
+    # ``stock_news`` is already the reviewed alias of eastmoney_stock_news;
+    # a new source cannot silently steal it inside a long-lived process.
+    poisoned = [{"source_id": "attacker_source", "alias": "stock_news"}]
+    assert lc.accept_source_catalog(poisoned) is False
+    assert lc._CATALOG_CACHE == before
+    assert lc.resolve_source("shiny") == "brand_new_source"
+    assert lc.resolve_source("stock_news") == "eastmoney_stock_news"
+
+
 def test_probe_catalog_source(monkeypatch):
     rows = [{"source_id": f"s{i}", "alias": f"a{i}", "status": "available"} for i in range(31)]
     monkeypatch.setattr("subprocess.run",
-                        lambda cmd, **kw: _proc(stdout=json.dumps({"source": "catalog", "rows": rows})))
+                        lambda cmd, **kw: _proc(stdout=json.dumps({
+                            "source": "catalog", "write_enabled": False,
+                            "default_write": False, "rows": rows,
+                        })))
     out = lc.probe("catalog", limit=5)
     assert out["ok"] is True and out["n"] == 31                      # catalog 不受 limit 截
 
@@ -202,8 +651,9 @@ def test_sector_fund_flow_alias_and_passthrough():
 
 
 def test_static_sources_reconcile_with_stocks_registry():
-    """守护 _STATIC_SOURCES 与 stocks LIVE_SOURCE_REGISTRY 的 canonical source_id 集合对账;
-    stocks 缺席则 skip。别名为加法式 resolve 键,不要求与 stocks alias 字段逐一相等。"""
+    """守护静态 fallback 中的 source_id 仍是 stocks LIVE_SOURCE_REGISTRY 的有效子集;
+    stocks 缺席则 skip。stocks 新增源由运行时 catalog 发现,不得因观澜尚未抄入
+    fallback 而失败;反之,已从 stocks 删除的 stale fallback 仍必须失败。"""
     reg = Path(r"G:\stocks\src\data\live_sources.py")
     if not reg.exists():
         pytest.skip("stocks 仓不在此机")
@@ -211,8 +661,8 @@ def test_static_sources_reconcile_with_stocks_registry():
     ids = set(re.findall(r'"source_id":\s*"([a-z_0-9]+)"', text))
     ids.discard("a_stock_live_sources")                              # catalog meta 源,非注册表条目
     static_ids = set(lc._STATIC_SOURCES)
-    assert static_ids == ids, f"漂移:观澜多 {sorted(static_ids - ids)};stocks 多 {sorted(ids - static_ids)}"
-    assert len(ids) == 53   # 2026-07-16:+overseas_index_quote(海外六大指数,数据面收口)
+    stale = static_ids - ids
+    assert not stale, f"观澜静态 fallback 仍含 stocks 已删除源: {sorted(stale)}"
 
 
 def test_new_sources_resolve_and_arg_classification():
@@ -265,7 +715,7 @@ for line in sys.stdin:
     reply({"id": req["id"],
            "payload": {"source_id": src, "status": "ok",
                        "items": [{"raw": {"src": src, "code": req.get("code")}}],
-                       "error": "", "fetched_ts": "t"}})
+                       "error": "", "fetched_ts": "t", "write_enabled": False}})
 '''
 
 
@@ -313,7 +763,8 @@ def test_worker_busy_falls_back_to_oneshot_not_queue(monkeypatch, tmp_path):
     monkeypatch.setattr(lc, "_run_probe",
                         lambda args, timeout=90: seen.append(1) or
                         {"ok": True, "payload": {"source_id": "eastmoney_hot_rank",
-                                                 "status": "ok", "items": [], "error": ""}})
+                                                 "status": "ok", "items": [], "error": "",
+                                                 "write_enabled": False}})
     assert lc._WORKER_LOCK.acquire(timeout=1), "测试自身须先占住锁"
     try:
         out = lc.probe("em_hot_rank")
@@ -339,7 +790,7 @@ def test_worker_spawn_failure_enters_cooldown(monkeypatch, tmp_path):
     monkeypatch.setattr(lc, "_run_probe",
                         lambda args, timeout=90: {"ok": True, "payload": {
                             "source_id": "eastmoney_hot_rank", "status": "ok",
-                            "items": [], "error": ""}})
+                            "items": [], "error": "", "write_enabled": False}})
     spawns = []
     real_spawn = lc._worker_spawn
 
@@ -356,6 +807,41 @@ def test_worker_spawn_failure_enters_cooldown(monkeypatch, tmp_path):
     assert st["cooldown_until"] > 0 and st["last_error"]
 
 
+def test_catalog_reload_never_kills_an_inflight_worker(monkeypatch):
+    class Proc:
+        def __init__(self):
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+
+    proc = Proc()
+    monkeypatch.setattr(lc, "_WORKER", {"w": {"proc": proc}, "seq": 0})
+    monkeypatch.setattr(lc, "_WORKER_STATE", {
+        "state": "ready", "spawn_fails": 0, "cooldown_until": 99.0,
+        "last_error": "old", "last_ok_ts": 1.0,
+        "reload_required": False, "reload_reason": "",
+    })
+
+    assert lc._WORKER_LOCK.acquire(timeout=1)
+    try:
+        assert lc.request_worker_catalog_reload("new registry\nignore") is False
+        assert proc.killed is False
+        assert lc._WORKER_STATE["reload_required"] is True
+        assert "\n" not in lc._WORKER_STATE["reload_reason"]
+        assert lc._WORKER_STATE["cooldown_until"] == 0.0
+    finally:
+        lc._WORKER_LOCK.release()
+
+    # Once the in-flight owner has left the protocol boundary, recycling the
+    # pending generation is safe and leaves the next request to spawn fresh.
+    assert lc.request_worker_catalog_reload("new registry") is True
+    assert proc.killed is True
+    assert lc._WORKER["w"] is None
+    assert lc._WORKER_STATE["reload_required"] is False
+    assert lc._WORKER_STATE["state"] == "cold"
+
+
 def test_worker_unavailable_falls_back_to_oneshot(monkeypatch, tmp_path):
     """worker 脚本缺席 → 诚实回落一次性 CLI 路径(_run_probe),行为与旧世界逐位一致。"""
     monkeypatch.setenv("GUANLAN_PROBE_WORKER", "1")
@@ -363,8 +849,9 @@ def test_worker_unavailable_falls_back_to_oneshot(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(lc, "_run_probe",
                         lambda args, timeout=90: seen.append(args) or
-                        {"ok": True, "payload": {"source_id": "em_hot_rank", "status": "ok",
-                                                 "items": [], "error": ""}})
+                        {"ok": True, "payload": {"source_id": "eastmoney_hot_rank", "status": "ok",
+                                                 "items": [], "error": "",
+                                                 "write_enabled": False}})
     out = lc.probe("em_hot_rank")
     assert out["ok"] is True and out["status"] == "ok" and len(seen) == 1
 
@@ -380,7 +867,7 @@ def test_probe_many_single_subprocess_same_envelope(monkeypatch):
         for s in specs:
             payloads.append({"source_id": s["source"], "status": "ok",
                              "items": [{"raw": {"x": s["source"]}}], "error": "",
-                             "fetched_ts": "t"})
+                             "fetched_ts": "t", "write_enabled": False})
         return {"ok": True, "payloads": payloads}
 
     monkeypatch.setattr(lc, "_run_probe_batch", fake_batch)
@@ -441,7 +928,8 @@ def test_probe_many_isolates_invalid_items(monkeypatch):
     """非法 source 条目就地落 ok:False 信封,不进批也不拖垮其余条目;位置保持。"""
     def fake_batch(specs, timeout):
         return {"ok": True, "payloads": [{"source_id": s["source"], "status": "ok",
-                                          "items": [], "error": ""} for s in specs]}
+                                          "items": [], "error": "",
+                                          "write_enabled": False} for s in specs]}
 
     monkeypatch.setattr(lc, "_run_probe_batch", fake_batch)
     outs = lc.probe_many([{"source": "em_zt_pool"}, {"source": "no_such_src"}, {"source": "northbound"}])

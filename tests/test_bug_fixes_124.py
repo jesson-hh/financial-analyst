@@ -137,6 +137,28 @@ def test_chat_retries_transient_then_succeeds(monkeypatch):
     assert r["choices"][0]["message"]["content"] == "ok"
 
 
+def test_chat_explicit_zero_retries_is_a_single_transport_attempt(monkeypatch):
+    """Orchestration owns retries in its durable DAG/ledger, not in the client."""
+    from financial_analyst.llm.client import LLMClient
+    c = LLMClient(provider="deepseek", model="deepseek-chat", config={})
+    n = {"calls": 0}
+
+    class APITimeoutError(Exception):
+        pass
+
+    async def fail(*a, **k):
+        n["calls"] += 1
+        raise APITimeoutError("single accounted dispatch")
+
+    monkeypatch.setattr(c, "_chat_openai_compat", fail)
+    with pytest.raises(APITimeoutError, match="single accounted dispatch"):
+        asyncio.run(c.chat(
+            messages=[{"role": "user", "content": "hi"}],
+            max_retries=0,
+        ))
+    assert n["calls"] == 1
+
+
 def test_chat_does_not_retry_auth_error(monkeypatch):
     from financial_analyst.llm.client import LLMClient
     c = LLMClient(provider="deepseek", model="deepseek-chat", config={})

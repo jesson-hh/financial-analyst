@@ -24,8 +24,10 @@ stands in for a sealed artifact anywhere in this module).
   tally misclassified it as OPTIONAL. Its method IS backed and IS satisfiable, so
   Option A's argument does not reach it; it was ruled a THIRD ROW rather than a
   narrowing (narrowing would be real deprivation AND would leave a permanently
-  unsupportable seat). Hence **three** new rows, four in the material.
-* **D-2 = Option A.** Every new row is ``always_invoke`` +
+  unsupportable seat). Those three required-reader rows now sit alongside the
+  reviewed ``pv.price_action`` row and two ``pv.microstructure`` rows: six lane
+  rows, plus the sealed ``dec.pm`` row, make seven rows in the material.
+* **D-2 = Option A.** Every lane row is ``always_invoke`` +
   ``success_requires_finalized_call=True`` (``row_min_finalized == 1``) — the only
   shape that clears ``tool_calls_required_unmet`` for a REQUIRED reader, and the
   only one under which a data outage cannot be reported as node success.
@@ -49,7 +51,6 @@ from guanlan_v2.orchestration.data.catalog import (
     CatalogError,
     DataBridgePrefetchBinding,
     DataPrefetchOperation,
-    ParamBinding,
     data_capability_refs,
     phase3_data_surface,
 )
@@ -70,16 +71,61 @@ UTC = timezone.utc
 _AS_OF = datetime(2026, 7, 31, 7, 0, tzinfo=UTC)
 _CODE = "000858"
 
-#: the THREE reviewed lane grants this task adds: worker id -> method id.
-#: ``text.policy`` is the amendment case (see the module docstring).
-_NEW_GRANTS: dict[str, str] = {
-    "pv.technical": "verified_snapshot",
-    "text.news": "news",
-    "text.policy": "news",
+#: The exact reviewed material.  Pairs, rather than a worker->method mapping,
+#: are load-bearing: ``pv.microstructure`` deliberately owns two rows.
+_REVIEWED_ROW_PAIRS: frozenset[tuple[str, str]] = frozenset({
+    ("dec.pm", "verified_snapshot"),
+    ("pv.microstructure", "indicators"),
+    ("pv.microstructure", "verified_snapshot"),
+    ("pv.price_action", "ohlcv"),
+    ("pv.technical", "verified_snapshot"),
+    ("text.news", "news"),
+    ("text.policy", "news"),
+})
+
+#: the sealed Phase-3 integration row, whose shape must NOT move.
+_SEALED_ROW_PAIR = ("dec.pm", "verified_snapshot")
+
+#: all six reviewed lane rows added to the sealed material.
+_LANE_ROW_PAIRS = _REVIEWED_ROW_PAIRS - {_SEALED_ROW_PAIR}
+
+#: Only these three row owners declare REQUIRED tool calls.  The price-action
+#: and microstructure owners are OPTIONAL even though their rows use D-2 shape.
+_REQUIRED_ROW_WORKERS = frozenset({
+    "pv.technical",
+    "text.news",
+    "text.policy",
+})
+
+_UNIVERSE_METHOD_IDS = frozenset({"news", "verified_snapshot"})
+_SERIES_METHOD_IDS = frozenset({"indicators", "ohlcv"})
+
+_UNIVERSE_PARAM_SHAPE = (
+    ("/as_of", "node_param", "/asof_date"),
+    ("/symbols", "node_param", "/code"),
+)
+_SERIES_PARAM_SHAPE = (
+    ("/end", "node_param", "/asof_date"),
+    ("/start", "node_param", "/window_start"),
+    ("/symbol", "node_param", "/symbol"),
+)
+_PARAM_SHAPE_BY_METHOD = {
+    "indicators": _SERIES_PARAM_SHAPE,
+    "news": _UNIVERSE_PARAM_SHAPE,
+    "ohlcv": _SERIES_PARAM_SHAPE,
+    "verified_snapshot": _UNIVERSE_PARAM_SHAPE,
 }
 
-#: the sealed Phase-3 integration grant, whose row shape must NOT move.
-_SEALED_GRANT = ("dec.pm", "verified_snapshot")
+_ROWLESS_OPTIONAL_GRANTS = frozenset({
+    ("pv.microstructure", "cap.data.signals", "1"),
+    ("quant.factor", "cap.data.signals", "1"),
+    ("quant.fundamentals", "cap.data.fundamentals", "1"),
+    ("quant.model", "cap.data.signals", "1"),
+    ("text.macro", "cap.data.indicators", "1"),
+    ("text.macro", "cap.data.signals", "1"),
+    ("text.macro", "cap.data.verified_snapshot", "1"),
+    ("text.research_report", "cap.data.news", "1"),
+})
 
 
 # --------------------------------------------------------------------------- #
@@ -169,11 +215,17 @@ def screening_support():
         schema_registry=env["registry"], profile=STATIC_RUNTIME_PROFILE_V2)
 
 
-def _rows_by_worker(surface) -> dict[str, list[DataPrefetchOperation]]:
-    out: dict[str, list[DataPrefetchOperation]] = {}
-    for op in surface.prefetch_binding.operations:
-        out.setdefault(op.worker_id, []).append(op)
-    return out
+def _row_for(
+        surface, worker_id: str, method_id: str) -> DataPrefetchOperation:
+    """Select by the reviewed pair; a worker may legitimately own many rows."""
+    matches = tuple(
+        op for op in surface.prefetch_binding.operations
+        if (op.worker_id, op.method_ref.id) == (worker_id, method_id)
+    )
+    assert len(matches) == 1, (
+        f"expected one reviewed row for {(worker_id, method_id)!r}, "
+        f"found {len(matches)}")
+    return matches[0]
 
 
 def _data_grants(snapshot) -> set[tuple[str, str, str]]:
@@ -190,20 +242,21 @@ def _data_grants(snapshot) -> set[tuple[str, str, str]]:
 # =========================================================================== #
 # 1. the rows exist, in the ruled shape                                         #
 # =========================================================================== #
-class TestTheThreeRowsExist:
-    def test_the_binding_carries_exactly_the_four_reviewed_rows(self, surface):
-        got = {(op.worker_id, op.method_ref.id)
-               for op in surface.prefetch_binding.operations}
-        assert got == {_SEALED_GRANT} | {
-            (wid, mid) for wid, mid in _NEW_GRANTS.items()}
+class TestTheSevenRowsExist:
+    def test_the_binding_carries_exactly_the_seven_reviewed_rows(self, surface):
+        operations = surface.prefetch_binding.operations
+        got = {(op.worker_id, op.method_ref.id) for op in operations}
+        assert got == _REVIEWED_ROW_PAIRS
+        assert len(operations) == len(_REVIEWED_ROW_PAIRS) == 7
 
-    def test_each_new_row_carries_the_method_s_own_capability(self, surface):
-        by_worker = _rows_by_worker(surface)
-        for wid, mid in _NEW_GRANTS.items():
-            (row,) = by_worker[wid]
-            spec = surface.spec_by_method[mid]
-            assert row.method_ref == spec.method_ref
-            assert row.capability_ref == spec.capability_ref
+    @pytest.mark.parametrize(
+        ("worker_id", "method_id"), sorted(_REVIEWED_ROW_PAIRS))
+    def test_each_row_carries_the_method_s_own_capability(
+            self, surface, worker_id, method_id):
+        row = _row_for(surface, worker_id, method_id)
+        spec = surface.spec_by_method[method_id]
+        assert row.method_ref == spec.method_ref
+        assert row.capability_ref == spec.capability_ref
 
     def test_the_grant_lands_in_the_existing_sealed_material(self, surface):
         """Fact C: ONE bridge, ONE prefetch material, ONE descriptor.
@@ -225,24 +278,26 @@ class TestTheThreeRowsExist:
 # 2. D-2 arithmetic — exact, and the sealed row untouched                        #
 # =========================================================================== #
 class TestD2RowShape:
-    @pytest.mark.parametrize("worker_id", sorted(_NEW_GRANTS))
-    def test_the_new_row_is_always_invoke_and_requires_a_finalized_call(
-            self, surface, worker_id):
-        (row,) = _rows_by_worker(surface)[worker_id]
+    @pytest.mark.parametrize(
+        ("worker_id", "method_id"), sorted(_LANE_ROW_PAIRS))
+    def test_each_lane_row_is_always_invoke_and_requires_a_finalized_call(
+            self, surface, worker_id, method_id):
+        row = _row_for(surface, worker_id, method_id)
         assert row.invocation_mode == "always_invoke"
         assert row.success_requires_finalized_call is True
         assert row.row_min_finalized == 1
         assert row.row_max_invocations == 1 == len(row.frozen_route)
 
     def test_the_sealed_dec_pm_row_shape_is_untouched(self, surface):
-        (row,) = _rows_by_worker(surface)["dec.pm"]
+        row = _row_for(surface, *_SEALED_ROW_PAIR)
         assert row.invocation_mode == "cache_or_invoke"
         assert row.success_requires_finalized_call is False
         assert row.row_min_finalized == 0
 
-    @pytest.mark.parametrize("worker_id", sorted(_NEW_GRANTS))
-    def test_the_granted_worker_declares_required_tool_calls(self, p8, worker_id):
-        """The D-2 premise: each row's owner is a REQUIRED reader, so
+    @pytest.mark.parametrize("worker_id", sorted(_REQUIRED_ROW_WORKERS))
+    def test_only_the_three_required_row_workers_are_pinned_required(
+            self, p8, worker_id):
+        """The D-2 premise for REQUIRED readers: their finalized minimum
         ``row_min_finalized == 1`` is what clears ``tool_calls_required_unmet``."""
         worker = next(w for w in p8.workers if w.id == worker_id)
         assert worker.evidence_policy.tool_calls is ToolCallRequirement.REQUIRED
@@ -252,49 +307,81 @@ class TestD2RowShape:
 # 3. param bindings — the closed pointer set, the sealed shape, the round trip  #
 # =========================================================================== #
 class TestParamBindings:
-    @pytest.mark.parametrize("worker_id", sorted(_NEW_GRANTS))
-    def test_the_binding_kinds_equal_the_healed_dec_pm_row(
-            self, surface, worker_id):
-        sealed = _rows_by_worker(surface)["dec.pm"][0]
-        (row,) = _rows_by_worker(surface)[worker_id]
+    @pytest.mark.parametrize(
+        ("worker_id", "method_id"), sorted(_REVIEWED_ROW_PAIRS))
+    def test_each_method_has_its_exact_reviewed_binding_shape(
+            self, surface, worker_id, method_id):
+        row = _row_for(surface, worker_id, method_id)
         shape = lambda r: tuple(  # noqa: E731 — a local projection, not a policy
             (b.target_pointer, b.source_kind, b.source_pointer)
             for b in r.param_bindings)
-        assert shape(row) == shape(sealed) == (
-            ("/as_of", "node_param", "/asof_date"),
-            ("/symbols", "node_param", "/code"),
-        )
+        assert shape(row) == _PARAM_SHAPE_BY_METHOD[method_id]
 
-    @pytest.mark.parametrize("worker_id", sorted(_NEW_GRANTS))
+    @pytest.mark.parametrize(
+        ("worker_id", "method_id"), sorted(_REVIEWED_ROW_PAIRS))
     def test_every_source_pointer_is_inside_the_closed_subject_set(
-            self, surface, worker_id):
+            self, surface, worker_id, method_id):
         """A pointer outside ``SUBJECT_PARAM_POINTERS`` has NO serving source —
         that is defect H exactly, and it is refused here rather than at runtime."""
-        (row,) = _rows_by_worker(surface)[worker_id]
+        row = _row_for(surface, worker_id, method_id)
         pointers = {b.source_pointer for b in row.param_bindings}
         assert pointers <= RT.SUBJECT_PARAM_POINTERS
-        assert RT.SUBJECT_PARAM_POINTERS == frozenset({"/asof_date", "/code"})
+        assert RT.SUBJECT_PARAM_POINTERS == frozenset({
+            "/asof_date", "/code", "/evidence_tf", "/symbol", "/window_start"})
 
-    @pytest.mark.parametrize("worker_id", sorted(_NEW_GRANTS))
-    def test_the_row_round_trips_from_a_projected_subject(
-            self, surface, subject_params, worker_id):
-        """Task-1 item 5's satisfiability idiom, per row: REAL
+    @pytest.mark.parametrize(
+        ("worker_id", "method_id"),
+        sorted(pair for pair in _REVIEWED_ROW_PAIRS
+               if pair[1] in _UNIVERSE_METHOD_IDS))
+    def test_each_universe_method_row_round_trips_from_a_projected_subject(
+            self, surface, subject_params, worker_id, method_id):
+        """Task-1 item 5's satisfiability idiom, per universe row: REAL
         ``_assemble_params`` over the REAL projection, then the method's own
         ``params_cls.model_validate``. This is the executable guard against
         re-creating a DECLARED-but-NOT-RUNNABLE row."""
-        (row,) = _rows_by_worker(surface)[worker_id]
+        row = _row_for(surface, worker_id, method_id)
         node = SimpleNamespace(id=f"n.{worker_id}", params={})
         payload = RT._assemble_params(row, node, subject_params=subject_params)
-        params_cls = RT._BINDING_BY_METHOD[row.method_ref.id].params_cls
+        subject_doc = subject_params.as_document()
+        assert payload == {
+            "as_of": subject_doc["asof_date"],
+            "symbols": subject_doc["code"],
+        }
+        params_cls = RT._BINDING_BY_METHOD[method_id].params_cls
         params = params_cls.model_validate(payload)
         assert [s.code for s in params.symbols] == [_CODE]
-        assert params.as_of == subject_params.as_document()["asof_date"]
+        assert params.as_of == subject_doc["asof_date"]
 
-    @pytest.mark.parametrize("worker_id", sorted(_NEW_GRANTS))
-    def test_the_row_refuses_without_the_projection(self, surface, worker_id):
+    @pytest.mark.parametrize(
+        ("worker_id", "method_id"),
+        sorted(pair for pair in _REVIEWED_ROW_PAIRS
+               if pair[1] in _SERIES_METHOD_IDS))
+    def test_each_series_method_row_round_trips_from_a_projected_subject(
+            self, surface, subject_params, worker_id, method_id):
+        """Series rows use the singular symbol and a non-zero subject window."""
+        row = _row_for(surface, worker_id, method_id)
+        node = SimpleNamespace(id=f"n.{worker_id}", params={})
+        payload = RT._assemble_params(row, node, subject_params=subject_params)
+        subject_doc = subject_params.as_document()
+        assert payload == {
+            "end": subject_doc["asof_date"],
+            "start": subject_doc["window_start"],
+            "symbol": subject_doc["symbol"],
+        }
+        params_cls = RT._BINDING_BY_METHOD[method_id].params_cls
+        params = params_cls.model_validate(payload)
+        assert params.symbol.code == _CODE
+        assert params.start == subject_doc["window_start"]
+        assert params.end == subject_doc["asof_date"]
+        assert datetime.fromisoformat(params.start) < datetime.fromisoformat(params.end)
+
+    @pytest.mark.parametrize(
+        ("worker_id", "method_id"), sorted(_REVIEWED_ROW_PAIRS))
+    def test_each_row_refuses_without_the_projection(
+            self, surface, worker_id, method_id):
         """The other half of the same guarantee: unbound, the row refuses
         loudly by cause rather than reading with a guessed subject."""
-        (row,) = _rows_by_worker(surface)[worker_id]
+        row = _row_for(surface, worker_id, method_id)
         node = SimpleNamespace(id=f"n.{worker_id}", params={})
         with pytest.raises(RT.DataRuntimeError, match="does not resolve"):
             RT._assemble_params(row, node, subject_params=None)
@@ -304,33 +391,37 @@ class TestParamBindings:
 # 4. routes cross-resolve to the L2-b production adapters, by source id          #
 # =========================================================================== #
 class TestRoutesCrossResolve:
-    @pytest.mark.parametrize("worker_id", sorted(_NEW_GRANTS))
+    @pytest.mark.parametrize(
+        ("worker_id", "method_id"), sorted(_REVIEWED_ROW_PAIRS))
     def test_the_route_source_is_a_registered_l2b_adapter(
-            self, surface, worker_id):
+            self, surface, worker_id, method_id):
         adapters = DW.production_data_adapters()
-        (row,) = _rows_by_worker(surface)[worker_id]
+        row = _row_for(surface, worker_id, method_id)
         for entry in row.frozen_route:
             assert entry.source_ref.id in adapters
             assert entry.source_ref == surface.source_ref
             assert entry.capability_ref == row.capability_ref
 
-    @pytest.mark.parametrize("worker_id", sorted(_NEW_GRANTS))
+    @pytest.mark.parametrize(
+        ("worker_id", "method_id"), sorted(_REVIEWED_ROW_PAIRS))
     def test_the_frozen_route_equals_the_production_default_route(
-            self, surface, recipe, worker_id):
-        (row,) = _rows_by_worker(surface)[worker_id]
-        route = recipe.registry.default_route(row.method_ref.id)
+            self, surface, recipe, worker_id, method_id):
+        row = _row_for(surface, worker_id, method_id)
+        route = recipe.registry.default_route(method_id)
         assert tuple(route.entries) == tuple(row.frozen_route)
 
-    @pytest.mark.parametrize("worker_id", sorted(_NEW_GRANTS))
+    @pytest.mark.parametrize(
+        ("worker_id", "method_id"), sorted(_REVIEWED_ROW_PAIRS))
     def test_the_granted_method_is_inside_the_adapter_supported_set(
-            self, surface, worker_id):
+            self, surface, worker_id, method_id):
         """L2-b's first interception: a grant of a method the real adapter
-        cannot serve must never reach production. Both ruled methods are inside
+        cannot serve must never reach production. Every ruled method is inside
         it — that is exactly WHY D-1 chose them."""
         from guanlan_v2.orchestration.adapters import live_data
 
-        (row,) = _rows_by_worker(surface)[worker_id]
-        assert row.method_ref.id in live_data._SUPPORTED_METHOD_IDS
+        row = _row_for(surface, worker_id, method_id)
+        assert row.method_ref.id == method_id
+        assert method_id in live_data._SUPPORTED_METHOD_IDS
 
 
 # =========================================================================== #
@@ -399,7 +490,8 @@ class TestSecondEvaluationPoint:
         """grants->rows for REQUIRED workers: drop `text.policy`'s row and the
         fold refuses — the structurally dead seat is caught at build time."""
         kept = tuple(op for op in surface.prefetch_binding.operations
-                     if op.worker_id != "text.policy")
+                     if (op.worker_id, op.method_ref.id)
+                     != ("text.policy", "news"))
         binding = DataBridgePrefetchBinding.build(
             bridge_id=DC.DATA_BRIDGE_ID, bridge_version="1", operations=kept)
         with pytest.raises(CatalogError, match="one-to-one") as exc:
@@ -408,7 +500,7 @@ class TestSecondEvaluationPoint:
 
     def test_optional_paper_grants_stay_licensed_empty(self, p8, surface):
         """The ruled ASYMMETRY, pinned as a positive fact rather than as an
-        absence: eleven OPTIONAL (worker, capability) grants carry no row, and
+        absence: eight OPTIONAL (worker, capability) grants carry no row, and
         the fold accepts the catalog anyway — C3's licensed-EMPTY reviewed state
         is NOT swept this phase."""
         rows = {(op.worker_id, op.capability_ref.id, op.capability_ref.version)
@@ -419,7 +511,8 @@ class TestSecondEvaluationPoint:
             if by_id[g[0]].evidence_policy.tool_calls
             is ToolCallRequirement.OPTIONAL
         }
-        assert len(rowless_optional) == 11
+        assert rowless_optional == _ROWLESS_OPTIONAL_GRANTS
+        assert len(rowless_optional) == 8
         DC.verify_cumulative_prefetch_coverage(p8, surface.prefetch_binding)
 
     def test_both_evaluation_points_speak_one_vocabulary(self, p8, surface):
@@ -429,7 +522,8 @@ class TestSecondEvaluationPoint:
         import inspect
 
         kept = tuple(op for op in surface.prefetch_binding.operations
-                     if op.worker_id != "text.policy")
+                     if (op.worker_id, op.method_ref.id)
+                     != ("text.policy", "news"))
         binding = DataBridgePrefetchBinding.build(
             bridge_id=DC.DATA_BRIDGE_ID, bridge_version="1", operations=kept)
         with pytest.raises(CatalogError) as exc:
@@ -447,9 +541,9 @@ class TestSecondEvaluationPoint:
         serializes to, and a foreign binding is refused as drift."""
         assert any(e.ref == surface.config_ref for e in p8.content_manifest)
         # a binding that PASSES coverage and is still not the catalog's: an extra
-        # row for `pv.microstructure`, which already holds the grant (OPTIONAL,
-        # so its rowless state is licensed but its rowed state is covered too).
-        spec = surface.spec_by_method["verified_snapshot"]
+        # `signals` row for `pv.microstructure`, whose OPTIONAL signals grant is
+        # genuinely rowless (licensed-EMPTY) in the sealed material.
+        spec = surface.spec_by_method["signals"]
         extra = DataPrefetchOperation(
             worker_id="pv.microstructure",
             method_ref=spec.method_ref, capability_ref=spec.capability_ref,
@@ -556,14 +650,14 @@ class TestP8CoverageAssumption:
         assert late_ids, "the assumption is vacuous if no later fold adds workers"
         assert {g[0] for g in _data_grants(p10)} & late_ids == set()
 
-    def test_the_granted_workers_first_appear_at_the_phase8_fold(self, p8):
-        """…and the converse half: the three granted lane workers are added BY
-        the Phase-8 fold, which is why no earlier fold could claim their rows."""
+    def test_the_lane_row_workers_first_appear_at_the_phase8_fold(self, p8):
+        """…and the converse half: all five lane-row owners are added BY the
+        Phase-8 fold, which is why no earlier fold could claim their six rows."""
         from guanlan_v2.orchestration import phase7_registry as p7
 
         earlier = {w.id for w in p7.phase7_catalog_snapshot().workers}
         added = {w.id for w in p8.workers} - earlier
-        assert set(_NEW_GRANTS) <= added
+        assert {worker_id for worker_id, _ in _LANE_ROW_PAIRS} <= added
 
 
 # =========================================================================== #

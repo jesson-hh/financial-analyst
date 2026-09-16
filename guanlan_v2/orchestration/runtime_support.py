@@ -353,26 +353,55 @@ def analyze_gates(
 
 
 def analyze_retry_repair(
-    draft: "PlanDraft", *, profile: StaticRuntimeProfileV2
+    draft: "PlanDraft", *, profile: StaticRuntimeProfileV2,
+    catalog: CatalogRuntime | None = None,
 ) -> tuple[RuntimeSupportIssue, ...]:
-    """Runtime support for v2 ``max_attempts`` (cap = ``profile.max_attempts_limit``).
+    """Preflight v2 retry/repair limits and their worst-case LLM budget.
 
-    Every node's ``max_attempts`` must be ``<= profile.max_attempts_limit`` (the
-    reviewed cap of 2). The per-attempt LLM-invocation upper bound
-    (``max_attempts × (1 + schema_repairs_per_attempt)`` for an LLM node, zero for a
-    deterministic node) is the runner's reservation formula — it needs the catalog
-    execution kind and so is computed there (see
-    :func:`~guanlan_v2.orchestration.worker.retry_llm_invocation_upper_bound`); this
-    pure analyzer, per its ``(draft, profile)`` signature, checks only the cap.
+    Catalog execution kinds are authoritative: deterministic nodes consume no LLM
+    budget.  Each LLM node may invoke the model once plus the bounded schema repairs
+    on every attempt.  Its token ceiling per such invocation is the node's positive
+    ``token_reservation``, or 32,768 when the node leaves that field unspecified.
     """
     issues: list[RuntimeSupportIssue] = []
     limit = profile.max_attempts_limit
+    required_invocations = 0
+    required_tokens = 0
     for node in draft.nodes:
         if node.max_attempts > limit:
             issues.append(_issue(
                 "max_attempts_exceeds_limit", "PlanNode.max_attempts",
                 f"node {node.id!r} requests max_attempts={node.max_attempts} which exceeds the "
                 f"v2 profile cap max_attempts_limit={limit}", node_id=node.id))
+        try:
+            worker = catalog.worker(node.worker_id) if catalog is not None else None
+        except CatalogMaterialError:
+            # Unknown workers make the Phase-1 report invalid.  Runtime support
+            # must still return an unsupported report rather than raising while
+            # computing this supplementary v2 budget bound.
+            continue
+        if worker is not None and worker.execution.kind is ExecutionKind.LLM:
+            invocation_ceiling = int(node.max_attempts) * (
+                1 + int(profile.schema_repairs_per_attempt)
+            )
+            token_ceiling = int(node.token_reservation) or 32_768
+            required_invocations += invocation_ceiling
+            required_tokens += invocation_ceiling * token_ceiling
+
+    if catalog is not None and int(draft.budget_request_llm_invocations) < required_invocations:
+        issues.append(_issue(
+            "retry_repair_llm_budget_under_requested",
+            "PlanDraft.budget_request_llm_invocations",
+            f"budget_request_llm_invocations={draft.budget_request_llm_invocations} is below "
+            f"the v2 retry/repair upper bound {required_invocations}",
+        ))
+    if catalog is not None and int(draft.budget_request_tokens) < required_tokens:
+        issues.append(_issue(
+            "retry_repair_token_budget_under_requested",
+            "PlanDraft.budget_request_tokens",
+            f"budget_request_tokens={draft.budget_request_tokens} is below the v2 "
+            f"retry/repair upper bound {required_tokens}",
+        ))
     return tuple(sorted(issues, key=lambda i: i.sort_key))
 
 
@@ -560,7 +589,7 @@ def check_runtime_support(
     if supports_retries:
         # v2: max_attempts up to the profile cap is admitted; the analyzer rejects
         # only max_attempts > max_attempts_limit.
-        issues.extend(analyze_retry_repair(draft, profile=profile))
+        issues.extend(analyze_retry_repair(draft, catalog=catalog, profile=profile))
 
     for node in draft.nodes:
         if node.condition_ref is not None:

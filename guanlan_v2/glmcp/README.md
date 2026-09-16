@@ -16,7 +16,7 @@
 9999 上 `/mcp` 是引擎自带 MCP(20 个引擎研究/dream 工具);本 server 是 `/gl-mcp/`(guanlan 工具,清单见 docs/agent_data_interfaces.md)。两者并存、各管各的。
 
 ## 排除的 3 个工具(为什么 MCP 里没有)
-- `ww_plan_update` / `ww_show_page`:console-UI-only(改会话计划/往 console 右栏弹页面),MCP 无意义。
+- `ww_plan_update` / `ww_show_page`:console-UI-only(改会话计划/返回浏览器顶栏导航提示),MCP 无意义。
 - `ww_seats_bind`:产 seat_bind 信封靠**前端 window.GL 落地**建盯盘 agent;MCP 语境无页面
   = 调了也不会发生任何事(空转假成功)→ 诚实排除。要建盯盘请经帷幄 console。
 

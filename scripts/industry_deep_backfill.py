@@ -31,16 +31,11 @@ sys.path.insert(0, str(_REPO / "engine"))   # fork 引擎优先,压过 pinned �
 
 
 def _load_secrets() -> None:
-    p = _REPO / "var" / "secrets.env"
-    if not p.exists():
-        return
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        if k.strip() and v.strip() and not os.environ.get(k.strip()):
-            os.environ[k.strip()] = v.strip()
+    # Shared fail-closed policy: this file can bridge reviewed credentials only,
+    # never batch/runtime controls such as GL_INGEST_CONCURRENCY.
+    from guanlan_v2.runtime_secrets import load_credential_file
+
+    load_credential_file(_REPO / "var" / "secrets.env")
 
 
 async def _main(backfill_days: int, concurrency: int, chunk: int, fw_id: str = "ai_chain") -> int:

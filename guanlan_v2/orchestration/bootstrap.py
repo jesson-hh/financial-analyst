@@ -2127,6 +2127,12 @@ class Lane0PromptAssembler:
                 for b in blocks
             ],
         }
+        if blocks:
+            channel[_worker.UNTRUSTED_DATA_HYDRATION_SECTION] = {
+                "hydrator_id": _worker.UNTRUSTED_DATA_HYDRATOR_ID,
+                "hydrator_version": _worker.UNTRUSTED_DATA_HYDRATOR_VERSION,
+                "max_total_bytes": _worker.UNTRUSTED_DATA_MAX_TOTAL_BYTES,
+            }
         # 裁决 (2026-07-31, inter-node inlining): the factor report slot stays
         # with the RICHER ruled section above (coverage stats, citable-reading
         # notes — 裁决 1/Option B); every OTHER plan-fed upstream flows through

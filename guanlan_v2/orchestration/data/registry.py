@@ -352,9 +352,13 @@ class DataSourceRegistry:
     def seal(self) -> "DataSourceRegistry":
         """Freeze the builder and materialize the immutable snapshot (idempotent).
 
-        The :class:`DataSourceRegistrySnapshot` validator rejects an unknown route
-        method, a duplicate/unsorted declaration or a digest drift; a configured
-        unknown source/method therefore fails here, never being filtered out.
+        The :class:`DataSourceRegistrySnapshot` validator rejects duplicate/unsorted
+        declarations and digest drift.  This sealing boundary additionally proves
+        that every route binds the exact registered method/source refs (including
+        content digests), that every entry carries the method's exact capability,
+        and that its source descriptor declares both that method and capability.
+        An unknown, drifted or incompatible route therefore fails here, never being
+        filtered out or deferred to dispatch.
         """
         if self._sealed:
             return self
@@ -366,20 +370,61 @@ class DataSourceRegistry:
             freshness_policies=tuple(self._freshness.values()),
             limit_policies=tuple(self._limits.values()),
         )
-        # a route may only reference a registered method + a registered source.
-        known_methods = {(s.method_id, s.method_version) for s in snapshot.method_specs}
-        known_sources = {(d.source_id, d.source_version) for d in snapshot.source_descriptors}
+        # A route is authority-bearing material.  Resolve by logical key first so
+        # an unknown declaration gets a cause-specific error, then compare the full
+        # ref (id/version/content digest) and the source's reviewed support surface.
+        # Looking only at ids/versions would allow a stale spec/descriptor digest to
+        # masquerade as the registered object.
+        methods_by_key = {
+            (s.method_id, s.method_version): s for s in snapshot.method_specs
+        }
+        descriptors_by_key = {
+            (d.source_id, d.source_version): d for d in snapshot.source_descriptors
+        }
         for route in snapshot.default_routes:
             mkey = (route.method_ref.id, route.method_ref.version)
-            if mkey not in known_methods:
+            method_spec = methods_by_key.get(mkey)
+            if method_spec is None:
                 raise RoutingConfigurationError(
                     f"default route method {mkey[0]}@{mkey[1]} is not a registered method"
                 )
+            if route.method_ref != method_spec.method_ref:
+                raise RoutingConfigurationError(
+                    f"default route method ref {mkey[0]}@{mkey[1]} does not exactly "
+                    "match the registered method spec (content digest drift)"
+                )
             for entry in route.entries:
                 skey = (entry.source_ref.id, entry.source_ref.version)
-                if skey not in known_sources:
+                descriptor = descriptors_by_key.get(skey)
+                if descriptor is None:
                     raise RoutingConfigurationError(
                         f"default route source {skey[0]}@{skey[1]} is not a registered source"
+                    )
+                registered_source_ref = ContentRef(
+                    id=descriptor.source_id,
+                    version=descriptor.source_version,
+                    content_digest=descriptor.descriptor_digest,
+                )
+                if entry.source_ref != registered_source_ref:
+                    raise RoutingConfigurationError(
+                        f"default route source ref {skey[0]}@{skey[1]} does not exactly "
+                        "match the registered source descriptor (content digest drift)"
+                    )
+                if entry.capability_ref != method_spec.capability_ref:
+                    raise RoutingConfigurationError(
+                        f"default route entry for method {method_spec.method_id!r} carries "
+                        "a capability other than the registered method capability"
+                    )
+                if method_spec.method_ref not in descriptor.method_refs:
+                    raise RoutingConfigurationError(
+                        f"default route source {descriptor.source_id!r} does not declare "
+                        f"the exact method ref {method_spec.method_id}@"
+                        f"{method_spec.method_version}"
+                    )
+                if method_spec.capability_ref not in descriptor.method_capability_refs:
+                    raise RoutingConfigurationError(
+                        f"default route source {descriptor.source_id!r} does not declare "
+                        f"the capability for method {method_spec.method_id!r}"
                     )
         self._snapshot = snapshot
         self._sealed = True

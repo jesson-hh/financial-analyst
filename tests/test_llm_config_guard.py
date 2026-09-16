@@ -35,6 +35,35 @@ def test_overrides_schema_and_models_in_register():
             assert ov["reasoning_effort"] in {"low", "high", "max"}
 
 
+def test_release_network_defaults_use_system_trust_store():
+    cfg = _cfg()
+    for name in ("deepseek", "anthropic", "openai"):
+        assert cfg["providers"][name]["network_profile"] == "intl_system"
+
+    bundled = yaml.safe_load(
+        (ROOT / "engine" / "financial_analyst" / "_resources" / "config" / "llm.yaml")
+        .read_text(encoding="utf-8")
+    )
+    for name in ("deepseek", "anthropic", "openai"):
+        assert bundled["providers"][name]["network_profile"] == "intl_system"
+
+
+def test_opt_in_clash_profile_keeps_tls_verification_by_default(monkeypatch):
+    import httpx
+    from financial_analyst.llm import client
+
+    captured = {}
+
+    def fake_async_client(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.delenv("FA_INTL_VERIFY", raising=False)
+    monkeypatch.setattr(httpx, "AsyncClient", fake_async_client)
+    client._build_http_client("intl_clash")
+    assert captured["verify"] is True
+
+
 def test_deep_tier_seats_exist():
     ov = _cfg().get("agent_overrides") or {}
     for seat in ("rerank", "review_officer", "bull-advocate", "bear-advocate"):
@@ -42,12 +71,12 @@ def test_deep_tier_seats_exist():
         assert ov[seat].get("thinking") is True
         assert ov[seat].get("reasoning_effort") == "high"
         assert ov[seat].get("timeout", 0) >= 180, f"{seat} 思考档须放宽超时"
-    # 终端结构化输出节点继承上游的深度推理结果，但自身关闭 thinking，
-    # 避免 reasoning token 挤占 JSON 终稿预算。
+    # 终端结构化节点继承上游深思考结论，但自身关闭 thinking，避免推理
+    # token 挤占最终 JSON；仍保留足量输出与超时预算。
     for seat in ("risk-officer", "report-writer"):
         assert ov.get(seat, {}).get("model") == "deepseek-v4-flash"
         assert ov[seat].get("thinking") is False
-        assert "reasoning_effort" not in ov[seat]
+        assert ov[seat].get("max_tokens", 0) >= 8192
         assert ov[seat].get("timeout", 0) >= 180
     assert ov.get("review_section", {}).get("model") == "deepseek-v4-flash"
     assert ov["review_section"].get("thinking") is False

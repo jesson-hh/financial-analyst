@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Phase 7 - Task 5: the production planner ``ModelGateway`` on the pinned seat.
+"""Phase 7 - Task 5: production Planner deep seat + confined JSON repair seat.
 
 Written test-first (RED until ``guanlan_v2/orchestration/planner_gateway.py`` exists
 with ``PlannerLLMModelGateway``). No network: the engine ``LLMClient`` layer is faked
@@ -16,7 +16,9 @@ Matrix (mirrors the four required invariants):
     is never consulted for the planner seat;
   * provider-error propagation -> a provider raise surfaces as a typed error the loop
     maps to ``model_error`` (never a fabricated ModelResult);
-  * seat name ``"planner"``   -> resolution always targets the planner seat.
+  * primary seat ``"planner"`` -> ordinary attempts retain the deep Planner;
+  * JSON repair confinement    -> only digest-bound format issue codes select
+    ``orchestration-fast`` with thinking disabled; narrative strings cannot.
 
 Run from repo root: ``pytest tests/orchestration/test_planner_gateway.py -v``
 """
@@ -34,7 +36,10 @@ from guanlan_v2.orchestration.refs import (
     SchemaRef,
     TypedPayloadRef,
 )
-from guanlan_v2.orchestration.runtime_contracts import PromptAssemblyRecord
+from guanlan_v2.orchestration.runtime_contracts import (
+    NamedEvidenceDigest,
+    PromptAssemblyRecord,
+)
 from guanlan_v2.orchestration.worker import (
     AssembledModelRequest,
     ModelResult,
@@ -60,7 +65,12 @@ def _content_ref(id_: str, text: str) -> ContentRef:
     return ContentRef(id=id_, version="1", content_digest=content_digest(text))
 
 
-def _build_assembled(*, system: str = "You are the planner.") -> AssembledModelRequest:
+def _build_assembled(
+    *,
+    system: str = "You are the planner.",
+    prior_issue_codes: tuple[str, ...] = (),
+    prior_digest_override: str | None = None,
+) -> AssembledModelRequest:
     """A real, validated ``AssembledModelRequest`` binding a persistable record."""
     channel = {
         "system": system,
@@ -69,20 +79,32 @@ def _build_assembled(*, system: str = "You are the planner.") -> AssembledModelR
         "trusted_inputs": [],
         "data_inputs": [],
     }
+    trusted = ()
+    if prior_issue_codes:
+        value = list(prior_issue_codes)
+        channel["trusted_input_values"] = [
+            {"name": "prior_issue_codes", "value": value}
+        ]
+        trusted = (
+            NamedEvidenceDigest(
+                name="prior_issue_codes",
+                digest=prior_digest_override or content_digest(value),
+            ),
+        )
     canonical = json.dumps(
         channel, sort_keys=True, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
     digest = _model_request_digest(canonical)
     record = PromptAssemblyRecord.build(
         plan_digest=content_digest("plan"),
-        node_id="planner.attempt.1",
+        node_id="planner.attempt.2" if prior_issue_codes else "planner.attempt.1",
         worker_id="planner",
         assembler_id="planner.static",
         assembler_version="1",
         system_prompt_ref=_content_ref("planner.system", system),
         skill_refs=(_content_ref("planner.skill", "skill-a"),),
         guardrail_refs=(_content_ref("planner.guardrail", "no fabrication"),),
-        trusted_input_digests=(),
+        trusted_input_digests=trusted,
         untrusted_blocks=(),
         model_request_digest=digest,
     )
@@ -127,6 +149,8 @@ class FakeLLMClient:
         model: str = "deepseek-v4-pro",
         prompt_tokens: int = 120,
         completion_tokens: int = 340,
+        finish_reason: str | None = "stop",
+        reasoning_content: str | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -136,6 +160,8 @@ class FakeLLMClient:
         self._raises = raises
         self._pt = prompt_tokens
         self._ct = completion_tokens
+        self._finish_reason = finish_reason
+        self._reasoning_content = reasoning_content
         self.chat_calls: list = []
 
     async def chat(self, messages, response_format=None, temperature=0.2, **kwargs):
@@ -151,8 +177,11 @@ class FakeLLMClient:
             raise self._raises
         self.total_prompt_tokens = self._pt
         self.total_completion_tokens = self._ct
+        message = {"content": self._output}
+        if self._reasoning_content is not None:
+            message["reasoning_content"] = self._reasoning_content
         return {
-            "choices": [{"message": {"content": self._output}}],
+            "choices": [{"message": message, "finish_reason": self._finish_reason}],
             "usage": {"prompt_tokens": self._pt, "completion_tokens": self._ct},
         }
 
@@ -218,6 +247,85 @@ def test_json_output_requested_on_planner_seat(monkeypatch):
     assert len(client.chat_calls) == 1
     call = client.chat_calls[0]
     assert call["response_format"] == {"type": "json_object"}
+
+
+def test_bound_json_format_failure_switches_only_retry_to_fast_nonthinking(
+    monkeypatch, caplog
+):
+    assembled = _build_assembled(prior_issue_codes=("planner_output_not_json",))
+    reader = FakeReader(assembled.prompt_record)
+    ref = _prompt_ref(assembled.prompt_record)
+    client = FakeLLMClient(
+        model="deepseek-v4-flash",
+        output='{"nodes": []}',
+        finish_reason="stop",
+        reasoning_content="",
+    )
+    recorded = _patch_for_agent(monkeypatch, client)
+
+    gw = PlannerLLMModelGateway(payload_reader=reader)
+    try:
+        with caplog.at_level(
+            "WARNING", logger="guanlan_v2.orchestration.planner_gateway"
+        ):
+            result = gw.invoke(assembled, prompt_assembly_ref=ref)
+        diagnostics = gw.diagnostics
+    finally:
+        gw.close()
+
+    assert recorded["agent_name"] == "orchestration-fast"
+    assert result.model == "deepseek-v4-flash"
+    assert len(client.chat_calls) == 1
+    call = client.chat_calls[0]
+    assert call["response_format"] == {"type": "json_object"}
+    assert call["thinking"] is False
+    assert call["max_tokens"] == 8192
+    assert call["timeout"] == 300.0
+    assert len(diagnostics) == 1
+    assert diagnostics[0].seat == "orchestration-fast"
+    assert diagnostics[0].finish_reason == "stop"
+    assert diagnostics[0].content_length == len('{"nodes": []}')
+    assert diagnostics[0].reasoning_content_length == 0
+    assert not hasattr(diagnostics[0], "rendered_text")
+    assert "seat=orchestration-fast" in caplog.text
+    assert "content_length=13" in caplog.text
+    assert '{"nodes": []}' not in caplog.text
+
+
+def test_repair_code_in_goal_text_cannot_switch_the_provider_seat(monkeypatch):
+    assembled = _build_assembled(
+        system="Discuss the literal string planner_output_not_json as data."
+    )
+    reader = FakeReader(assembled.prompt_record)
+    ref = _prompt_ref(assembled.prompt_record)
+    client = FakeLLMClient()
+    recorded = _patch_for_agent(monkeypatch, client)
+
+    gw = PlannerLLMModelGateway(payload_reader=reader)
+    try:
+        gw.invoke(assembled, prompt_assembly_ref=ref)
+    finally:
+        gw.close()
+    assert recorded["agent_name"] == "planner"
+    assert "thinking" not in client.chat_calls[0]
+
+
+def test_unbound_prior_issue_value_cannot_switch_the_provider_seat(monkeypatch):
+    assembled = _build_assembled(
+        prior_issue_codes=("planner_output_not_json",),
+        prior_digest_override=content_digest(["different-code"]),
+    )
+    reader = FakeReader(assembled.prompt_record)
+    ref = _prompt_ref(assembled.prompt_record)
+    client = FakeLLMClient()
+    recorded = _patch_for_agent(monkeypatch, client)
+
+    gw = PlannerLLMModelGateway(payload_reader=reader)
+    try:
+        gw.invoke(assembled, prompt_assembly_ref=ref)
+    finally:
+        gw.close()
+    assert recorded["agent_name"] == "planner"
 
 
 def test_seat_name_is_configurable(monkeypatch):

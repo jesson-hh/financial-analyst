@@ -45,6 +45,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from guanlan_v2.orchestration.adapters.live_binding import (
+    ReviewedLiveBindingSnapshot,
+    reviewed_live_binding_snapshot,
+    verify_code_approved_live_binding_snapshot,
+)
 from guanlan_v2.orchestration.adapters.live_data import (
     LiveClientSource,
     build_online_capture_manifest,
@@ -101,7 +106,9 @@ __all__ = [
     "PRODUCTION_CALENDAR_MATERIAL_PATH",
     "PRODUCTION_CAPTURE_NAMESPACE",
     "PRODUCTION_CAPTURE_TIMEZONE",
+    "PRODUCTION_INDICATORS_FRESHNESS_POLICY_ID",
     "PRODUCTION_LIMIT_POLICY_ID",
+    "PRODUCTION_OHLCV_FRESHNESS_POLICY_ID",
     "PRODUCTION_ROUTE_POLICY_REF",
     "PRODUCTION_SESSION_FRESHNESS_METHOD_ID",
     "PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID",
@@ -134,6 +141,10 @@ PRODUCTION_SESSION_FRESHNESS_METHOD_ID = "verified_snapshot"
 PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID = (
     "policy.freshness.verified-snapshot-session"
 )
+PRODUCTION_INDICATORS_FRESHNESS_POLICY_ID = (
+    "policy.freshness.indicators-retained-book-session"
+)
+PRODUCTION_OHLCV_FRESHNESS_POLICY_ID = "policy.freshness.ohlcv-session"
 
 #: the committed, digest-sealed 2026 A-share session material (repo-relative).
 PRODUCTION_CALENDAR_MATERIAL_PATH = (
@@ -224,6 +235,7 @@ class ProductionDataWorldRecipe:
     routing: DataRoutingSnapshot
     calendar: ImmutableTradingCalendar
     policy_resolver: DataPolicyResolver
+    live_binding_snapshot: ReviewedLiveBindingSnapshot
 
     @property
     def source_registry_digest(self) -> str:
@@ -247,6 +259,19 @@ def _build_recipe(*, schema_registry_digest: str) -> ProductionDataWorldRecipe:
     """
     surf = phase3_data_surface()
     calendar = _load_calendar_material()
+    live_bindings = reviewed_live_binding_snapshot()
+    verify_code_approved_live_binding_snapshot(live_bindings)
+    for binding in live_bindings.bindings:
+        spec = surf.spec_by_method.get(binding.method_id)
+        if spec is None or spec.spec_digest != binding.method_spec_digest:
+            raise RoutingConfigurationError(
+                f"reviewed live binding for {binding.method_id!r} does not "
+                "match the exact Phase-3 method spec"
+            )
+        if spec.read_only is not True:
+            raise RoutingConfigurationError(
+                f"reviewed live binding for {binding.method_id!r} is not read-only"
+            )
 
     registry = DataSourceRegistry(registry_version=PRODUCTION_DATA_REGISTRY_VERSION)
     # the surface's seven method specs, UNCHANGED (spec-digest identity).
@@ -268,8 +293,9 @@ def _build_recipe(*, schema_registry_digest: str) -> ProductionDataWorldRecipe:
     # was built for this (max_trading_sessions + the exact calendar identity,
     # data/pit.py); the policy therefore carries the SAME committed material ref
     # the world binds to its PitGuard, so ``_check_freshness``'s calendar-identity
-    # assertion is a real tripwire, not a formality.  Every OTHER method keeps
-    # the elapsed default (gate D-B's limit-policy binding included).
+    # assertion is a real tripwire, not a formality.  OHLCV receives its own
+    # completed-session rule below; every other method keeps the elapsed default
+    # (gate D-B's limit-policy binding included).
     #
     # SCOPE OF THE CLOSURE (review M7 — the controller's ruling, recorded so the
     # campaign day is chosen with open eyes): this closes the Monday hole ONLY
@@ -286,6 +312,47 @@ def _build_recipe(*, schema_registry_digest: str) -> ProductionDataWorldRecipe:
             policy_version="1",
             method_or_category=PRODUCTION_SESSION_FRESHNESS_METHOD_ID,
             max_trading_sessions=1,
+            calendar_id=calendar.calendar_id,
+            calendar_material_ref=calendar.material_ref,
+        )
+    )
+    # Daily OHLCV is settled session evidence, not a continuously refreshing
+    # quote.  On a weekend/holiday the immediately preceding committed session
+    # remains the newest possible daily bar even after 24 wall-clock hours.  A
+    # one-session guard allowance is needed before the current session closes
+    # (Monday intraday legitimately still uses Friday).  Exactness is not left
+    # to that threshold: the reviewed live adapter separately requires its
+    # newest row to equal the calendar-derived latest completed session, so a
+    # Monday post-close response still cannot lag on Friday.  The guard also
+    # independently refuses future/missing/naive availability, and calendar
+    # coverage/identity remain hard requirements.
+    registry.register_freshness(
+        FreshnessPolicy.build(
+            policy_id=PRODUCTION_OHLCV_FRESHNESS_POLICY_ID,
+            policy_version="1",
+            method_or_category="ohlcv",
+            max_trading_sessions=1,
+            calendar_id=calendar.calendar_id,
+            calendar_material_ref=calendar.material_ref,
+        )
+    )
+    # ``indicators`` is currently the code-approved TDX five-level-book
+    # projection.  Its ordinary in-session path remains guarded at the adapter
+    # by the provider-owned same-session timestamp and the strict ten-second
+    # live limit.  On a non-session day the facade can instead expose the exact
+    # immediately-prior session's retained 15:00--15:30 close book; that proof is
+    # also adapter-owned and fail-closed.  Such a Friday observation remains the
+    # latest possible book throughout the weekend even after 24 elapsed hours.
+    #
+    # Zero, not one, is the narrow session threshold: no exchange session has
+    # elapsed from Friday to Saturday/Sunday, while Friday evidence at a Monday
+    # session is one session old and is still rejected as defence in depth.
+    registry.register_freshness(
+        FreshnessPolicy.build(
+            policy_id=PRODUCTION_INDICATORS_FRESHNESS_POLICY_ID,
+            policy_version="1",
+            method_or_category="indicators",
+            max_trading_sessions=0,
             calendar_id=calendar.calendar_id,
             calendar_material_ref=calendar.material_ref,
         )
@@ -342,7 +409,16 @@ def _build_recipe(*, schema_registry_digest: str) -> ProductionDataWorldRecipe:
             spec.method_id: surf.source_descriptor.source_id
             for spec in surf.method_specs
         },
-        source_options={surf.source_descriptor.source_id: dict(_SOURCE_OPTIONS)},
+        source_options={
+            surf.source_descriptor.source_id: {
+                **_SOURCE_OPTIONS,
+                # The signed physical provider selection is a semantic source
+                # option.  Its digest therefore flows through option_digests ->
+                # source_config_digest -> routing snapshot -> DataContext.
+                "live_binding_snapshot_digest": live_bindings.snapshot_digest,
+                "live_binding_approval_signature": live_bindings.approval_signature,
+            }
+        },
     )
     routing = registry.build_routing_snapshot(
         audit_id=PRODUCTION_ROUTING_AUDIT_ID,
@@ -359,6 +435,7 @@ def _build_recipe(*, schema_registry_digest: str) -> ProductionDataWorldRecipe:
         routing=routing,
         calendar=calendar,
         policy_resolver=policy_resolver,
+        live_binding_snapshot=live_bindings,
     )
 
 
@@ -441,9 +518,12 @@ def production_data_adapters() -> Mapping[str, Any]:
     Lock order is unidirectional (``_BACKEND_LOCK`` → ``_RECIPE_LOCK``, never the
     reverse), so the nesting at :func:`production_data_backend` cannot deadlock.
     """
+    recipe = production_data_recipe()
     return {
         phase3_data_surface().source_ref.id: LiveClientSource(
-            calendar=production_data_recipe().calendar)
+            calendar=recipe.calendar,
+            binding_snapshot=recipe.live_binding_snapshot,
+        )
     }
 
 

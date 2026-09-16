@@ -39,6 +39,7 @@ from guanlan_v2.orchestration.budget import (
     BudgetEvent,
     BudgetTransitionCommand,
     IdempotencyConflict,
+    IdempotencyReplayRefused,
     fold_budget_events,
     validate_budget_command,
 )
@@ -798,6 +799,36 @@ class RuntimeBudgetEventSink:
             event = _append_budget_event(
                 wb, command, run_id=self._run_id, ledger_id=self._ledger_id, occurred_at=occurred_at,
             )
+            self._shared.backend = wb
+            return event
+
+    def append_fresh(self, command: BudgetTransitionCommand) -> BudgetEvent:
+        """Atomically commit only when the idempotency key is genuinely new.
+
+        This is the provider-attempt primitive: returning an older idempotent
+        reservation would let a second executor believe it owns permission for
+        another external call.  The check and append share the backend lock, so
+        separate BudgetLedger/RuntimeBudgetEventSink instances cannot both win.
+        """
+        with self._shared.lock:
+            wb = self._shared.backend.clone()
+            existing = _find_budget_event(
+                wb, self._run_id, self._ledger_id,
+                command.idempotency_key)
+            if existing is not None:
+                if not _budget_same_semantics(existing.command, command):
+                    raise IdempotencyConflict(
+                        f"budget idempotency key {command.idempotency_key!r} "
+                        "reused with different content"
+                    )
+                raise IdempotencyReplayRefused(
+                    "fresh-only reservation found an existing durable "
+                    f"idempotency key {command.idempotency_key!r}"
+                )
+            occurred_at = clock_now(self._clock)
+            event = _append_budget_event(
+                wb, command, run_id=self._run_id,
+                ledger_id=self._ledger_id, occurred_at=occurred_at)
             self._shared.backend = wb
             return event
 

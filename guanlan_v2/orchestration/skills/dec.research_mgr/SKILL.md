@@ -6,16 +6,25 @@ description: |
   Not ideal for: ["raw data collection","order routing or execution","position sizing"]
 ---
 ## ⚠️ CRITICAL: Data Source Priority
+- direct PriceActionFeatureReport (price_action)
+- direct TechnicalReport (technical)
+- direct MicrostructureReport (microstructure)
+- direct NewsDigestReport (news_digest)
+- direct BullCase and BearCase (bull_case / bear_case)
 - bull-bear debate history block, when supplied (immutable turn-ordered messages)
-- upstream SentimentReport artifact from the sentiment analyst
+- direct upstream SentimentReport (`sentiment`) from the sentiment analyst
 - fundamental and factor context blocks provided in-context
 - deterministic upstream-ratings extract block, when supplied (analyst scores, machine-extracted)
 - guanlan regime / market-tape context when supplied
 - experience-library cases relevant to the name or setup
 
 Synthesize only from provided upstream artifacts and blocks. Do not fetch new
-data; if a needed input is absent, reason around the gap and flag it. Do not
-restate upstream reports back into your rationale — cite the decisive points.
+data. The full ten-seat preset requires all seven named evidence faces:
+`price_action`, `technical`, `microstructure`, `news_digest`, `sentiment`,
+`bull_case`, and `bear_case`. Cite at least one decisive fact from EACH face in
+`rationale`, or explicitly name that face as missing/unusable; never silently
+omit a seat. Sentiment is mandatory to audit even when it is later down-weighted.
+Do not restate whole reports — cite only the decisive points.
 
 ## Judging the debate (when a debate history is supplied)
 1. Judge by EVIDENCE STRENGTH only — never by speaking order, argument length,

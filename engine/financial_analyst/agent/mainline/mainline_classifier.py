@@ -11,17 +11,42 @@ Outputs structured data with:
 """
 from __future__ import annotations
 import os
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import pandas as pd
 from pydantic import BaseModel
 from financial_analyst.agent.base import SubAgent
+from financial_analyst.data.pit import PitUnavailableError
 
 
-DEFAULT_PANEL_PATH = os.environ.get(
-    "FA_MAINLINE_PANEL",
-    "G:/stocks/strategy/mainline/monthly_mainlines_panel.parquet",  # dev fallback (作者机)
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+CANONICAL_PANEL_PATH = (
+    _REPO_ROOT / "guanlan_v2" / "strategy" / "vendor" / "artifacts"
+    / "monthly_mainlines_panel.parquet"
 )
+LEGACY_PANEL_PATH = Path("G:/stocks/strategy/mainline/monthly_mainlines_panel.parquet")
+
+
+def _resolve_panel_path(explicit: Optional[str] = None) -> tuple[Path, str, str]:
+    """Resolve the panel with observable, backwards-compatible precedence."""
+    if explicit:
+        return Path(explicit), "explicit", ""
+    env_path = str(os.environ.get("FA_MAINLINE_PANEL") or "").strip()
+    if env_path:
+        return Path(env_path), "environment", ""
+    if CANONICAL_PANEL_PATH.exists():
+        return CANONICAL_PANEL_PATH, "canonical", ""
+    return (
+        LEGACY_PANEL_PATH,
+        "legacy_fallback",
+        f"canonical panel missing: {CANONICAL_PANEL_PATH}",
+    )
+
+
+# Compatibility export for callers that display the default. Constructors use
+# the resolver above so a later environment override is not frozen at import.
+DEFAULT_PANEL_PATH = str(_resolve_panel_path()[0])
 
 STATUS_ORDER = ["mainline", "revival", "initiation", "decay", "cold", "neutral"]
 
@@ -50,6 +75,8 @@ class IndustryRecord(BaseModel):
 class MainlineOutput(BaseModel):
     as_of: str
     panel_path: str
+    panel_source: str = ""
+    panel_resolution_note: str = ""
     status_groups: Dict[str, List[IndustryRecord]] = {}
     just_become_mainline: List[IndustryRecord] = []   # ★ golden signal
     just_become_decay: List[IndustryRecord] = []      # pullback candidates
@@ -62,14 +89,35 @@ class MainlineClassifier(SubAgent[MainlineOutput]):
 
     def __init__(self, memory_root, panel_path: Optional[str] = None):
         super().__init__(memory_root=memory_root)
-        self._panel_path = panel_path or os.environ.get("FA_MAINLINE_PANEL", DEFAULT_PANEL_PATH)
+        path, source, note = _resolve_panel_path(panel_path)
+        self._panel_path = str(path)
+        self._panel_source = source
+        self._panel_resolution_note = note
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         asof = inputs.get("asof_date")
-        path = Path(inputs.get("panel_path") or self._panel_path)
+        # Preserve the existing "future sentinel means latest available panel"
+        # behavior used by current resolver callers; only a true past request
+        # is a historical replay and must fail closed.
+        if asof and date.fromisoformat(str(asof)) < date.today():
+            raise PitUnavailableError(
+                "mainline-classifier unavailable: current panel has no versioned "
+                f"point-in-time snapshot for {asof}"
+            )
+
+        runtime_path = str(inputs.get("panel_path") or "").strip()
+        if runtime_path:
+            path = Path(runtime_path)
+            panel_source = "explicit"
+            panel_resolution_note = ""
+        else:
+            path = Path(self._panel_path)
+            panel_source = self._panel_source
+            panel_resolution_note = self._panel_resolution_note
         if not path.exists():
             raise FileNotFoundError(
                 f"Mainline panel not found at {path}. Set FA_MAINLINE_PANEL or pass panel_path. "
+                f"resolution={panel_source}; {panel_resolution_note or 'no fallback note'}. "
                 f"Compute it with G:\\stocks/strategy/mainline/compute_monthly_mainlines.py first."
             )
 
@@ -113,6 +161,8 @@ class MainlineClassifier(SubAgent[MainlineOutput]):
         return {
             "as_of": target.strftime("%Y-%m-%d"),
             "panel_path": str(path),
+            "panel_source": panel_source,
+            "panel_resolution_note": panel_resolution_note,
             "status_groups": status_groups,
             "just_become_mainline": init_to_main[available].round(2).to_dict("records"),
             "just_become_decay": main_to_decay[available].round(2).to_dict("records"),

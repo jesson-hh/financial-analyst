@@ -1,1 +1,5 @@
 config/orchestration/materials/** -text
+
+# Byte-sealed orchestration sources and goldens must be reproducible on Windows.
+guanlan_v2/orchestration/skills/** text eol=lf
+tests/orchestration/golden/** text eol=lf

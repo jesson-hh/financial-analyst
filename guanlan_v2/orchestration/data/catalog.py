@@ -147,10 +147,31 @@ _REVIEWED_INTEGRATION_GRANTS: dict[str, tuple[str, ...]] = {
 #: binding — the single source both evaluation points share — and claims every
 #: row Phase 3 skipped.
 _REVIEWED_LANE_DATA_GRANTS: dict[str, tuple[str, ...]] = {
+    "pv.price_action": ("ohlcv",),
     "pv.technical": ("verified_snapshot",),
+    "pv.microstructure": ("verified_snapshot", "indicators"),
     "text.news": ("news",),
     "text.policy": ("news",),
 }
+
+
+def _subject_param_bindings(method_id: str) -> tuple[ParamBinding, ...]:
+    """The one reviewed subject projection for a method's exact params face."""
+    if method_id in {"ohlcv", "indicators"}:
+        return (
+            ParamBinding(target_pointer="/end", source_kind="node_param",
+                         source_pointer="/asof_date"),
+            ParamBinding(target_pointer="/start", source_kind="node_param",
+                         source_pointer="/window_start"),
+            ParamBinding(target_pointer="/symbol", source_kind="node_param",
+                         source_pointer="/symbol"),
+        )
+    return (
+        ParamBinding(target_pointer="/as_of", source_kind="node_param",
+                     source_pointer="/asof_date"),
+        ParamBinding(target_pointer="/symbols", source_kind="node_param",
+                     source_pointer="/code"),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -590,12 +611,7 @@ class _Phase3DataSurface:
                         source_ref=self.source_ref, capability_ref=spec.capability_ref),),
                     invocation_mode="cache_or_invoke",
                     success_requires_finalized_call=False,
-                    param_bindings=(
-                        ParamBinding(target_pointer="/as_of", source_kind="node_param",
-                                     source_pointer="/asof_date"),
-                        ParamBinding(target_pointer="/symbols", source_kind="node_param",
-                                     source_pointer="/code"),
-                    ),
+                    param_bindings=_subject_param_bindings(method_id),
                 ))
         for worker_id, method_ids in _REVIEWED_LANE_DATA_GRANTS.items():
             for method_id in method_ids:
@@ -608,12 +624,7 @@ class _Phase3DataSurface:
                         source_ref=self.source_ref, capability_ref=spec.capability_ref),),
                     invocation_mode="always_invoke",
                     success_requires_finalized_call=True,
-                    param_bindings=(
-                        ParamBinding(target_pointer="/as_of", source_kind="node_param",
-                                     source_pointer="/asof_date"),
-                        ParamBinding(target_pointer="/symbols", source_kind="node_param",
-                                     source_pointer="/code"),
-                    ),
+                    param_bindings=_subject_param_bindings(method_id),
                 ))
         self.prefetch_binding = DataBridgePrefetchBinding.build(
             bridge_id=DATA_BRIDGE_ID, bridge_version="1", operations=tuple(ops))

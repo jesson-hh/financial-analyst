@@ -7,6 +7,7 @@ NODE_EXEC:311),计算不走 HTTP——全部直调 workflow/api.py 模块级函�
 (/workflow/run)里跑,绝不进事件循环协程(仓级红线)。
 
 诚实合约:节点失败记 node_errors 继续跑(下游缺输入自然失败显形);无主终端 → ok:False;
+交互入口可显式允许纯诊断图返回完成的诊断产物，但不生成过门指标或晋级资格。
 metrics 抽不出 → None + warning,绝不编数。
 """
 from __future__ import annotations
@@ -85,22 +86,19 @@ def topo_order(nodes: List[dict], edges: List[dict]) -> List[str]:
 def universe_for_node(nid: str, nodes: List[dict], edges: List[dict]) -> Dict[str, Any]:
     """Resolve explicit or uniquely nearest source; never choose by edge order."""
     from guanlan_v2.workflow.migrations import context_source_for_node
-    import re as _re
+    from guanlan_v2.workflow.source_scope import source_codes
 
     source_id = context_source_for_node(nid, nodes, edges)
     if source_id is not None:
         source = next(n for n in nodes if str(n.get("id")) == source_id)
         p = source.get("params") or {}
-        raw_codes = p.get("codes")
-        code_parts = raw_codes if isinstance(raw_codes, list) \
-            else _re.split(r"[\s,;，、]+", str(raw_codes or ""))
         return {"universe": _universe_of(p),
                 # source.freq is the legacy quote interval (normally day), not
                 # a request to change research sampling/evaluation defaults.
                 "research_freq": str(p.get("research_freq") or "").strip(),
                 "start": str(p.get("start") or "").strip(),
                 "end": str(p.get("end") or "").strip(),
-                "codes": [str(c).strip() for c in code_parts if str(c).strip()],
+                "codes": source_codes(p),
                 "benchmark": str(p.get("benchmark") or "").strip(),
                 "leader": str(p.get("leader") or "").strip(),
                 "oos_frac": float(p.get("oos_frac") or 0) or 0.0,
@@ -1246,6 +1244,7 @@ def run_graph(graph: Dict[str, Any], overrides: Optional[Dict[str, Any]] = None,
               on_node: Optional[Callable[[str, str, str], None]] = None,
               prefer_model_terminal: bool = False,
               artifact_sink: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
+              allow_diagnostic_result: bool = False,
               ) -> Dict[str, Any]:
     """整图执行(spec §1.1)。on_node(nid, type, state) state∈running|done|error,供回路进度显形。
 
@@ -1255,6 +1254,9 @@ def run_graph(graph: Dict[str, Any], overrides: Optional[Dict[str, Any]] = None,
     死/活模型 backtest 指标逐位同),ML 图过门指标须对齐模型真实成绩;让位写 warnings 显形。
     图无模型报告终端时(rr_3e2e4dbe58 残余缺口)直取 mf/ML 节点输出为主终端(kind=节点
     类型)并记警告;全图无模型报告(ML 训练失败)也记警告——绝不静默回落 backtest 口径。"""
+    # Interactive inspection is not research promotion. This opt-in never
+    # applies to a graph declaring a primary/ML/audit terminal, even if that
+    # branch failed and an unrelated diagnostic succeeded.
     t0 = time.time()
     ov = overrides or {}
     nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
@@ -1613,11 +1615,25 @@ def run_graph(graph: Dict[str, Any], overrides: Optional[Dict[str, Any]] = None,
             warnings.append(
                 f"主终端为 {main.get('kind')}；已独立合并过拟合审计硬门，"
                 "模型或回测指标不能绕过审计结果")
+    diagnostic_result = False
+    declared_primary = any(n.get("type") in set(_TERMINAL_PRIORITY) | set(_ML_KINDS) | {"mf", "portfolio"}
+                           for n in nodes)
+    if (main is None and allow_diagnostic_result and not prefer_model_terminal
+            and not declared_primary and not node_errors):
+        diagnostics = [t for t in terminals if t["kind"] in _DIAG_TYPES]
+        if diagnostics:
+            main = diagnostics[-1]
+            diagnostic_result = True
+            # Do not extract return/IC-looking numbers from diagnostic payloads
+            # into the research gate contract, including portfolio diagnostics.
+            metrics = None
+            warnings.append("诊断产物已完成；仅供描述/体检，不是回测或策略晋级通过，过门指标为空。")
     if main is None:
         warnings.append("无主终端产出(回测/分析/IC)——过门指标缺失")
     ok = main is not None
     reason = None if ok else (node_errors[0]["error"] if node_errors else "图无主终端节点")
     return {"ok": ok, "reason": reason, "terminal": main,
+            **({"result_kind": "diagnostic", "gate_eligible": False} if diagnostic_result else {}),
             # Compatibility keeps ``terminal`` as the selected main result.
             # Only parallel graphs need the extra list; single heavy backtests
             # are not duplicated in every durable JSON record.

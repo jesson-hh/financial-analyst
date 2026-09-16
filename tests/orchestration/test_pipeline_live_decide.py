@@ -76,6 +76,7 @@ from guanlan_v2.orchestration.catalog_runtime import (
 )
 from guanlan_v2.orchestration.data.runtime import SubjectParams
 from guanlan_v2.orchestration.data.symbols import normalize_symbol
+from guanlan_v2.orchestration.digest import content_digest
 from guanlan_v2.orchestration.enums import (
     PortfolioRating,
     ToolCallRequirement,
@@ -111,10 +112,10 @@ from guanlan_v2.orchestration.pipeline.deep_decide import (
     REDUCED_EVIDENCE_BADGE,
     REDUCED_EVIDENCE_MISSING_BADGE,
     REDUCED_EVIDENCE_NOTE,
+    DeepRunSubject,
 )
 
 from guanlan_v2.orchestration.pipeline import live_decide
-from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 from guanlan_v2.orchestration.pipeline.live_decide import (
     DeepDecideBindings,
     SUBJECT_ASSEMBLER_ID,
@@ -249,14 +250,14 @@ class _GatewayFactory:
 def _pa_handler_factory(worker, resolved):
     def handler(*, node, input_snapshot, contributions, data_result_refs):
         return W.ModelResult(payload=_pa_report(), rendered_text="pa det",
-                             input_tokens=0, output_tokens=1)
+                             input_tokens=0, output_tokens=0)
     return handler
 
 
 def _ms_handler_factory(worker, resolved):
     def handler(*, node, input_snapshot, contributions, data_result_refs):
         return W.ModelResult(payload=_ms_report(), rendered_text="ms det",
-                             input_tokens=0, output_tokens=1)
+                             input_tokens=0, output_tokens=0)
     return handler
 
 
@@ -367,6 +368,7 @@ def _build_env(tmp_path, heavy, *, tranches=True, fail=frozenset(), lease=True,
         clock=clock, stores=stores, rt_digest=rt_digest, context=context,
         ctx_ref=ctx_ref, bundle=bundle, gateway_factory=gateway_factory,
         journal=journal, declog=[], persisted=[], noted=[], calls=[],
+        fast_payloads=[],
         runner_subject_params=[],
         # L3 Task 6 — the durable deep-FAILURE receipt store stands in as a list
         # (the ``declog`` idiom): the SAME object is read and written, so a
@@ -425,13 +427,34 @@ def _build_env(tmp_path, heavy, *, tranches=True, fail=frozenset(), lease=True,
         # arrival — the threading pins below assert ONE-recipe provenance on
         # what actually arrived here.
         env.runner_subject_params.append(subject_params)
-        return build_production_plan_runner(
+        inner = build_production_plan_runner(
             stores=stores, catalog_snapshot=heavy.snapshot, registry=heavy.registry,
             gateway_factory=gateway_factory, admission=admission,
             lane_bindings=lane_bindings, run_context_factory=run_context_factory,
             request_id=request_id, clock=clock, runtime_registry_digest=rt_digest,
             runtime_limit=4, catalog=bundle, prompt_assembler=prompt_assembler,
             subject_params=subject_params)
+
+        class _FullQualityRunner:
+            def __call__(self, **kwargs):
+                return inner(**kwargs)
+
+            def quality_report(self):
+                return {
+                    "level": "full",
+                    "graph_complete": True,
+                    "debate_published": True,
+                    "missing_workers": [],
+                    "noncompleted_workers": {},
+                    "node_summaries": [
+                        {"worker_id": worker_id, "status": "completed"}
+                        for worker_id in DEEP_DECIDE_WORKER_IDS
+                    ],
+                    "evidence_warnings": [],
+                    "portfolio_rating": "Buy",
+                }
+
+        return _FullQualityRunner()
 
     env.persist_spy = persist_spy
     env.note_spy = note_spy
@@ -489,6 +512,7 @@ def _make_fast(env, result: dict):
     decide row BEFORE returning (this is what arms the tail-before-fast trap)."""
     def fast(payload: dict) -> dict:
         env.calls.append("fast")
+        env.fast_payloads.append(dict(payload))
         env.declog.append({
             "id": "decide_fast", "ts": env.clock.now().isoformat(), "kind": "decide",
             "code": result.get("code") or payload.get("code"),
@@ -525,6 +549,196 @@ def _order_rows(env):
     return [rec for kind, rec in env.persisted if kind == "order"]
 
 
+def _quality_payloads(*, headline: str = "重大订单落地") -> dict[str, object]:
+    """One evidentially complete ten-seat payload set for quality-gate tests."""
+    return {
+        "pv.price_action": _pa_report(),
+        "pv.technical": lp.TechnicalReport(
+            symbol=_SYM, as_of=NOW,
+            indicators=(lp.IndicatorReading(name="RSI14", value=55.0),),
+            verified_anchor_digest="a" * 64, bias="neutral",
+            summary="verified technical"),
+        "pv.microstructure": lp.MicrostructureReport(
+            symbol=_SYM, as_of=NOW, l1_spread_bp=2.5,
+            bid_ask_imbalance=0.25, break_ratio=None,
+            whale_net_inflow=None,
+            degradation=("tick_tape_unavailable", "fundflow_unavailable"),
+            narrative="real L1; optional feeds unavailable"),
+        "text.news": lp.NewsDigestReport(
+            as_of=NOW, scope="stock",
+            items=(lp.NewsDigestItem(
+                headline=headline, summary="confirmed event",
+                source_label="fixture", available_at=NOW),)),
+        "text.sentiment": SentimentReport(
+            overall_band=SentimentBand.NEUTRAL, overall_score=5.0,
+            confidence=Confidence.MEDIUM, narrative="balanced"),
+        "dec.bull": lp.BullCase(
+            symbol=_SYM, as_of=NOW, thesis_bullets=("bull",)),
+        "dec.bear": lp.BearCase(
+            symbol=_SYM, as_of=NOW, thesis_bullets=("bear",)),
+        "dec.research_mgr": ResearchPlan(
+            recommendation=PortfolioRating.HOLD, rationale="balanced",
+            strategic_actions=("upgrade if breadth confirms",)),
+        "dec.pm": PortfolioDecision(
+            rating=PortfolioRating.HOLD, executive_summary="hold",
+            investment_thesis="balanced"),
+        "dec.trader": _proposal(tranches=False),
+    }
+
+
+class _QualityPayloadReader:
+    def __init__(self, payloads: dict[str, object]) -> None:
+        self.payloads = dict(payloads)
+
+    def get(self, payload_ref, *, expected_schema_ref=None):
+        payload = self.payloads[str(payload_ref)]
+        assert expected_schema_ref.name == type(payload).__name__
+        return payload
+
+
+class _QualityEventStore:
+    def __init__(self, events: list[object]) -> None:
+        self.events = list(events)
+
+    def journal(self, run_id, lane):
+        assert run_id == "quality-run" and lane == "main"
+        return list(self.events)
+
+
+def _quality_runner(
+    *, payloads: dict[str, object] | None = None,
+    missing_worker: str | None = None,
+    noncompleted_worker: str | None = None,
+    debate_published: bool = True,
+    trigger_news_required: bool = False,
+    trigger_news_digests: tuple[str, ...] = (),
+):
+    payloads = dict(payloads or _quality_payloads())
+    node_runs = []
+    events = []
+    stored = {}
+    for worker_id in DEEP_DECIDE_WORKER_IDS:
+        if worker_id == missing_worker:
+            continue
+        artifact_id = f"artifact-{worker_id}"
+        status = "failed" if worker_id == noncompleted_worker else "completed"
+        node_runs.append(SimpleNamespace(
+            worker_id=worker_id, node_id=f"node-{worker_id}", attempt=1,
+            run_id="quality-run", status=SimpleNamespace(value=status),
+            output_artifact_ids=(artifact_id,)))
+        payload = payloads[worker_id]
+        stored[artifact_id] = payload
+        events.append(SimpleNamespace(
+            event_type=EventType.ARTIFACT_STAGED,
+            correlation_id=artifact_id, payload_ref=artifact_id,
+            payload_schema_ref=SchemaRef(
+                name=type(payload).__name__, version="1")))
+    recorder = SimpleNamespace(
+        node_runs=tuple(node_runs),
+        debate_transcripts=(
+            {"bullbear": object()} if debate_published else {}))
+    stores = SimpleNamespace(
+        events=_QualityEventStore(events),
+        payloads=_QualityPayloadReader(stored))
+    return live_decide._DeepQualityRunner(
+        lambda **_kw: None, {"current": recorder}, stores=stores,
+        trigger_news_required=trigger_news_required,
+        trigger_news_digests=trigger_news_digests)
+
+
+# =========================================================================== #
+# 0. fail-closed ten-seat quality semantics (pure; no catalog fixture)         #
+# =========================================================================== #
+class TestTenSeatQualityGate:
+    def test_complete_l1_with_only_named_optional_warnings_is_full(self):
+        quality = _quality_runner().quality_report()
+        assert quality["level"] == "full"
+        assert quality["graph_complete"] is True
+        assert quality["portfolio_rating"] == "Hold"
+        assert quality["evidence_warnings"] == {
+            "pv.microstructure": [
+                "tick_tape_unavailable", "fundflow_unavailable"]}
+
+    def test_missing_l1_core_is_degraded_even_when_all_nodes_completed(self):
+        payloads = _quality_payloads()
+        payloads["pv.microstructure"] = lp.MicrostructureReport(
+            symbol=_SYM, as_of=NOW, l1_spread_bp=None,
+            bid_ask_imbalance=None, break_ratio=None,
+            whale_net_inflow=None,
+            degradation=("orderbook_unavailable",),
+            narrative="no L1")
+        quality = _quality_runner(payloads=payloads).quality_report()
+        assert quality["graph_complete"] is True
+        assert quality["level"] == "degraded"
+        assert quality["evidence_issues"]["pv.microstructure"] == (
+            "microstructure_l1_evidence_missing")
+
+    def test_trigger_news_digest_must_be_consumed_by_the_committed_news_report(self):
+        quality = _quality_runner(
+            trigger_news_required=True,
+            trigger_news_digests=(content_digest("另一条未消费标题"),),
+        ).quality_report()
+        assert quality["level"] == "degraded"
+        assert quality["evidence_issues"]["text.news"] == (
+            "trigger_news_not_consumed")
+
+    def test_matching_trigger_news_digest_can_clear_the_quality_gate(self):
+        headline = "重大订单落地"
+        quality = _quality_runner(
+            payloads=_quality_payloads(headline=headline),
+            trigger_news_required=True,
+            trigger_news_digests=(content_digest(headline),),
+        ).quality_report()
+        assert quality["level"] == "full"
+        assert "text.news" not in quality["evidence_issues"]
+
+    @pytest.mark.parametrize(
+        "case,kwargs,expected",
+        [
+            ("missing", {"missing_worker": "dec.bear"},
+             ("missing_workers", "dec.bear")),
+            ("noncompleted", {"noncompleted_worker": "dec.bull"},
+             ("noncompleted_workers", "dec.bull")),
+            ("debate", {"debate_published": False},
+             ("debate_published", False)),
+        ],
+    )
+    def test_graph_completeness_is_not_inferred_from_sink_success(
+            self, case, kwargs, expected):
+        quality = _quality_runner(**kwargs).quality_report()
+        assert quality["level"] == "degraded", case
+        assert quality["graph_complete"] is False
+        key, value = expected
+        if isinstance(quality[key], (list, dict)):
+            assert value in quality[key]
+        else:
+            assert quality[key] is value
+
+    def test_unknown_committed_pm_rating_is_degraded_and_cannot_map_direction(self):
+        payloads = _quality_payloads()
+        payloads["dec.pm"] = SimpleNamespace(rating="StrongBuy")
+        quality = _quality_runner(payloads=payloads).quality_report()
+        assert quality["level"] == "degraded"
+        assert quality["evidence_issues"]["dec.pm"] == (
+            "portfolio_rating_missing_or_unknown")
+        with pytest.raises(live_decide.DeepDecideError, match="unsupported"):
+            live_decide._direction_from_portfolio_rating("StrongBuy")
+
+    @pytest.mark.parametrize(
+        "rating,direction",
+        [
+            (PortfolioRating.BUY, "买入"),
+            (PortfolioRating.OVERWEIGHT, "买入"),
+            (PortfolioRating.HOLD, "观望"),
+            (PortfolioRating.UNDERWEIGHT, "卖出"),
+            (PortfolioRating.SELL, "卖出"),
+        ],
+    )
+    def test_every_reviewed_pm_rating_has_one_explicit_direction(
+            self, rating, direction):
+        assert live_decide._direction_from_portfolio_rating(rating) == direction
+
+
 # =========================================================================== #
 # 1. happy deep path                                                           #
 # =========================================================================== #
@@ -532,7 +746,9 @@ class TestHappyDeepPath:
     @pytest.fixture()
     def run(self, tmp_path, heavy):
         env = _build_env(tmp_path, heavy)
-        fast = _make_fast(env, _fast_result("300750"))
+        # Deliberately oppose the scripted quality report's committed PM Buy so
+        # the persisted baseline and deep verdict cannot pass by aliasing.
+        fast = _make_fast(env, _fast_result("300750", direction="卖出"))
         decide = make_orchestrated_decide(
             fast_decide=fast,
             bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT)))
@@ -564,6 +780,12 @@ class TestHappyDeepPath:
              "stop_loss_pct": 0.08, "take_profit_pct": 0.18}]
         assert rec["cash_weight"] == 0.75
         assert rec["triggers"] == ["opt_in"]
+        assert rec["rating"] == "Buy"
+        assert rec["direction"] == "买入"
+        assert rec["baseline_direction"] == "卖出"
+        assert rec["baseline_confidence"] == 70
+        assert rec["confidence_band"] == "medium"
+        assert "confidence" not in rec
         # only-if-present convention: no None / empty-string values ever land.
         assert all(v not in (None, "") for v in rec.values())
 
@@ -600,7 +822,7 @@ class TestHappyDeepPath:
 
     def test_every_llm_request_carries_the_subject_closed_assembler(self, run):
         """E2b: the per-run assembler owns prompt construction — every verified
-        prompt record names it, cites the committed RunSubject@1 digest in the
+        prompt record names it, cites the committed RunSubject@2 digest in the
         trusted channel, and the rendered subject block carries the code."""
         gateways = run.env.gateway_factory.gateways
         assert len(gateways) == 1
@@ -623,7 +845,7 @@ class TestHappyDeepPath:
 
     #: the plan-side/admission evidence the "code-free journal" claim covers —
     #: worker OUTPUT artifacts are excluded (their payloads legitimately carry
-    #: symbols the model wrote), and ``RunSubject@1`` is the ONE sanctioned carrier.
+    #: symbols the model wrote), and ``RunSubject@2`` is the ONE sanctioned carrier.
     _PLAN_SIDE_SCHEMAS = (
         "Plan@1", "AdmissionCandidate@1", "PlanValidationReport@1",
         "RuntimeSupportReport@1", "PlanAdmitted@1", "PlanApproval@1",
@@ -634,7 +856,7 @@ class TestHappyDeepPath:
         """Task 6's invariant is preserved through the runner: the admitted plan
         and every piece of its admission/prompt evidence carry NO six-digit code
         — the subject reaches the model exclusively through the per-run
-        assembler channel, anchored by the ONE committed ``RunSubject@1``."""
+        assembler channel, anchored by the ONE committed ``RunSubject@2``."""
         env = run.env
         # test-side read of the in-memory payload map (no public listing exists);
         # pydantic's own serialization covers every stored contract model.
@@ -649,7 +871,7 @@ class TestHappyDeepPath:
         assert stored_by_schema.get("PromptAssemblyRecord@1")
         # the fixture code appears in NO persisted payload except the subject.
         for schema_key, entries in stored_by_schema.items():
-            if schema_key == "RunSubject@1":
+            if schema_key == "RunSubject@2":
                 continue
             for stored in entries:
                 assert "300750" not in _blob(stored), schema_key
@@ -661,7 +883,7 @@ class TestHappyDeepPath:
                 assert re.search(r'"\d{6}"', blob) is None, (schema_key, blob)
         # and the subject really IS committed — carried, not implied.
         assert any("300750" in _blob(s)
-                   for s in stored_by_schema.get("RunSubject@1", ()))
+                   for s in stored_by_schema.get("RunSubject@2", ()))
         # the frozen-plan event exists on the run journal (the original check).
         rows = env.stores.events.journal(run.out["run_id"], "main")
         assert any(e.event_type == EventType.PLAN_FROZEN for e in rows)
@@ -703,14 +925,15 @@ class TestSubjectParamsRunnerThreading:
         # the materializer received THE committed subject — the object whose
         # semantic digest the committed ref binds (the digest bond the
         # materializer re-verifies).
-        assert isinstance(kw["subject"], RunSubject)
+        assert isinstance(kw["subject"], DeepRunSubject)
         assert kw["subject"].code == "300750"
         assert (kw["subject"].semantic_digest()
                 == kw["subject_ref"].payload_ref.content_digest)
         # the stamp is non-None and IS the ONE recipe over that subject.
         assert materialized.subject_params is not None
         assert materialized.subject_params == SubjectParams.project(
-            code="300750", as_of=kw["subject"].as_of)
+            code="300750", as_of=kw["subject"].as_of,
+            evidence_tf=kw["subject"].evidence_tf)
         # ONE-recipe provenance (m3): the runner factory received THE stamped
         # object by identity — a value-equal fresh projection is NOT enough.
         assert env.runner_subject_params == [materialized.subject_params]
@@ -796,10 +1019,256 @@ class TestPassthrough:
         assert "deep_attempted" not in out
 
 
+class TestAssignmentThinkingModeSemantics:
+    """The watcher assignment is eligibility; only events fire the deep lane."""
+
+    @staticmethod
+    def _assigned_payload(mode: str) -> dict:
+        return {
+            **_payload("300750"),
+            "assignment_revision": "assign-r1",
+            "thinking_mode": mode,
+            "mode": mode,
+        }
+
+    def test_fast_assignment_never_enters_deep_even_with_an_event_and_legacy_flag(
+            self, tmp_path, heavy):
+        env = _build_env(tmp_path, heavy, lease=False)
+        _seed_flip(env, "300750")
+        fast_result = _fast_result("300750")
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, fast_result),
+            bindings=_bindings(
+                env, heavy, strat_fn=lambda _sid: dict(_OPT_IN_STRAT)))
+        out = decide(self._assigned_payload("fast"))
+        assert out == fast_result
+        assert env.runner_subject_params == []
+
+    def test_deep_assignment_without_an_event_does_not_enter(self, tmp_path, heavy):
+        env = _build_env(tmp_path, heavy, lease=False)
+        fast_result = _fast_result("300750")
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, fast_result),
+            bindings=_bindings(
+                env, heavy, strat_fn=lambda _sid: dict(_OPT_IN_STRAT)))
+        out = decide(self._assigned_payload("deep"))
+        assert out == fast_result
+        assert env.runner_subject_params == []
+        assert env.fast_payloads[-1]["mode"] == "fast"
+
+    def test_deep_assignment_enters_only_when_a_real_event_fires(
+            self, tmp_path, heavy):
+        env = _build_env(tmp_path, heavy, lease=False)
+        _seed_flip(env, "300750")
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(
+                env, heavy, strat_fn=lambda _sid: dict(_OPT_IN_STRAT)))
+        out = decide(self._assigned_payload("deep"))
+        assert out["deep_attempted"] is True
+        assert out["deep_outcome"] == "no_lease"
+        assert out["run_id"]
+        assert env.fast_payloads[-1]["mode"] == "fast"
+
+    def test_only_a_caller_without_assignment_identity_may_use_legacy_opt_in(
+            self, tmp_path, heavy):
+        env = _build_env(tmp_path, heavy, lease=False)
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(
+                env, heavy, strat_fn=lambda _sid: dict(_OPT_IN_STRAT)))
+        out = decide(_payload("300750"))
+        assert out["deep_attempted"] is True
+        assert out["deep_outcome"] == "no_lease"
+        assert out["run_id"]
+
+
 # =========================================================================== #
 # 4. degradation matrix — every deep failure returns the fast result           #
 # =========================================================================== #
 class TestDegradedHonest:
+    def test_no_dedicated_authorization_repeated_ticks_do_zero_precapture(
+            self, tmp_path, heavy):
+        env = _build_env(tmp_path, heavy)
+        reserve_calls: list[str] = []
+        capture_calls: list[dict] = []
+
+        def no_authorization(*, run_identity, **_kwargs):
+            reserve_calls.append(run_identity["run_id"])
+            return None
+
+        def forbidden_capture(**kwargs):
+            capture_calls.append(kwargs)
+            raise AssertionError("unauthorized tick reached live pre-capture")
+
+        before = len(env.stores._shared.backend.payloads)
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(
+                env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT),
+                reserve_plan=no_authorization,
+                refresh_snapshot_fn=forbidden_capture))
+        first = decide(_payload("300750"))
+        second = decide(_payload("300750"))
+
+        assert [first["deep_outcome"], second["deep_outcome"]] == [
+            "no_lease", "no_lease"]
+        assert len(reserve_calls) == 2
+        assert reserve_calls[0] == reserve_calls[1]
+        assert capture_calls == []
+        assert len(env.stores._shared.backend.payloads) == before
+
+    def test_dedicated_reservation_precedes_one_capture_and_is_reused_by_phase2(
+            self, tmp_path, heavy):
+        """One reservation owns capture, Phase-2 approval and final settlement.
+
+        This is the formal integration pin for the production seam: no second
+        consume, no generic watcher-pool charge, and a completed replay performs
+        none of the resource-bearing steps again.
+        """
+        env = _build_env(tmp_path, heavy)
+        order: list[str] = []
+        consumed: list[dict] = []
+        settled: list[dict] = []
+        released: list[dict] = []
+
+        class _AuthorizationStore:
+            def now(self):
+                return NOW
+
+            def consume(self, **kwargs):
+                order.append("reserve")
+                consumed.append(dict(kwargs))
+                return SimpleNamespace(
+                    **kwargs, reservation_id="watch-deep-res-1",
+                    authorization_id="watch-deep-auth-1",
+                    newly_reserved=True)
+
+            def settle(self, reservation_id, **kwargs):
+                order.append("settle")
+                settled.append({"reservation_id": reservation_id, **kwargs})
+
+            def release(self, reservation_id, **kwargs):
+                order.append("release")
+                released.append({"reservation_id": reservation_id, **kwargs})
+
+        auth_store = _AuthorizationStore()
+
+        def reserve(**kwargs):
+            return live_decide._reserve_watch_deep_production(
+                authorization_store=auth_store, **kwargs)
+
+        def capture(**_kwargs):
+            order.append("capture")
+            return env.context, env.ctx_ref
+
+        def authorize(**kwargs):
+            order.append("authorize")
+            return live_decide._authorize_watch_deep_production(
+                authorization_store=auth_store, **kwargs)
+
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(
+                env, heavy, strat_fn=lambda _sid: dict(_OPT_IN_STRAT),
+                reserve_plan=reserve, refresh_snapshot_fn=capture,
+                authorize_plan=authorize,
+                pattern_hits_fn=lambda _code, _fast: ("pattern-x",)))
+        payload = {
+            **_payload("300750"), "assignment_revision": 1,
+            "thinking_mode": "deep", "mode": "deep",
+        }
+        first = decide(payload)
+
+        assert first["deep_outcome"] == "completed"
+        assert order == ["reserve", "capture", "authorize", "settle"]
+        assert len(consumed) == 1
+        # Reserve the v2 worst case (Technical/News have one extra cycle), then
+        # settle only the eight primary calls actually made on this clean run.
+        assert consumed[0]["requested_llm_invocations"] == 20
+        assert settled == [{
+            "reservation_id": "watch-deep-res-1",
+            "actual_llm_invocations": 8,
+            "outcome": "deep_runner_entered",
+            "detail": "settled after runner invocation",
+            "settled_at": NOW,
+        }]
+        assert released == []
+        assert env.noted == []  # dedicated budget; never double-charge fast's 24 pool
+
+        again = decide(payload)
+        assert again["deep_outcome"] == "completed"
+        assert again["deep_replayed"] is True
+        assert order == ["reserve", "capture", "authorize", "settle"]
+        assert len(consumed) == 1
+
+    def test_production_precapture_locator_is_o1_typed_and_fail_closed(
+            self, tmp_path, heavy):
+        from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+        from guanlan_v2.orchestration.data.source import build_raw_fetch
+
+        env = _build_env(tmp_path, heavy)
+        surface = phase3_data_surface()
+        request_digest = "1" * 64
+        raw = build_raw_fetch(
+            request_digest=request_digest,
+            source_ref=surface.source_ref,
+            capability_ref=surface.spec_by_method["indicators"].capability_ref,
+            candidates=(), subsource="tdx_realtime_quote", fetched_at=NOW,
+            provider_request_id=None)
+        schema_ref = SchemaRef(name="RawFetch", version="1")
+        ref = env.stores.payloads.put(
+            schema_ref, raw, registry_digest=env.rt_digest,
+            namespace="audit",
+            idempotency_key=f"deep-indicator-raw:{request_digest}")
+
+        recovered = live_decide._precaptured_indicator_lookup_production(
+            stores=env.stores, registry_digest=env.rt_digest,
+            request_digest=request_digest)
+        assert recovered is not None
+        recovered_ref, loader = recovered
+        assert recovered_ref == ref
+        assert loader(recovered_ref) == raw
+        assert live_decide._precaptured_indicator_lookup_production(
+            stores=env.stores, registry_digest=env.rt_digest,
+            request_digest="2" * 64) is None
+
+        # A torn durable idempotency locator cannot degrade into a scan or a
+        # vendor retry: it is a typed hard refusal.
+        env.stores._shared.backend.payload_idem[
+            f"deep-indicator-raw:{request_digest}"] = "missing-object"
+        with pytest.raises(Exception, match="names no payload"):
+            live_decide._precaptured_indicator_lookup_production(
+                stores=env.stores, registry_digest=env.rt_digest,
+                request_digest=request_digest)
+
+    def test_precapture_idempotency_key_cannot_bind_conflicting_bytes(
+            self, tmp_path, heavy):
+        from guanlan_v2.orchestration.budget import IdempotencyConflict
+        from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+        from guanlan_v2.orchestration.data.source import build_raw_fetch
+
+        env = _build_env(tmp_path, heavy)
+        surface = phase3_data_surface()
+        request_digest = "3" * 64
+        common = {
+            "request_digest": request_digest,
+            "source_ref": surface.source_ref,
+            "capability_ref": surface.spec_by_method["indicators"].capability_ref,
+            "candidates": (), "fetched_at": NOW, "provider_request_id": None,
+        }
+        first = build_raw_fetch(subsource="tdx_realtime_quote", **common)
+        conflicting = build_raw_fetch(subsource="tdx_orderbook", **common)
+        schema_ref = SchemaRef(name="RawFetch", version="1")
+        idem = f"deep-indicator-raw:{request_digest}"
+        env.stores.payloads.put(
+            schema_ref, first, registry_digest=env.rt_digest,
+            namespace="audit", idempotency_key=idem)
+        with pytest.raises(IdempotencyConflict):
+            env.stores.payloads.put(
+                schema_ref, conflicting, registry_digest=env.rt_digest,
+                namespace="audit", idempotency_key=idem)
+
     def test_pending_human_falls_back_no_lease(self, tmp_path, heavy):
         env = _build_env(tmp_path, heavy, lease=False)  # no lease in the journal
         fast_result = _fast_result("300750")
@@ -869,7 +1338,7 @@ class TestDegradedHonest:
 
         subjects_before = sum(
             1 for s in dict(env.stores._shared.backend.payloads).values()
-            if s.schema_key == "RunSubject@1")
+            if s.schema_key == "RunSubject@2")
         fast_result = _fast_result("300750")
         out = make_orchestrated_decide(
             fast_decide=_make_fast(env, fast_result),
@@ -890,7 +1359,7 @@ class TestDegradedHonest:
         # …and nothing downstream of the pre-flight ran either: the run subject
         # is committed AFTER it, and the runner is never constructed.
         assert sum(1 for s in dict(env.stores._shared.backend.payloads).values()
-                   if s.schema_key == "RunSubject@1") == subjects_before
+                   if s.schema_key == "RunSubject@2") == subjects_before
         assert env.runner_subject_params == []
         assert _decide_rows(env) == [] and env.noted == []
 
@@ -1095,10 +1564,55 @@ class TestIdempotentReTick:
         assert second.get("deep_replayed") is True
         assert second.get("run_id") == first["run_id"]
         assert len(_decide_rows(env)) == 1      # ONE orchestrated row, ever
-        assert env.noted == [8]                 # note_llm_use exactly once per run
+        assert env.noted == [8]  # clean path: eight primaries, no schema repair
         # the scripted gateway was not re-invoked for the replay.
         total = sum(len(g.records) for g in env.gateway_factory.gateways)
         assert total == 8
+
+    def test_a_deep_attempt_audit_row_is_never_replayed_as_completed(
+            self, tmp_path, heavy):
+        env = _build_env(tmp_path, heavy)
+        real_factory = env.plan_runner_factory
+        constructions: list[str] = []
+
+        def degraded_factory(**kwargs):
+            constructions.append(kwargs["request_id"])
+            inner = real_factory(**kwargs)
+
+            class _ForcedDegraded:
+                def __call__(self, **call_kwargs):
+                    return inner(**call_kwargs)
+
+                def quality_report(self):
+                    return {
+                        "level": "degraded", "graph_complete": False,
+                        "debate_published": True,
+                        "missing_workers": ["pv.microstructure"],
+                        "noncompleted_workers": {},
+                        "node_summaries": [{
+                            "name": "pv.microstructure", "status": "missing",
+                            "summary": "critical evidence unavailable"}],
+                    }
+
+            return _ForcedDegraded()
+
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("002415")),
+            bindings=_bindings(
+                env, heavy, strat_fn=lambda _sid: dict(_OPT_IN_STRAT),
+                plan_runner=degraded_factory))
+        first = decide(_payload("002415"))
+        assert first["deep_outcome"] == "degraded"
+        assert [kind for kind, _ in env.persisted] == ["deep_attempt"]
+        assert len(constructions) == 1
+
+        second = decide(_payload("002415"))
+        assert second["run_id"] == first["run_id"]
+        assert second["deep_replayed"] is True
+        assert second["deep_outcome"] == "degraded"
+        assert second["deep_outcome"] != "completed"
+        assert len(constructions) == 1
+        assert [kind for kind, _ in env.persisted] == ["deep_attempt"]
 
 
 # =========================================================================== #
@@ -1622,7 +2136,10 @@ class TestRedLines:
         assert '"trade"' not in source and "'trade'" not in source
         # the only persist kinds this module ever emits:
         kinds = set(re.findall(r"persist_decision\(\s*['\"](\w+)['\"]", source))
-        assert kinds <= {"decide", "order"}
+        # ``deep_attempt`` is an audit-only, non-decision timeline carrier for
+        # a quality-degraded graph. It never enters K-line/latest-direction
+        # semantics and cannot place an order.
+        assert kinds <= {"decide", "order", "deep_attempt"}
 
     def test_module_top_level_imports_stay_inside_orchestration(self):
         source = Path(live_decide.__file__).read_text(encoding="utf-8")
@@ -1898,16 +2415,16 @@ class TestSurfaces:
         card = reader.list_pending()[0]
         assert card.preset_id == DEEP_DECIDE_PRESET_ID
         assert card.preset_record_digest == heavy.record.semantic_digest()
-        assert card.budget_request_llm_invocations == 8
+        assert card.budget_request_llm_invocations == 20
+        assert card.budget_request_tokens == 851_968
 
     def test_the_subject_assembler_refuses_a_trusted_name_collision(self, heavy):
-        from guanlan_v2.orchestration.pipeline.contracts import RunSubject
         from guanlan_v2.orchestration.refs import TypedPayloadRef
         from guanlan_v2.orchestration.runtime_contracts import NamedEvidenceDigest
 
-        subject = RunSubject(code="300750", as_of=NOW)
+        subject = DeepRunSubject(code="300750", as_of=NOW, evidence_tf="day")
         ref = TypedPayloadRef(
-            schema_ref=SchemaRef(name="RunSubject", version="1"),
+            schema_ref=SchemaRef(name="RunSubject", version="2"),
             payload_ref=PayloadRef(namespace="main", object_id="subj-x",
                                    content_digest="a" * 64))
         assembler = SubjectPromptAssembler(subject=subject, subject_ref=ref)
@@ -1923,12 +2440,11 @@ class TestSurfaces:
     def test_the_subject_assembler_binding_verifies_end_to_end(self, heavy):
         """The assembled request passes the shared reviewed rehash-refusal —
         i.e. the per-run assembler produces a REAL, verifiable prompt binding."""
-        from guanlan_v2.orchestration.pipeline.contracts import RunSubject
         from guanlan_v2.orchestration.refs import TypedPayloadRef
 
-        subject = RunSubject(code="300750", as_of=NOW)
+        subject = DeepRunSubject(code="300750", as_of=NOW, evidence_tf="day")
         ref = TypedPayloadRef(
-            schema_ref=SchemaRef(name="RunSubject", version="1"),
+            schema_ref=SchemaRef(name="RunSubject", version="2"),
             payload_ref=PayloadRef(namespace="main", object_id="subj-x",
                                    content_digest="a" * 64))
         assembler = SubjectPromptAssembler(subject=subject, subject_ref=ref)
@@ -1964,12 +2480,11 @@ class TestSurfaces:
         from guanlan_v2.orchestration.pipeline.assembly import (
             SeatOutputNormalizingGateway,
         )
-        from guanlan_v2.orchestration.pipeline.contracts import RunSubject
         from guanlan_v2.orchestration.refs import TypedPayloadRef
 
-        subject = RunSubject(code="300750", as_of=NOW)
+        subject = DeepRunSubject(code="300750", as_of=NOW, evidence_tf="day")
         ref = TypedPayloadRef(
-            schema_ref=SchemaRef(name="RunSubject", version="1"),
+            schema_ref=SchemaRef(name="RunSubject", version="2"),
             payload_ref=PayloadRef(namespace="main", object_id="subj-x",
                                    content_digest="a" * 64))
         assembler = SubjectPromptAssembler(subject=subject, subject_ref=ref)
@@ -2098,7 +2613,8 @@ class TestReducedEvidenceDeepLane:
         assert card.preset_id == REDUCED_DEEP_DECIDE_PRESET_ID
         assert card.preset_record_digest == heavy.presets.get(
             REDUCED_DEEP_DECIDE_PRESET_ID).semantic_digest()
-        assert card.budget_request_llm_invocations == 6
+        assert card.budget_request_llm_invocations == 12
+        assert card.budget_request_tokens == 393_216
         assert card.node_count == 8
         assert "pv.technical" not in card.worker_ids
         assert "text.news" not in card.worker_ids
@@ -2124,7 +2640,8 @@ class TestReducedEvidenceDeepLane:
         card = reader.list_pending()[0]
         assert card.preset_id == DEEP_DECIDE_PRESET_ID
         assert card.node_count == 10
-        assert card.budget_request_llm_invocations == 8
+        assert card.budget_request_llm_invocations == 20
+        assert card.budget_request_tokens == 851_968
         assert REDUCED_EVIDENCE_BADGE not in card.rendered_md
 
     def test_the_default_binding_still_means_the_ten_node_preset(self):
@@ -2265,11 +2782,14 @@ class TestInterNodeInlining:
         channel, _ = self._channel_of(run.gw, "sentiment")
         assert W.TRUSTED_UPSTREAM_SECTION not in channel
 
-    def test_a_failed_upstream_is_stated_absent_never_omitted(
+    def test_a_failed_critical_upstream_blocks_downstream_and_never_publishes_full(
             self, tmp_path, heavy):
-        """Ruling 1's own wording: an empty question must never masquerade as a
-        complete one. A FAILED aux upstream (its DEGRADE edge dropped) is
-        STATED as absent in the downstream prompt."""
+        """The full preset has no decorative evidence edges anymore.
+
+        A failed technical seat blocks bull/bear, RM, PM and Trader.  The deep
+        attempt is reported failed while the fast result remains authoritative;
+        no downstream model receives an apparently complete prompt.
+        """
         env = _build_env(tmp_path, heavy, fail=frozenset({"pv.technical"}))
         fast = _make_fast(env, _fast_result("300750"))
         out = make_orchestrated_decide(
@@ -2277,13 +2797,15 @@ class TestInterNodeInlining:
             bindings=_bindings(env, heavy,
                                strat_fn=lambda sid: dict(_OPT_IN_STRAT)))(
             _payload("300750"))
-        assert out["deep_outcome"] == "completed"
-        channel, _ = self._channel_of(env.gateway_factory.gateways[0], "bull-r1")
-        blocks = self._blocks_of(channel)
-        tech = blocks["technical"]
-        assert tech["status"] == "absent"
-        assert tech["artifact_digest"] is None
-        assert tech["content"] == W.TRUSTED_UPSTREAM_ABSENT_TEXT
-        # the satisfied siblings still arrive as real content beside the absence.
-        assert blocks["sentiment"]["status"] == "present"
-        assert "Balanced flow, mild caution." in blocks["sentiment"]["content"]
+        assert out["deep_outcome"] == "failed"
+        assert out["direction"] == "买入"  # the unchanged fast baseline
+        attempted = {
+            record.node_id
+            for gateway in env.gateway_factory.gateways
+            for record in gateway.records
+        }
+        assert "technical" in attempted
+        assert not attempted.intersection(
+            {"bull-r1", "bear-r1", "research-mgr", "pm", "trader"}
+        )
+        assert _decide_rows(env) == []

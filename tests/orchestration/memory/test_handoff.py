@@ -139,7 +139,11 @@ def test_console_memory_writer_and_curator_interfaces():
     from guanlan_v2.console import curator
 
     sig = inspect.signature(tools.memory_write_impl)
-    assert list(sig.parameters) == ["text", "scope", "key"]
+    # ``subject_code`` is the caller echo used by the workspace-memory trust
+    # boundary.  It is optional for the legacy global/session scopes, while a
+    # workspace write fails closed unless it matches the server-bound subject.
+    assert list(sig.parameters) == ["text", "scope", "key", "subject_code"]
+    assert sig.parameters["subject_code"].default == ""
     assert callable(curator.is_keyed_line) and callable(curator.classify_lines)
     assert curator.is_keyed_line("- [2026-07-17] (pref) keep this")
     assert not curator.is_keyed_line("- [2026-07-17] ephemeral note")

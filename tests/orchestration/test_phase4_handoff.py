@@ -157,7 +157,7 @@ PHASE3_FULL_REGISTRY_DIGEST_FROZEN = (
     "ff2a56d283499e347dcdbf4c2f5c5977710fd5575afbc94ee34819b2b531e49d"
 )
 PHASE3_FULL_CATALOG_DIGEST_FROZEN = (
-    "0601eef771be221dbc203c56849f357b277d213a6b00274ee94aeaf70725b231"
+    "04ce0696e26d65f4acbde3e33a54be6b2171e87ad16951d008ffe36b8fa3fb5c"
 )
 
 #: The 11 Phase 1 amended registry schema keys (order-independent).
@@ -384,10 +384,15 @@ def test_point6_research_loop_gate_surface_is_intact():
 
 def test_point6_run_graph_and_metrics_of_terminal_shapes_are_intact():
     params = inspect.signature(workflow_executor.run_graph).parameters
-    assert list(params) == ["graph", "overrides", "on_node", "prefer_model_terminal"]
+    assert list(params) == [
+        "graph", "overrides", "on_node", "prefer_model_terminal",
+        "artifact_sink", "allow_diagnostic_result",
+    ]
     assert params["overrides"].default is None
     assert params["on_node"].default is None
     assert params["prefer_model_terminal"].default is False
+    assert params["artifact_sink"].default is None
+    assert params["allow_diagnostic_result"].default is False
     # metrics_of_terminal projects the frozen six-key shape.
     assert set(workflow_executor.metrics_of_terminal({})) == {
         "rank_ic", "sharpe", "ann_return", "oos_verdict", "n_dates", "factor",

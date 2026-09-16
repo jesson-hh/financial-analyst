@@ -124,7 +124,7 @@ EXPECTED = {
         output="PriceActionFeatureReport", read_categories=("market_data",),
         inputs=(), persona="Price-action geometry reader"),
     "pv.technical": dict(
-        kind="llm", tier="reader", model_tier="reasoner", tool_calls="required",
+        kind="llm", tier="reader", model_tier="fast", tool_calls="required",
         # L3 D-1 Option A (2026-08-11): NARROWED from
         # ("cap.data.indicators", "cap.data.verified_snapshot"). ``indicators``
         # was measured to have NO registered backend adapter (ledger §5) AND to
@@ -456,11 +456,13 @@ def test_microstructure_handler_degrades_honestly_for_absent_feeds():
         symbol=_SYM, as_of=_NOW, narrative="degraded", **out)
     assert rep.degradation and rep.l1_spread_bp is None
     # a present L1 book yields real spread/imbalance and NO l1 degradation row
-    book = {"bid": 9.98, "ask": 10.02, "bid_vol": 1200.0, "ask_vol": 800.0}
+    book = {"bid1": 9.98, "ask1": 10.02}
+    book.update({f"bid_vol{i}": 240.0 for i in range(1, 6)})
+    book.update({f"ask_vol{i}": 160.0 for i in range(1, 6)})
     out2 = handler.project(l1_book=book, ticks=None, tape=None)
     assert out2["l1_spread_bp"] is not None and out2["bid_ask_imbalance"] is not None
     assert not any("order book" in d.lower() for d in out2["degradation"])  # l1 present ⇒ no l1 row
-    assert out2["bid_ask_imbalance"] == pytest.approx(0.2)  # (1200-800)/2000
+    assert out2["bid_ask_imbalance"] == pytest.approx(0.2)  # five-level 1200/800
 
 
 # --------------------------------------------------------------------------- #

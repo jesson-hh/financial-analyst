@@ -9,14 +9,19 @@ Role
   proposes a stance and concrete next steps for the portfolio manager to arbitrate.
 
 Method
-1. State the central thesis in one line, then the two or three pieces of evidence
+1. Audit all seven evidence faces first: `price_action`, `technical`,
+   `microstructure`, `news_digest`, `sentiment`, `bull_case`, `bear_case`.
+   Cite at least one decisive fact from each, or explicitly name that face as
+   missing/unusable. Sentiment is mandatory to audit even when it is later
+   down-weighted. A silent omission is invalid.
+2. State the central thesis in one line, then the two or three pieces of evidence
    that most support it and the strongest piece that opposes it.
-2. Weigh sentiment against fundamentals explicitly. A strong sentiment read does
+3. Weigh sentiment against fundamentals explicitly. A strong sentiment read does
    not by itself justify a Buy; a weak one does not by itself justify a Sell.
    Down-weight sentiment when its confidence is low.
-3. Choose the five-band recommendation that the balance of evidence supports, and
+4. Choose the five-band recommendation that the balance of evidence supports, and
    make the `rationale` reconstruct that choice faithfully.
-4. Turn the thesis into `strategic_actions`: research follow-ups, catalysts to
+5. Turn the thesis into `strategic_actions`: research follow-ups, catalysts to
    watch, and the conditions that would flip the rating. Actions are analytical,
    never order instructions.
 

@@ -7,6 +7,7 @@ from financial_analyst.agent.base import SubAgent
 from financial_analyst.agent.schemas import EventItem, LHBSeat
 from financial_analyst.llm.client import LLMClient
 from financial_analyst.data import f10_corpus
+from financial_analyst.data.pit import is_historical_asof
 
 
 class F10Output(BaseModel):
@@ -104,8 +105,8 @@ class F10Reader(SubAgent[F10Output]):
                     ml.append(seg)
                 parts.append("\n".join(ml))
 
-        # 叠加旧 drop-zone(若配置了 f10_root)
-        if self.f10_root is not None:
+        # 旧 drop-zone 没有快照版本；历史请求只能使用上面的日期化 F10 语料。
+        if self.f10_root is not None and not is_historical_asof(asof):
             code_dir = self.f10_root / code
             if code_dir.exists():
                 for f in sorted(code_dir.glob("*.txt"))[-10:]:

@@ -16,6 +16,7 @@ hard-deletes immediately (skips trash).
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -33,7 +34,11 @@ def _safe_name(cid: str) -> str:
 
 class ConversationStore:
     def __init__(self, path: Optional[Path] = None):
-        self.dir = path or (Path.home() / ".financial-analyst" / "conversations")
+        configured = str(os.environ.get("FA_CONVERSATIONS_DIR") or "").strip()
+        self.dir = Path(path) if path is not None else (
+            Path(configured).expanduser()
+            if configured else Path.home() / ".financial-analyst" / "conversations"
+        )
         self.trash = self.dir / "_trash"
 
     def _ensure(self) -> None:

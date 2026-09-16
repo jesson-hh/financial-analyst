@@ -332,7 +332,7 @@ def main():
         raise ValueError("Frozen experiment plan hash changed; do not rank a changed experiment")
     plan = json.loads(plan_bytes)
     receipts = json.loads((OUT / "workflow_receipts.json").read_text(encoding="utf-8"))
-    store = HistoryArtifactStore(Path("G:/guanlan-v2/.data/workflows/_history"))
+    store = HistoryArtifactStore(ROOT / ".data" / "workflows" / "_history")
     first, last = plan["common"]["sample"]["eval_start"], plan["common"]["sample"]["eval_end"]
     records = {}
     for variant in plan["variants"]:

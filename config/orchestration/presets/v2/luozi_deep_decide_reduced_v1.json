@@ -3,19 +3,17 @@
   "preset_id": "pipeline.luozi_deep_decide_reduced",
   "version": "1",
   "phase": "main",
-  "description": "观澜 · 落子深度研判预案(减证据版,八节点) — the REDUCED-EVIDENCE deep chain: the sealed ten-node 落子 preset MINUS its two tool-call-REQUIRED evidence readers. 为什么存在:pv.technical 与 text.news 的 evidence_policy.tool_calls=REQUIRED,而审阅过的 Phase-3 数据预取表只授权 dec.pm 一行,所以十节点版在生产上恒被 tool_calls_required_unmet 诚实拒绝——一次 LLM 都调不到;把这两个旁证节点摘掉,同一套 check_runtime_support 即为绿。代价必须被读到:这场辩论从未见过任何技术指标证据(缺 pv.technical),也从未见过任何新闻证据(缺 text.news);它们不是运行时降级失败,是这份预案本身就没有它们。凡由本预案产出的东西(台账行、决策产物、待审卡)一律强制带 reduced_evidence_preset_v1 徽章并写明缺什么。图形:pv.price_action 的价量证据与 text.sentiment 情绪读者喂给一轮 dec.bull <-> dec.bear 辩论(出场序 bull、bear;bear 经 opponent_case 回应 bull 的 BullCase),裁判是唯一的 reasoner_deep 席位 dec.pm,其 PortfolioDecision 抵达唯一终端 dec.trader(PortfolioTargetProposal@1)。pv.microstructure 仍在图里，但它在本预案里喂不到任何人：它的 MicrostructureReport@1 只填 slot.microstructure，而本预案排的任何节点都没有该 schema 的 input——密封目录里唯一的消费者 x.quality_gate 不在本图，所以它是进跑次记录的证据，不是辩论输入，读本预案的人不该指望辩论或裁判看过它。text.sentiment 与 dec.research_mgr 是结构而非装饰:dec.pm 的 sentiment 与 research_plan 输入是 REQUIRED 且二者是其唯一生产者;决策主干 sentiment → research-mgr → pm → trader 与被摘掉的两个节点全无依赖关系,原先指向它们的两条依赖都是 degrade 策略,摘掉不改变其余语义。证据节点与辩论席位是 auxiliary,因为密封目录里 pm/trader 链上没有任何输入接受 BullCase/BearCase,而 reducer 的 DebateTranscript 对 Phase 1 的依赖 schema 检查不可见——辩论经 DebateCfg.judge_node_id 绑定裁判,其回合由 debate.transcript_reducer 折进共享转写槽。图形与代码无关且逐字节冻结:任何节点都不带 params,故一个记录摘要服务所有股票、一份 ApprovalLease 即可绑定,标的以已提交的 RunSubject@1 工件在运行期随计划入场。",
+  "description": "观澜 · 落子深度研判预案（减证据版，八节点）— the supported cheap tier beside the full ten-seat chain. It deliberately omits pv.technical and text.news, so every product must carry the reduced-evidence badge and state that technical-indicator and news evidence were never read. The remaining price-action, microstructure, sentiment and bounded bull/bear outputs are blocking typed inputs to dec.research_mgr; its ResearchPlan feeds dec.pm, whose PortfolioDecision feeds terminal dec.trader. No retained evidence seat is auxiliary decoration. The graph is code-agnostic; the committed RunSubject@2 carries symbol and evidence timeframe beside the plan. The budget reserves six primary LLM calls plus at most one schema-repair call per LLM seat under static-runtime-v2.",
   "nodes": [
     {
       "id": "price-action",
       "worker_id": "pv.price_action",
-      "writes_slot": "slot.price_action",
-      "auxiliary": true
+      "writes_slot": "slot.price_action"
     },
     {
       "id": "microstructure",
       "worker_id": "pv.microstructure",
-      "writes_slot": "slot.microstructure",
-      "auxiliary": true
+      "writes_slot": "slot.microstructure"
     },
     {
       "id": "sentiment",
@@ -26,7 +24,6 @@
       "id": "bull-r1",
       "worker_id": "dec.bull",
       "writes_slot": "slot.bullbear_transcript",
-      "auxiliary": true,
       "debate_id": "bullbear",
       "round_role": "bull",
       "debate_round": 1,
@@ -36,7 +33,7 @@
           "upstream_node_id": "sentiment",
           "artifact_slot": "slot.sentiment",
           "inject_as": "sentiment",
-          "policy": "degrade"
+          "policy": "block"
         }
       ]
     },
@@ -44,7 +41,6 @@
       "id": "bear-r1",
       "worker_id": "dec.bear",
       "writes_slot": "slot.bullbear_transcript",
-      "auxiliary": true,
       "debate_id": "bullbear",
       "round_role": "bear",
       "debate_round": 1,
@@ -60,7 +56,7 @@
           "upstream_node_id": "sentiment",
           "artifact_slot": "slot.sentiment",
           "inject_as": "sentiment",
-          "policy": "degrade"
+          "policy": "block"
         }
       ]
     },
@@ -70,9 +66,33 @@
       "writes_slot": "slot.research_plan",
       "dependencies": [
         {
+          "upstream_node_id": "price-action",
+          "artifact_slot": "slot.price_action",
+          "inject_as": "price_action",
+          "policy": "block"
+        },
+        {
+          "upstream_node_id": "microstructure",
+          "artifact_slot": "slot.microstructure",
+          "inject_as": "microstructure",
+          "policy": "block"
+        },
+        {
           "upstream_node_id": "sentiment",
           "artifact_slot": "slot.sentiment",
           "inject_as": "sentiment",
+          "policy": "block"
+        },
+        {
+          "upstream_node_id": "bull-r1",
+          "artifact_slot": "slot.bullbear_transcript",
+          "inject_as": "bull_case",
+          "policy": "block"
+        },
+        {
+          "upstream_node_id": "bear-r1",
+          "artifact_slot": "slot.bullbear_transcript",
+          "inject_as": "bear_case",
           "policy": "block"
         }
       ]
@@ -136,7 +156,7 @@
       }
     }
   ],
-  "budget_request_tokens": 4500000,
-  "budget_request_llm_invocations": 6,
+  "budget_request_tokens": 393216,
+  "budget_request_llm_invocations": 12,
   "max_concurrency": 4
 }

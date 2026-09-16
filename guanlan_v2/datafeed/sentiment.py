@@ -9,12 +9,15 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import date as _date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-_ROOT = Path(__file__).resolve().parents[2] / "var" / "sentiment"
+_ROOT = Path(os.environ.get("GUANLAN_SENTIMENT_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var" / "sentiment"
+))
 _LOCK = threading.Lock()
 
 _TAG_SCORE = {"利好": 1.0, "中性": 0.0, "利空": -1.0}

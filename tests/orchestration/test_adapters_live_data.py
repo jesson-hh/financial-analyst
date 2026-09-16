@@ -15,9 +15,10 @@ pulled_at>``, WITHOUT pre-filtering by time. The single PIT authority is
 instant, a row whose live ``pulled_at`` is AFTER run start is refused as
 ``FutureDataRefused`` (the freeze is real, not decorative); a missing ``pulled_at``
 is refused as ``MissingAvailabilityRefused`` (no fabricated availability). The
-honesty contract of the facade (caller/mechanical error → ok:False; upstream
-planned/error → ok:True + visible status) is mapped onto the Phase-3 error taxonomy
-and proven both at the adapter boundary and end-to-end through the REAL ``dispatch``.
+honesty contract is a closed exact status machine: ``ok/empty/not_available``
+are data states, ``provider_busy/rate_limited`` are temporary, and everything
+else is structurally broken. It is proven both at the adapter boundary and
+end-to-end through the REAL ``dispatch``.
 
 Tests inject a fake probe (and, where needed, a fake resolve_source); no real
 vendor is ever hit.
@@ -36,12 +37,23 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from guanlan_v2.orchestration.adapters import live_data
+from guanlan_v2.orchestration.adapters.data_world import (
+    PRODUCTION_INDICATORS_FRESHNESS_POLICY_ID,
+    production_data_recipe,
+)
+from guanlan_v2.orchestration.adapters.live_binding import (
+    reviewed_live_binding_snapshot,
+)
 from guanlan_v2.orchestration.adapters.live_data import (
     ONLINE_SOURCE_ID,
+    POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX,
     LiveClientSource,
+    bind_precaptured_indicator_store_lookup,
     build_online_capture_manifest,
     build_online_data_context,
     build_online_live_descriptor,
+    build_precaptured_indicator_fetch,
+    register_precaptured_indicator_fetch,
 )
 from guanlan_v2.orchestration.adapters.replay_data import (
     PIT_REPLAY_SOURCE_ID,
@@ -51,10 +63,13 @@ from guanlan_v2.orchestration.adapters.replay_data import (
 from guanlan_v2.orchestration.context import DataContext
 from guanlan_v2.orchestration.data.calendar import build_trading_calendar
 from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+from guanlan_v2.orchestration.data.runtime_catalog import (
+    reviewed_live_client_adapter_support,
+)
 from guanlan_v2.orchestration.data.errors import (
     FutureDataRefused,
     MissingAvailabilityRefused,
-    NotConfiguredError,
+    RateLimitError,
     RoutingConfigurationError,
     SnapshotMismatchError,
     SourceBrokenError,
@@ -70,6 +85,7 @@ from guanlan_v2.orchestration.data.snapshot import (
 from guanlan_v2.orchestration.data.source import (
     DataInvocationScope,
     DataSourceDescriptor,
+    IndicatorRecord,
     RawFetch,
     ResolvedDataMethodPolicy,
     ResolvedMethodRoute,
@@ -79,7 +95,7 @@ from guanlan_v2.orchestration.data.source import (
 )
 from guanlan_v2.orchestration.digest import content_digest
 from guanlan_v2.orchestration.enums import DataBackend, DataMode, DataStatus
-from guanlan_v2.orchestration.refs import ContentRef, SchemaRef
+from guanlan_v2.orchestration.refs import ContentRef, PayloadRef, SchemaRef
 from guanlan_v2.orchestration.runtime_contracts import (
     PHASE2_BASE_REGISTRY_DIGEST,
     ExecutionEvidenceOrdinalToken,
@@ -152,9 +168,26 @@ def _pulled(dt: datetime) -> str:
     return dt.astimezone(_SH).strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def _ok_env(*, items, pulled_at=None, status="ok"):
-    return {"ok": True, "status": status, "items": list(items), "n": len(items),
-            "error": "", "note": "", "pulled_at": pulled_at}
+def _ok_env(*, source, provider, items, pulled_at=None, status="ok"):
+    """A complete strict facade envelope; injected probes get no trust shortcut."""
+    return {
+        "ok": True,
+        "status": status,
+        "source": source,
+        "provider": provider,
+        "actual_provider": provider,
+        "fallback_level": 0,
+        "attempted_sources": [],
+        "cache_hit": False,
+        "network_used": True,
+        "circuit_state": "closed",
+        "schema_version": "guanlan.live-source-result.v2",
+        "items": list(items),
+        "n": len(items),
+        "error": "",
+        "note": "",
+        "pulled_at": pulled_at,
+    }
 
 
 class _ProbeStub:
@@ -178,6 +211,7 @@ _OHLCV_PARAMS = {
     "symbol": {"code": "600519", "exchange": "SH", "board": "main"},
     "start": "2026-07-16T00:00:00+00:00", "end": "2026-07-16T00:00:00+00:00",
 }
+_INDICATOR_PARAMS = dict(_OHLCV_PARAMS)
 
 
 class _SpyRecorder:
@@ -297,7 +331,8 @@ def _token(evidence: int) -> ExecutionEvidenceOrdinalToken:
 # 1. as_of is frozen at build; the freeze is ENFORCED, not decorative          #
 # =========================================================================== #
 def test_as_of_frozen_at_build(schema_registry):
-    stub = _ProbeStub(_ok_env(items=[]))
+    stub = _ProbeStub(_ok_env(
+        source="eastmoney_stock_news", provider="eastmoney", items=[]))
     clock = _AdvancingClock(AS_OF)
     world = _OnlineWorld(schema_registry, method_id="news", params=_NEWS_PARAMS,
                          probe_stub=stub, clock=clock)
@@ -311,61 +346,66 @@ def test_as_of_frozen_at_build(schema_registry):
 
     # FREEZE ENFORCED: a row whose live pulled_at is AFTER run start is refused.
     future_pulled = _pulled(AS_OF + timedelta(minutes=5))
-    stub.env = _ok_env(items=[{"title": "late tick"}], pulled_at=future_pulled)
+    stub.env = _ok_env(
+        source="eastmoney_stock_news", provider="eastmoney",
+        items=[{"title": "late tick"}], pulled_at=future_pulled)
     with pytest.raises(FutureDataRefused) as exc:
         world.check()
     assert exc.value.future_rows == 1
 
     # a row pulled AT/BEFORE run start passes — the freeze is not "refuse everything".
-    stub.env = _ok_env(items=[{"title": "on time"}], pulled_at=_pulled(AS_OF))
+    stub.env = _ok_env(
+        source="eastmoney_stock_news", provider="eastmoney",
+        items=[{"title": "on time"}], pulled_at=_pulled(AS_OF))
     passed, audit = world.check()
     assert len(passed) == 1 and audit.guard_result == "passed"
 
 
 # =========================================================================== #
-# 2. an ok:False (caller/mechanical) envelope -> a typed error, no fabrication  #
+# 2. an unclassified ok:False envelope is structurally broken, no fabrication  #
 # =========================================================================== #
 def test_probe_ok_false_is_typed_error(schema_registry):
     stub = _ProbeStub({"ok": False, "note": "bad code", "items": []})
     world = _OnlineWorld(schema_registry, method_id="news", params=_NEWS_PARAMS,
                          probe_stub=stub, clock=_FrozenClock(AS_OF))
-    with pytest.raises(RoutingConfigurationError):
-        world.fetch()  # a typed caller error; no DataResult / row fabricated
-
-
-# =========================================================================== #
-# 3. an ok:True status:planned envelope -> honest UNAVAILABLE (zero rows)       #
-# =========================================================================== #
-def test_probe_planned_maps_unavailable(schema_registry):
-    stub = _ProbeStub(_ok_env(items=[], pulled_at=_pulled(AS_OF), status="planned"))
-    world = _OnlineWorld(schema_registry, method_id="news", params=_NEWS_PARAMS,
-                         probe_stub=stub, clock=_FrozenClock(AS_OF))
-    # (a) at the adapter boundary: planned = the vendor probe is not implemented/
-    # available -> NotConfiguredError (the single taxonomy error that advances the
-    # frozen chain; never a fabricated row).
-    with pytest.raises(NotConfiguredError):
+    with pytest.raises(SourceBrokenError, match="unsupported exact status"):
         world.fetch()
 
-    # (b) end-to-end through the REAL dispatch: a single-vendor OPTIONAL method
-    # (news) exhausts to an honest UNAVAILABLE DataResult, zero rows, visible reason.
+
+# =========================================================================== #
+# 3. legacy planned is outside the closed state machine and never falls back    #
+# =========================================================================== #
+def test_probe_planned_is_broken_and_never_maps_unavailable(schema_registry):
+    stub = _ProbeStub(_ok_env(
+        source="eastmoney_stock_news", provider="eastmoney", items=[],
+        pulled_at=_pulled(AS_OF), status="planned"))
+    world = _OnlineWorld(schema_registry, method_id="news", params=_NEWS_PARAMS,
+                         probe_stub=stub, clock=_FrozenClock(AS_OF))
+    with pytest.raises(SourceBrokenError, match="unsupported exact status"):
+        world.fetch()
+
+    # End-to-end the structural failure remains loud; it never becomes an
+    # UNAVAILABLE result that could hide an unreviewed state spelling.
     sink = _audit_sink()
     gateway = _FallbackGateway(sources={world.src_ref.id: world.adapter.fetch}, sink=sink)
-    outcome = dispatch(
-        world.req, invocation_scope=world.scope, ctx=world.ctx, routing=world.routing,
-        manifest=world.manifest, registry=world.registry, schema_registry=schema_registry,
-        resolved_policy=world.policy, gateway=gateway, evidence_writer=_FakeWriter(),
-        payload_reader=None, refusal_audit_sink=sink, cache=_NullCache(),
-        clock=_FrozenClock(AS_OF), calendar=CALENDAR)
-    assert outcome.result.status is DataStatus.UNAVAILABLE
-    assert outcome.result.data is None                       # zero rows, no fabrication
-    assert any(a.fallback_reason == "not_configured" for a in outcome.result.attempts)
+    with pytest.raises(SourceBrokenError, match="unsupported exact status"):
+        dispatch(
+            world.req, invocation_scope=world.scope, ctx=world.ctx,
+            routing=world.routing, manifest=world.manifest,
+            registry=world.registry, schema_registry=schema_registry,
+            resolved_policy=world.policy, gateway=gateway,
+            evidence_writer=_FakeWriter(), payload_reader=None,
+            refusal_audit_sink=sink, cache=_NullCache(),
+            clock=_FrozenClock(AS_OF), calendar=CALENDAR)
 
 
 # =========================================================================== #
 # 4. an ok:True status:error surfaces loud and never swaps to the next vendor   #
 # =========================================================================== #
 def test_upstream_error_visible_not_swapped(schema_registry):
-    stub = _ProbeStub(_ok_env(items=[], pulled_at=_pulled(AS_OF), status="error"))
+    stub = _ProbeStub(_ok_env(
+        source="eastmoney_stock_news", provider="eastmoney", items=[],
+        pulled_at=_pulled(AS_OF), status="error"))
     stub.env["error"] = "upstream 500"
     world = _OnlineWorld(schema_registry, method_id="news", params=_NEWS_PARAMS,
                          probe_stub=stub, clock=_FrozenClock(AS_OF), spy_source=True)
@@ -385,13 +425,282 @@ def test_upstream_error_visible_not_swapped(schema_registry):
 
 
 # =========================================================================== #
+# 4b. source/provider provenance is exact and provider fallback is forbidden   #
+# =========================================================================== #
+def _strict_provenance_env(
+    *,
+    source: str = "tencent_realtime_quote",
+    provider: str = "tencent",
+    **overrides,
+):
+    envelope = _ok_env(
+        source=source, provider=provider, items=[], pulled_at=_pulled(AS_OF))
+    envelope.update({
+        "source": source,
+        "provider": provider,
+        "actual_provider": provider,
+        "fallback_level": 0,
+        "attempted_sources": [],
+        "cache_hit": False,
+    })
+    envelope.update(overrides)
+    return envelope
+
+
+def _reviewed_binding(method_id):
+    return reviewed_live_binding_snapshot().binding_for_method(method_id)
+
+
+@pytest.mark.parametrize(("source", "provider", "method_id"), [
+    ("tencent_realtime_quote", "tencent", "verified_snapshot"),
+    ("tdx_realtime_quote", "tdx", "indicators"),
+    ("tdx_kline", "tdx", "ohlcv"),
+    ("eastmoney_stock_news", "eastmoney", "news"),
+])
+def test_strict_envelope_accepts_only_reviewed_source_provider_pairs(
+    source, provider, method_id,
+):
+    envelope = _strict_provenance_env(source=source, provider=provider)
+
+    checked = live_data._validate_live_envelope(
+        envelope,
+        binding=_reviewed_binding(method_id),
+        canonical=source,
+        method_id=method_id,
+    )
+
+    assert checked is envelope
+
+
+def test_enforced_source_provider_pairs_equal_code_reviewed_attestations():
+    enforced = {
+        (row.method_id, row.source_id, row.provider_id)
+        for row in reviewed_live_binding_snapshot().bindings
+    }
+    attested = {
+        (row.method_id, row.source_id, row.provider_id)
+        for row in reviewed_live_client_adapter_support()
+    }
+
+    assert enforced == attested
+
+
+def test_envelope_rechecks_the_run_binding_method_and_source():
+    envelope = _strict_provenance_env()
+    with pytest.raises(RoutingConfigurationError, match="does not match"):
+        live_data._validate_live_envelope(
+            envelope,
+            binding=_reviewed_binding("indicators"),
+            canonical="tencent_realtime_quote",
+            method_id="verified_snapshot",
+        )
+
+
+@pytest.mark.parametrize("mutation,match", [
+    ({"source": "tdx_realtime_quote"}, "source echo"),
+    ({"source_id": "tdx_realtime_quote"}, "source_id echo"),
+    ({"provider": "tdx"}, "reviewed provider"),
+    ({"actual_provider": "tdx"}, "reviewed provider"),
+    ({"fallback_level": 1}, "integer 0"),
+    ({"fallback_level": True}, "integer 0"),
+    ({"fallback_level": "0"}, "integer 0"),
+    ({"attempted_sources": ["eastmoney_quote"]}, "empty list"),
+    ({"attempted_sources": ()}, "empty list"),
+    ({"cache_hit": True}, "boolean false"),
+    ({"cache_hit": 0}, "boolean false"),
+    ({"network_used": False}, "boolean true"),
+    ({"network_used": 1}, "boolean true"),
+    ({"circuit_state": "open"}, "closed"),
+    ({"schema_version": "guanlan.live-source-result.v3"}, "schema_version"),
+])
+def test_envelope_rejects_source_provider_or_fallback_spoof(mutation, match):
+    envelope = _strict_provenance_env(**mutation)
+
+    with pytest.raises(SourceBrokenError, match=match):
+        live_data._validate_live_envelope(
+            envelope,
+            binding=_reviewed_binding("verified_snapshot"),
+            canonical="tencent_realtime_quote",
+            method_id="verified_snapshot",
+        )
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "source",
+        "provider",
+        "actual_provider",
+        "fallback_level",
+        "attempted_sources",
+        "cache_hit",
+        "network_used",
+        "circuit_state",
+        "schema_version",
+    ],
+)
+def test_production_envelope_requires_complete_provenance(missing):
+    envelope = _strict_provenance_env()
+    del envelope[missing]
+
+    with pytest.raises(SourceBrokenError, match="missing"):
+        live_data._validate_live_envelope(
+            envelope,
+            binding=_reviewed_binding("verified_snapshot"),
+            canonical="tencent_realtime_quote",
+            method_id="verified_snapshot",
+        )
+
+
+def test_injected_probe_cannot_spoof_complete_provenance(schema_registry):
+    envelope = _ok_env(
+        source="eastmoney_stock_news", provider="eastmoney", items=[],
+        pulled_at=_pulled(AS_OF))
+    envelope["actual_provider"] = "tencent"
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="news",
+        params=_NEWS_PARAMS,
+        probe_stub=_ProbeStub(envelope),
+        clock=_FrozenClock(AS_OF),
+    )
+
+    with pytest.raises(SourceBrokenError, match="actual_provider"):
+        world.fetch()
+
+
+@pytest.mark.parametrize("status", ["provider_busy", "rate_limited"])
+def test_temporary_envelope_maps_to_narrow_fallback_taxonomy(status):
+    envelope = _strict_provenance_env(status=status)
+
+    with pytest.raises(RateLimitError):
+        live_data._validate_live_envelope(
+            envelope,
+            binding=_reviewed_binding("verified_snapshot"),
+            canonical="tencent_realtime_quote",
+            method_id="verified_snapshot",
+        )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "planned", "error", "schema_error", "network_error", "circuit_open",
+        "unknown_error", "", "OK", "future_state",
+    ],
+)
+def test_every_nonclosed_status_is_source_broken(status):
+    envelope = _strict_provenance_env(status=status)
+    with pytest.raises(SourceBrokenError, match="unsupported exact status"):
+        live_data._validate_live_envelope(
+            envelope,
+            binding=_reviewed_binding("verified_snapshot"),
+            canonical="tencent_realtime_quote",
+            method_id="verified_snapshot",
+        )
+
+
+@pytest.mark.parametrize(("method_id", "source", "provider"), [
+    ("news", "eastmoney_stock_news", "eastmoney"),
+    ("ohlcv", "tdx_kline", "tdx"),
+])
+def test_stale_status_remains_rejected_for_unprojectable_methods(
+        method_id, source, provider):
+    envelope = _strict_provenance_env(
+        source=source,
+        provider=provider,
+        status="stale",
+        error_kind="stale_data",
+        items=[{"price": 1.0}],
+    )
+
+    with pytest.raises(SourceBrokenError, match="unsupported exact status"):
+        live_data._validate_live_envelope(
+            envelope,
+            binding=_reviewed_binding(method_id),
+            canonical=source,
+            method_id=method_id,
+        )
+
+
+@pytest.mark.parametrize(("mutation", "match"), [
+    ({"error_kind": ""}, "error_kind='stale_data'"),
+    ({"error_kind": "provider_busy"}, "error_kind='stale_data'"),
+    ({"error_kind": "stale_data", "items": []}, "non-empty items"),
+])
+def test_verified_snapshot_stale_envelope_requires_exact_attestation_and_rows(
+        mutation, match):
+    envelope = _strict_provenance_env(
+        status="stale",
+        items=[{"last_close": 1.0}],
+    )
+    envelope.update(mutation)
+
+    with pytest.raises(SourceBrokenError, match=match):
+        live_data._validate_live_envelope(
+            envelope,
+            binding=_reviewed_binding("verified_snapshot"),
+            canonical="tencent_realtime_quote",
+            method_id="verified_snapshot",
+        )
+
+
+@pytest.mark.parametrize(("mutation", "match"), [
+    ({"error_kind": ""}, "error_kind='stale_data'"),
+    ({"error_kind": "provider_busy"}, "error_kind='stale_data'"),
+    ({"error_kind": "stale_data", "items": []}, "non-empty items"),
+])
+def test_indicators_stale_envelope_requires_exact_attestation_and_rows(
+        mutation, match):
+    envelope = _strict_provenance_env(
+        source="tdx_realtime_quote",
+        provider="tdx",
+        status="stale",
+        items=[{"raw": {"servertime": "15:26:50"}}],
+    )
+    envelope.update(mutation)
+
+    with pytest.raises(SourceBrokenError, match=match):
+        live_data._validate_live_envelope(
+            envelope,
+            binding=_reviewed_binding("indicators"),
+            canonical="tdx_realtime_quote",
+            method_id="indicators",
+        )
+
+
+@pytest.mark.parametrize("status", ["empty", "not_available"])
+def test_empty_data_statuses_require_empty_items(status):
+    clean = _strict_provenance_env(status=status)
+    assert live_data._validate_live_envelope(
+        clean,
+        binding=_reviewed_binding("verified_snapshot"),
+        canonical="tencent_realtime_quote",
+        method_id="verified_snapshot",
+    ) is clean
+
+    contradictory = _strict_provenance_env(status=status)
+    contradictory["items"] = [{"price": 1.0}]
+    with pytest.raises(SourceBrokenError, match="requires an empty items"):
+        live_data._validate_live_envelope(
+            contradictory,
+            binding=_reviewed_binding("verified_snapshot"),
+            canonical="tencent_realtime_quote",
+            method_id="verified_snapshot",
+        )
+
+
+# =========================================================================== #
 # 5. a data row with no envelope pulled_at -> MissingAvailabilityRefused        #
 # =========================================================================== #
 def test_missing_pulled_at_refused(schema_registry):
     # ok:True with a real row but NO pulled_at -> available_at=None -> the guard
     # refuses (ONLINE records availability honestly; never a fabricated available_at).
-    stub = _ProbeStub({"ok": True, "status": "ok", "items": [{"title": "live headline"}],
-                       "n": 1, "error": "", "note": ""})  # no pulled_at key
+    envelope = _ok_env(
+        source="eastmoney_stock_news", provider="eastmoney",
+        items=[{"title": "live headline"}], pulled_at=None)
+    del envelope["pulled_at"]
+    stub = _ProbeStub(envelope)
     world = _OnlineWorld(schema_registry, method_id="news", params=_NEWS_PARAMS,
                          probe_stub=stub, clock=_FrozenClock(AS_OF))
     cands = world.fetch().candidates
@@ -421,7 +730,7 @@ def test_no_write_methods(schema_registry):
     existing = {s.method_ref for s in surface.method_specs}
     assert set(desc.method_refs) <= existing              # no new DataMethodSpec id minted
     bound = {s.method_id for s in surface.method_specs if s.method_ref in desc.method_refs}
-    assert bound == {"verified_snapshot", "news", "ohlcv"}
+    assert bound == {"verified_snapshot", "news", "ohlcv", "indicators"}
     assert "signals" not in bound                          # no signal method is bound
     for s in surface.method_specs:
         if s.method_id in bound:
@@ -437,7 +746,9 @@ def test_unknown_source_fails_loud(schema_registry):
         raise RuntimeError(f"resolve blew up for {source!r}")
 
     world = _OnlineWorld(schema_registry, method_id="news", params=_NEWS_PARAMS,
-                         probe_stub=_ProbeStub(_ok_env(items=[])), clock=_FrozenClock(AS_OF),
+                         probe_stub=_ProbeStub(_ok_env(
+                             source="eastmoney_stock_news", provider="eastmoney",
+                             items=[])), clock=_FrozenClock(AS_OF),
                          resolve_source_fn=_raising)
     with pytest.raises(RuntimeError):
         world.fetch()
@@ -445,11 +756,28 @@ def test_unknown_source_fails_loud(schema_registry):
 
     # (b) an unknown source id ('' from resolve_source) fails loud, not silently.
     world2 = _OnlineWorld(schema_registry, method_id="news", params=_NEWS_PARAMS,
-                          probe_stub=_ProbeStub(_ok_env(items=[])), clock=_FrozenClock(AS_OF),
+                          probe_stub=_ProbeStub(_ok_env(
+                              source="eastmoney_stock_news", provider="eastmoney",
+                              items=[])), clock=_FrozenClock(AS_OF),
                           resolve_source_fn=lambda s: "")
     with pytest.raises(RoutingConfigurationError):
         world2.fetch()
     assert world2.probe_stub.calls == []
+
+    # (c) even a different known-looking source is a forbidden substitution:
+    # resolver aliases may not rewrite this run's signed physical binding.
+    world3 = _OnlineWorld(
+        schema_registry,
+        method_id="news",
+        params=_NEWS_PARAMS,
+        probe_stub=_ProbeStub(_ok_env(
+            source="eastmoney_stock_news", provider="eastmoney", items=[])),
+        clock=_FrozenClock(AS_OF),
+        resolve_source_fn=lambda _source: "tencent_realtime_quote",
+    )
+    with pytest.raises(RoutingConfigurationError, match="does not exactly match"):
+        world3.fetch()
+    assert world3.probe_stub.calls == []
 
 
 # =========================================================================== #
@@ -558,7 +886,9 @@ def _audit_sink():
 # =========================================================================== #
 def test_online_context_builder_coherence(schema_registry):
     world = _OnlineWorld(schema_registry, method_id="news", params=_NEWS_PARAMS,
-                         probe_stub=_ProbeStub(_ok_env(items=[])), clock=_FrozenClock(AS_OF))
+                         probe_stub=_ProbeStub(_ok_env(
+                             source="eastmoney_stock_news", provider="eastmoney",
+                             items=[])), clock=_FrozenClock(AS_OF))
     ctx = world.ctx
     assert isinstance(ctx, DataContext)
     assert ctx.as_of == AS_OF == ctx.clock.as_of
@@ -584,7 +914,7 @@ def test_online_descriptor_online_only():
     assert desc.supported_modes == (DataMode.ONLINE,)
     assert desc.supported_backends == (DataBackend.LIVE,)
     bound = {s.method_id for s in surface.method_specs if s.method_ref in desc.method_refs}
-    assert bound == {"verified_snapshot", "news", "ohlcv"}
+    assert bound == {"verified_snapshot", "news", "ohlcv", "indicators"}
 
 
 # =========================================================================== #
@@ -731,7 +1061,21 @@ def _quote_row(*, quote_time=QUOTE_TIME_INTRADAY, close_key="prev_close",
 
 
 def _quote_env(*, pulled_at=INTRADAY_PULL, **kw):
-    return _ok_env(items=[_quote_row(**kw)], pulled_at=_pulled(pulled_at))
+    return _ok_env(
+        source="tencent_realtime_quote", provider="tencent",
+        items=[_quote_row(**kw)], pulled_at=_pulled(pulled_at))
+
+
+def _stale_quote_env(*, pulled_at=WEEKEND_PULL, items=None, **kw):
+    envelope = _ok_env(
+        source="tencent_realtime_quote",
+        provider="tencent",
+        items=(items if items is not None else [_quote_row(**kw)]),
+        pulled_at=_pulled(pulled_at),
+        status="stale",
+    )
+    envelope["error_kind"] = "stale_data"
+    return envelope
 
 
 def _quote_world(schema_registry, env, *, method_id="verified_snapshot", params=None,
@@ -831,6 +1175,101 @@ def test_settled_session_is_calendar_attributed_weekend_regime(schema_registry):
     assert live_data._previous_session(CALENDAR, pull_local.date()) is None
 
 
+def test_stale_verified_snapshot_weekend_emits_only_prior_session_settlement(
+        schema_registry):
+    """A weekend ``stale`` quote may contribute only its row-owned last_close.
+
+    The Friday venue timestamp attributes that datum to Thursday through the
+    committed calendar.  The stale Friday ``price`` and Saturday pull time must
+    never enter the candidate as current evidence.
+    """
+    world = _quote_world(
+        schema_registry,
+        _stale_quote_env(
+            quote_time=QUOTE_TIME_WEEKEND,
+            close_key="last_close",
+            pulled_at=WEEKEND_PULL,
+        ),
+        as_of=WEEKEND_AS_OF,
+    )
+
+    candidates = world.fetch().candidates
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.available_at == SETTLED_AT_B
+    assert candidate.effective_at == SETTLED_AT_B
+    assert candidate.raw_payload == {
+        "symbol": {"code": "600519", "exchange": "SH", "board": "main"},
+        "name": "MAOTAI",
+        "last_price": SETTLED_CLOSE,
+        "prev_close": SETTLED_CLOSE,
+        "settled_session_date": SETTLED_SESSION_B,
+    }
+    assert "price" not in candidate.raw_payload
+    assert candidate.available_at != _online_pulled(WEEKEND_PULL)
+
+
+@pytest.mark.parametrize(
+    ("item", "match"),
+    [
+        (_quote_row(extra={"code": "000001", "symbol": "sz000001"}),
+         "identity does not exactly match"),
+        (_quote_row(extra={"symbol": "sz600519"}),
+         "exchange prefix does not exactly match"),
+        ({"stock_codes": ["000001"], "raw": _quote_row()},
+         "identity does not exactly match"),
+    ],
+)
+def test_stale_verified_snapshot_refuses_wrong_row_identity(
+        schema_registry, item, match):
+    world = _quote_world(
+        schema_registry,
+        _stale_quote_env(items=[item]),
+        as_of=WEEKEND_AS_OF,
+    )
+
+    with pytest.raises(SourceBrokenError, match=match):
+        world.fetch()
+
+
+def test_stale_verified_snapshot_refuses_one_wrong_identity_in_multirow_envelope(
+        schema_registry):
+    world = _quote_world(
+        schema_registry,
+        _stale_quote_env(items=[
+            _quote_row(),
+            _quote_row(extra={"code": "000001", "symbol": "sz000001"}),
+        ]),
+        as_of=WEEKEND_AS_OF,
+    )
+
+    with pytest.raises(SourceBrokenError, match="identity does not exactly match"):
+        world.fetch()
+
+
+@pytest.mark.parametrize(("items", "calendar_dep"), [
+    ([_quote_row(quote_time=None, close_key="last_close")], CALENDAR),
+    ([_quote_row(quote_time=QUOTE_TIME_WEEKEND, close_key="last_close", close=0.0)],
+     CALENDAR),
+    (["not-a-mapping"], CALENDAR),
+    ([_quote_row(quote_time=QUOTE_TIME_WEEKEND, close_key="last_close")], None),
+    ([_quote_row(quote_time=QUOTE_TIME_WEEKEND, close_key="last_close"),
+      _quote_row(quote_time=None, close_key="last_close")], CALENDAR),
+])
+def test_stale_verified_snapshot_refuses_any_row_without_settled_projection(
+        schema_registry, items, calendar_dep):
+    world = _quote_world(
+        schema_registry,
+        _stale_quote_env(items=items),
+        as_of=WEEKEND_AS_OF,
+        calendar_dep=calendar_dep,
+    )
+
+    with pytest.raises(SourceBrokenError, match="settled evidence"):
+        world.fetch()
+
+
 @pytest.mark.parametrize(
     "time_key", ["quote_time", "date", "datetime", "trade_time"])
 def test_anchor_key_aliases_are_bound_at_source(schema_registry, time_key):
@@ -872,6 +1311,7 @@ def test_settled_candidate_binds_the_real_nested_vendor_row(schema_registry):
 
     # (a) provider-stamped publish_ts -> a real venue anchor -> settled projection.
     world = _quote_world(schema_registry, _ok_env(
+        source="tencent_realtime_quote", provider="tencent",
         items=[_item("provider.publish_ts")], pulled_at=_pulled(INTRADAY_PULL)))
     c = world.fetch().candidates[0]
     assert c.available_at == SETTLED_AT_A
@@ -885,6 +1325,7 @@ def test_settled_candidate_binds_the_real_nested_vendor_row(schema_registry):
     #     candidate; the live candidate stands and the guard refuses it honestly.
     #     Nothing is guessed to paper over it.
     inert = _quote_world(schema_registry, _ok_env(
+        source="tencent_realtime_quote", provider="tencent",
         items=[_item("fetch_fallback")], pulled_at=_pulled(INTRADAY_PULL)))
     ic = inert.fetch().candidates[0]
     assert ic.available_at == _online_pulled(INTRADAY_PULL)
@@ -911,6 +1352,7 @@ def test_vendor_row_cannot_overrule_the_items_own_time_source_gate(schema_regist
             "raw": _quote_row(close_key="last_close", quote_time=None,
                               extra={"time_source": "provider.publish_ts"})}
     world = _quote_world(schema_registry, _ok_env(
+        source="tencent_realtime_quote", provider="tencent",
         items=[item], pulled_at=_pulled(INTRADAY_PULL)))
     c = world.fetch().candidates[0]
     assert c.available_at == _online_pulled(INTRADAY_PULL)   # NO settled projection
@@ -1065,7 +1507,9 @@ def test_a_live_read_carries_no_settled_marker(schema_registry):
                 "last_price": 1487.3, "prev_close": SETTLED_CLOSE}
     live = _quote_world(
         schema_registry,
-        _ok_env(items=[live_row], pulled_at=_pulled(INTRADAY_PULL)),
+        _ok_env(
+            source="tencent_realtime_quote", provider="tencent",
+            items=[live_row], pulled_at=_pulled(INTRADAY_PULL)),
         as_of=AS_OF)                                   # 15:00 +08, AFTER the 10:30 pull
     gateway = _CompletingGateway({live.src_ref.id: live.adapter.fetch}, _audit_sink())
     result = _dispatch(live, schema_registry, gateway).result
@@ -1099,7 +1543,9 @@ def _passthrough_world(schema_registry, session_value):
            "last_price": 1487.3, "prev_close": SETTLED_CLOSE,
            "settled_session_date": session_value}
     return _quote_world(
-        schema_registry, _ok_env(items=[row], pulled_at=_pulled(INTRADAY_PULL)),
+        schema_registry, _ok_env(
+            source="tencent_realtime_quote", provider="tencent",
+            items=[row], pulled_at=_pulled(INTRADAY_PULL)),
         as_of=AS_OF)                                   # as_of AFTER the pull -> OK
 
 
@@ -1261,15 +1707,960 @@ def test_no_calendar_construction_yields_no_settled_candidate(schema_registry):
 # =========================================================================== #
 # 12. scope pin: the settled projection is verified_snapshot ONLY              #
 # =========================================================================== #
-@pytest.mark.parametrize("method_id", ["news", "ohlcv"])
+@pytest.mark.parametrize("method_id", ["news"])
 def test_settled_projection_is_verified_snapshot_only(schema_registry, method_id):
-    params = (_snapshot_params(MIDNIGHT_AS_OF) if method_id == "news" else
-              {"symbol": {"code": "600519", "exchange": "SH", "board": "main"},
-               "start": "2026-07-16T00:00:00+00:00", "end": "2026-07-16T00:00:00+00:00"})
-    world = _quote_world(schema_registry, _quote_env(), method_id=method_id, params=params)
+    params = _snapshot_params(MIDNIGHT_AS_OF)
+    envelope = _ok_env(
+        source="eastmoney_stock_news", provider="eastmoney",
+        items=[_quote_row()], pulled_at=_pulled(INTRADAY_PULL))
+    world = _quote_world(
+        schema_registry, envelope, method_id=method_id, params=params)
     c = world.fetch().candidates[0]
     assert c.available_at == _online_pulled(INTRADAY_PULL)   # pulled_at, not settled
     assert "settled_session_date" not in c.raw_payload
+
+
+# =========================================================================== #
+# 12b. OHLCV is a per-instrument, row-time-bound TDX daily-bar route           #
+# =========================================================================== #
+def _tdx_daily_bars(count=20, *, last_day=date(2026, 7, 15), code="600519"):
+    rows = []
+    day = last_day
+    while len(rows) < count:
+        if day.weekday() < 5:
+            close = 100.0 + len(rows)
+            rows.append({
+                "code": code, "stock_code": code, "freq": "day",
+                "datetime": f"{day.isoformat()} 15:00",
+                "open": close - 1.0, "high": close + 1.0,
+                "low": close - 2.0, "close": close,
+                # The real facade shape is a float that denotes an integer count.
+                "vol": float(1000 + len(rows)),
+            })
+        day -= timedelta(days=1)
+    return list(reversed(rows))
+
+
+def test_ohlcv_routes_to_tdx_per_symbol_and_maps_native_rows(schema_registry):
+    stub = _ProbeStub(_ok_env(
+        source="tdx_kline", provider="tdx",
+        items=_tdx_daily_bars(), pulled_at=_pulled(AS_OF + timedelta(minutes=1))))
+    world = _OnlineWorld(
+        schema_registry, method_id="ohlcv", params=_OHLCV_PARAMS,
+        probe_stub=stub, clock=_FrozenClock(AS_OF), calendar_dep=None)
+    raw = world.fetch()
+    assert stub.calls == [{"source": "tdx_kline", "code": "600519",
+                           "date": "", "limit": 120}]
+    assert len(raw.candidates) == 20
+    candidate = raw.candidates[-1]
+    assert candidate.raw_payload == {
+        "symbol": {"code": "600519", "exchange": "SH", "board": "main"},
+        "open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0,
+        "volume": 1000,
+    }
+    assert candidate.available_at == datetime(2026, 7, 15, 7, 0, tzinfo=UTC)
+    assert candidate.effective_at == candidate.available_at
+    # Envelope pull time and arbitrary native fields never enter the bar payload.
+    assert "pulled_at" not in candidate.raw_payload
+
+
+def test_ohlcv_excludes_unclosed_bar_but_keeps_twenty_closed(schema_registry, caplog):
+    rows = _tdx_daily_bars()
+    rows.append({
+        "code": "600519", "stock_code": "600519", "freq": "day",
+        "datetime": "2026-07-17 15:00", "open": 120.0, "high": 122.0,
+        "low": 119.0, "close": 121.0, "vol": 999.0,
+    })
+    stub = _ProbeStub(_ok_env(
+        source="tdx_kline", provider="tdx",
+        items=rows, pulled_at=_pulled(AS_OF)))
+    world = _OnlineWorld(
+        schema_registry, method_id="ohlcv", params=_OHLCV_PARAMS,
+        probe_stub=stub, clock=_FrozenClock(AS_OF), calendar_dep=None)
+    with caplog.at_level(logging.WARNING, logger=live_data.__name__):
+        raw = world.fetch()
+    assert len(raw.candidates) == 20
+    assert "1 unclosed/future daily bar(s) excluded" in caplog.text
+
+
+@pytest.mark.parametrize("mutation,match", [
+    ({"vol": 1.5}, "integral"),
+    ({"vol": -1.0}, "non-negative"),
+    ({"code": "000001", "stock_code": "000001"}, "does not exactly match"),
+    ({"freq": "5min"}, "daily bar"),
+])
+def test_ohlcv_malformed_native_shape_fails_closed(
+        schema_registry, mutation, match):
+    rows = _tdx_daily_bars()
+    rows[0].update(mutation)
+    world = _OnlineWorld(
+        schema_registry, method_id="ohlcv", params=_OHLCV_PARAMS,
+        probe_stub=_ProbeStub(_ok_env(
+            source="tdx_kline", provider="tdx",
+            items=rows, pulled_at=_pulled(AS_OF))),
+        clock=_FrozenClock(AS_OF), calendar_dep=None)
+    with pytest.raises(SourceBrokenError, match=match):
+        world.fetch()
+
+
+def test_ohlcv_fewer_than_twenty_closed_bars_refuses(schema_registry):
+    world = _OnlineWorld(
+        schema_registry, method_id="ohlcv", params=_OHLCV_PARAMS,
+        probe_stub=_ProbeStub(_ok_env(
+            source="tdx_kline", provider="tdx",
+            items=_tdx_daily_bars(19), pulled_at=_pulled(AS_OF))),
+        clock=_FrozenClock(AS_OF), calendar_dep=None)
+    with pytest.raises(SourceBrokenError, match="at least 20"):
+        world.fetch()
+
+
+def _production_weekend_ohlcv_world(schema_registry, *, last_day, as_of=None):
+    """Reproduce the 2026-08-29 deep-run clock against committed calendar bytes."""
+    from guanlan_v2.orchestration.adapters.data_world import production_data_recipe
+
+    as_of = as_of or datetime(
+        2026, 8, 29, 7, 21, 40, tzinfo=UTC)  # Sat 15:21:40 +08
+    params = {
+        "symbol": {"code": "600519", "exchange": "SH", "board": "main"},
+        "start": "2026-05-01T07:21:40+00:00",
+        "end": as_of.isoformat(),
+    }
+    recipe = production_data_recipe()
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="ohlcv",
+        params=params,
+        probe_stub=_ProbeStub(_ok_env(
+            source="tdx_kline",
+            provider="tdx",
+            items=_tdx_daily_bars(120, last_day=last_day),
+            pulled_at=_pulled(as_of),
+        )),
+        clock=_FrozenClock(as_of),
+        as_of=as_of,
+        calendar_dep=recipe.calendar,
+        guard_calendar=recipe.calendar,
+    )
+    world.policy = recipe.policy_resolver.resolve_method(world.spec, ctx=world.ctx)
+    return world
+
+
+def test_production_ohlcv_accepts_friday_close_on_saturday(schema_registry):
+    """The exact v5 failure shape: Friday is still the latest completed session
+    on Saturday even when its 15:00 close is more than 24 elapsed hours old."""
+    world = _production_weekend_ohlcv_world(
+        schema_registry, last_day=date(2026, 8, 28))
+    outcome = _dispatch(
+        world,
+        schema_registry,
+        _CompletingGateway({world.src_ref.id: world.adapter.fetch}, _audit_sink()),
+    )
+    assert world.policy.freshness_policy.max_trading_sessions == 1
+    assert outcome.result.status is DataStatus.OK
+    assert outcome.result.pit_audit.rows_seen == 120
+    assert outcome.result.pit_audit.rows_returned == 120
+    assert outcome.result.pit_audit.latest_available_at == datetime(
+        2026, 8, 28, 7, 0, tzinfo=UTC)
+
+
+def test_production_ohlcv_rejects_thursday_close_on_saturday(schema_registry):
+    """The calendar rule is exact, not a weekend-wide stale-data exemption."""
+    world = _production_weekend_ohlcv_world(
+        schema_registry, last_day=date(2026, 8, 27))
+    with pytest.raises(SourceBrokenError, match=(
+            "expected=2026-08-28 actual=2026-08-27")):
+        world.fetch()
+
+
+def test_production_ohlcv_accepts_previous_session_before_monday_close(
+        schema_registry):
+    """Monday intraday has no completed Monday daily bar yet; Friday is exact."""
+    world = _production_weekend_ohlcv_world(
+        schema_registry,
+        last_day=date(2026, 8, 28),
+        as_of=datetime(2026, 8, 31, 2, 0, tzinfo=UTC),  # Mon 10:00 +08
+    )
+    outcome = _dispatch(
+        world,
+        schema_registry,
+        _CompletingGateway({world.src_ref.id: world.adapter.fetch}, _audit_sink()),
+    )
+    assert outcome.result.status is DataStatus.OK
+    assert outcome.result.pit_audit.rows_returned == 120
+
+
+def test_production_ohlcv_requires_monday_bar_after_monday_close(schema_registry):
+    """The one-session guard allowance cannot conceal a lagging post-close feed."""
+    world = _production_weekend_ohlcv_world(
+        schema_registry,
+        last_day=date(2026, 8, 28),
+        as_of=datetime(2026, 8, 31, 7, 21, 40, tzinfo=UTC),  # Mon 15:21 +08
+    )
+    with pytest.raises(SourceBrokenError, match=(
+            "expected=2026-08-31 actual=2026-08-28")):
+        world.fetch()
+
+
+@pytest.mark.parametrize(("as_of", "expected"), [
+    # Exact close boundary on a Friday.
+    (datetime(2026, 8, 28, 6, 59, 59, tzinfo=UTC), date(2026, 8, 27)),
+    (datetime(2026, 8, 28, 7, 0, 0, tzinfo=UTC), date(2026, 8, 28)),
+    # National Day is absent from the committed calendar; Wednesday remains
+    # the latest completed session regardless of elapsed wall-clock time.
+    (datetime(2026, 10, 1, 8, 0, 0, tzinfo=UTC), date(2026, 9, 30)),
+])
+def test_latest_completed_ohlcv_session_boundaries(as_of, expected):
+    from guanlan_v2.orchestration.adapters.data_world import production_data_recipe
+
+    assert live_data._latest_completed_session(
+        production_data_recipe().calendar, as_of) == expected
+
+
+def test_latest_completed_ohlcv_session_never_extrapolates_calendar_coverage():
+    from guanlan_v2.orchestration.adapters.data_world import production_data_recipe
+
+    assert live_data._latest_completed_session(
+        production_data_recipe().calendar,
+        datetime(2027, 1, 2, 8, 0, tzinfo=UTC),
+    ) is None
+
+
+# =========================================================================== #
+# 12c. indicators is an exact-code typed projection of a real five-level book #
+# =========================================================================== #
+def _tdx_book(code="600519"):
+    native = {"market": 1, "code": code, "stock_code": f"SH{code}",
+              "servertime": "15:00:00"}
+    native.update({f"bid{i}": 10.01 - i * 0.01 for i in range(1, 6)})
+    native.update({f"ask{i}": 10.01 + i * 0.01 for i in range(1, 6)})
+    native.update({f"bid_vol{i}": float(100 * i) for i in range(1, 6)})
+    native.update({f"ask_vol{i}": float(50 * i) for i in range(1, 6)})
+    # The facade's real unified item keeps the vendor row under ``raw``.
+    return {"source_id": "tdx_realtime_quote", "raw": native}
+
+
+STALE_FRIDAY_BOOK_LOCAL = datetime(
+    2026, 8, 28, 15, 26, 50, 406000, tzinfo=_SH)
+STALE_SATURDAY_CAPTURE = datetime(
+    2026, 8, 29, 12, 55, 30, tzinfo=_SH).astimezone(UTC)
+STALE_SATURDAY_AFTER_24H = datetime(
+    2026, 8, 29, 15, 50, 21, 255669, tzinfo=_SH).astimezone(UTC)
+
+
+def _stale_tdx_book(*, quoted_at=STALE_FRIDAY_BOOK_LOCAL, code="600519"):
+    """The measured Friday-to-Saturday facade shape from 2026-08-29."""
+    local = quoted_at.astimezone(_SH)
+    publish = local.replace(tzinfo=None).isoformat(timespec="microseconds")
+    quote_time = local.replace(tzinfo=None).isoformat(
+        sep=" ", timespec="milliseconds")
+    item = _tdx_book(code)
+    item.update({
+        "provider": "tdx",
+        "source_timezone": "Asia/Shanghai",
+        "publish_ts": publish,
+        "visible_ts": publish,
+        "time_source": "provider.quote_time",
+        "time_precision": "second",
+        "time_confidence": 1.0,
+        "pit_certified": True,
+    })
+    item["raw"].update({
+        "quote_date": local.date().isoformat(),
+        "quote_time": quote_time,
+        "quote_ts": publish,
+        "publish_ts": publish,
+        "servertime": local.time().isoformat(timespec="milliseconds"),
+        "time_source": "provider.quote_time",
+        "time_precision": "second",
+        "time_confidence": 1.0,
+        "is_stale": True,
+        "stale_reason": (
+            f"quote date {local.date().isoformat()} differs from current date "
+            "2026-08-29"
+        ),
+    })
+    return item
+
+
+def _stale_indicator_env(items, *, captured_at=STALE_SATURDAY_CAPTURE):
+    envelope = _ok_env(
+        source="tdx_realtime_quote",
+        provider="tdx",
+        items=items,
+        pulled_at=_pulled(captured_at),
+        status="stale",
+    )
+    envelope["error_kind"] = "stale_data"
+    return envelope
+
+
+def _precapture_indicator(world, envelope, *, calendar, captured_at):
+    return build_precaptured_indicator_fetch(
+        world.req,
+        envelope=envelope,
+        canonical_source="tdx_realtime_quote",
+        source_ref=world.src_ref,
+        capability_ref=world.spec.capability_ref,
+        calendar=calendar,
+        captured_at=captured_at,
+    )
+
+
+def test_indicators_routes_to_orderbook_and_emits_only_two_typed_metrics(
+        schema_registry):
+    stub = _ProbeStub(_ok_env(
+        source="tdx_realtime_quote", provider="tdx",
+        items=[_tdx_book()], pulled_at=_pulled(AS_OF)))
+    world = _OnlineWorld(
+        schema_registry, method_id="indicators", params=_INDICATOR_PARAMS,
+        probe_stub=stub, clock=_FrozenClock(AS_OF), calendar_dep=CALENDAR)
+    raw = world.fetch()
+    assert stub.calls == [{"source": "tdx_realtime_quote", "code": "600519",
+                           "date": "", "limit": 1}]
+    assert [c.raw_payload["indicator_id"] for c in raw.candidates] == [
+        "l1_spread_bp", "bid_ask_imbalance"]
+    values = {c.raw_payload["indicator_id"]: c.raw_payload["value"]
+              for c in raw.candidates}
+    assert values["l1_spread_bp"] == pytest.approx((10.02 - 10.0) / 10.01 * 10_000)
+    assert values["bid_ask_imbalance"] == pytest.approx(1.0 / 3.0)
+    assert all(c.available_at == AS_OF == c.effective_at for c in raw.candidates)
+    assert all(c.revision_id is None for c in raw.candidates)
+    assert all(set(c.raw_payload) == {"symbol", "indicator_id", "value"}
+               for c in raw.candidates)
+
+
+def test_ok_indicator_envelope_refuses_native_stale_friday_row_on_saturday(
+        schema_registry):
+    """Envelope ``ok`` cannot erase the measured row's Friday/stale facts."""
+    book = _stale_tdx_book()
+    envelope = _ok_env(
+        source="tdx_realtime_quote",
+        provider="tdx",
+        items=[book],
+        pulled_at=_pulled(STALE_SATURDAY_CAPTURE),
+        status="ok",
+    )
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope),
+        clock=_FrozenClock(STALE_SATURDAY_CAPTURE),
+        calendar_dep=CALENDAR,
+        as_of=STALE_SATURDAY_CAPTURE,
+    )
+
+    with pytest.raises(SourceBrokenError, match="contradicts native is_stale=true"):
+        world.fetch()
+
+
+def test_ok_indicator_envelope_refuses_explicit_prior_day_provider_date(
+        schema_registry):
+    book = _tdx_book()
+    book["raw"].update({
+        "is_stale": False,
+        "quote_date": "2026-07-15",
+        "quote_time": "2026-07-15 15:00:00",
+    })
+    envelope = _ok_env(
+        source="tdx_realtime_quote",
+        provider="tdx",
+        items=[book],
+        pulled_at=_pulled(AS_OF),
+    )
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope),
+        clock=_FrozenClock(AS_OF),
+        calendar_dep=CALENDAR,
+    )
+
+    with pytest.raises(SourceBrokenError, match="does not match admitted session"):
+        world.fetch()
+
+
+def test_ok_indicator_envelope_accepts_explicit_same_session_current_row(
+        schema_registry):
+    book = _tdx_book()
+    book["raw"].update({
+        "is_stale": False,
+        "quote_date": "2026-07-16",
+        "quote_time": "2026-07-16 15:00:00",
+    })
+    envelope = _ok_env(
+        source="tdx_realtime_quote",
+        provider="tdx",
+        items=[book],
+        pulled_at=_pulled(AS_OF),
+    )
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope),
+        clock=_FrozenClock(AS_OF),
+        calendar_dep=CALENDAR,
+    )
+
+    raw = world.fetch()
+
+    assert len(raw.candidates) == 2
+    assert all(row.available_at == AS_OF for row in raw.candidates)
+    assert all(row.effective_at == AS_OF for row in raw.candidates)
+    assert all(row.revision_id is None for row in raw.candidates)
+
+
+def test_ok_indicator_envelope_refuses_top_level_stale_attestation(
+        schema_registry):
+    book = _tdx_book()
+    book["is_stale"] = True
+    envelope = _ok_env(
+        source="tdx_realtime_quote", provider="tdx",
+        items=[book], pulled_at=_pulled(AS_OF))
+    world = _OnlineWorld(
+        schema_registry, method_id="indicators", params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope), clock=_FrozenClock(AS_OF),
+        calendar_dep=CALENDAR)
+
+    with pytest.raises(SourceBrokenError, match="item is_stale=true"):
+        world.fetch()
+
+
+def test_ok_indicator_envelope_refuses_quote_time_servertime_disagreement(
+        schema_registry):
+    book = _tdx_book()
+    book["raw"].update({
+        "is_stale": False,
+        "quote_date": "2026-07-16",
+        "quote_time": "2026-07-16 15:00:01",
+    })
+    envelope = _ok_env(
+        source="tdx_realtime_quote", provider="tdx",
+        items=[book], pulled_at=_pulled(AS_OF))
+    world = _OnlineWorld(
+        schema_registry, method_id="indicators", params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope), clock=_FrozenClock(AS_OF),
+        calendar_dep=CALENDAR)
+
+    with pytest.raises(SourceBrokenError, match="quote_time and servertime disagree"):
+        world.fetch()
+
+
+@pytest.mark.parametrize("mutator,match", [
+    (lambda book: book["raw"].update(code="000001", stock_code="SZ000001"),
+     "does not exactly match"),
+    (lambda book: book["raw"].pop("ask5"), "ask5"),
+    (lambda book: book["raw"].update(
+        **{f"bid_vol{i}": 0.0 for i in range(1, 6)},
+        **{f"ask_vol{i}": 0.0 for i in range(1, 6)}), "zero total"),
+])
+def test_indicators_refuses_foreign_partial_or_zero_depth_books(
+        schema_registry, mutator, match):
+    book = _tdx_book()
+    mutator(book)
+    world = _OnlineWorld(
+        schema_registry, method_id="indicators", params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(_ok_env(
+            source="tdx_realtime_quote", provider="tdx",
+            items=[book], pulled_at=_pulled(AS_OF))),
+        clock=_FrozenClock(AS_OF), calendar_dep=CALENDAR)
+    with pytest.raises(SourceBrokenError, match=match):
+        world.fetch()
+
+
+@pytest.mark.parametrize("server_time,match", [
+    (None, "no provider-owned servertime"),
+    ("15:00:01", "postdates"),
+    ("14:59:49", "more than 10 seconds stale"),
+])
+def test_indicators_refuses_missing_future_or_stale_provider_time(
+        schema_registry, server_time, match):
+    book = _tdx_book()
+    if server_time is None:
+        book["raw"].pop("servertime")
+    else:
+        book["raw"]["servertime"] = server_time
+    world = _OnlineWorld(
+        schema_registry, method_id="indicators", params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(_ok_env(
+            source="tdx_realtime_quote", provider="tdx",
+            items=[book], pulled_at=_pulled(AS_OF))),
+        clock=_FrozenClock(AS_OF), calendar_dep=CALENDAR)
+    with pytest.raises(SourceBrokenError, match=match):
+        world.fetch()
+
+
+def test_indicators_accepts_provider_timed_retained_close_book(schema_registry):
+    """After close, TDX's narrow 15:00-15:30 retained book is a dated
+    same-session observation, not a fabricated current live book."""
+    cutoff = AS_OF + timedelta(hours=5)  # 20:00 Asia/Shanghai
+    book = _tdx_book()
+    book["raw"]["servertime"] = "15:26:50.406"
+    world = _OnlineWorld(
+        schema_registry, method_id="indicators", params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(_ok_env(
+            source="tdx_realtime_quote", provider="tdx", items=[book],
+            pulled_at=_pulled(cutoff))),
+        clock=_FrozenClock(cutoff), calendar_dep=CALENDAR, as_of=cutoff)
+    raw = world.fetch()
+    expected = datetime.fromisoformat(
+        "2026-07-16T15:26:50.406+08:00").astimezone(timezone.utc)
+    expected_revision = (
+        POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX
+        + datetime.fromisoformat("2026-07-16T15:26:50.406+08:00").isoformat()
+    )
+    assert len(raw.candidates) == 2
+    assert {row.available_at for row in raw.candidates} == {expected}
+    assert all(row.effective_at == expected for row in raw.candidates)
+    assert all(row.ingested_at == cutoff for row in raw.candidates)
+    assert {row.revision_id for row in raw.candidates} == {expected_revision}
+    assert IndicatorRecord.from_candidate(raw.candidates[0]).revision_id == expected_revision
+
+
+def test_non_session_stale_tdx_book_precaptures_only_friday_provider_instant(
+        schema_registry):
+    """The current Saturday shape is explicit retained evidence, never live."""
+    book = _stale_tdx_book()
+    envelope = _stale_indicator_env([book])
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope),
+        clock=_FrozenClock(STALE_SATURDAY_CAPTURE),
+        calendar_dep=CALENDAR,
+        as_of=STALE_SATURDAY_CAPTURE,
+    )
+
+    raw = _precapture_indicator(
+        world,
+        envelope,
+        calendar=CALENDAR,
+        captured_at=STALE_SATURDAY_CAPTURE,
+    )
+
+    expected_at = STALE_FRIDAY_BOOK_LOCAL.astimezone(UTC)
+    expected_revision = (
+        POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX
+        + STALE_FRIDAY_BOOK_LOCAL.isoformat()
+    )
+    assert raw.fetched_at == STALE_SATURDAY_CAPTURE
+    assert len(raw.candidates) == 2
+    assert {row.available_at for row in raw.candidates} == {expected_at}
+    assert all(row.effective_at == expected_at for row in raw.candidates)
+    assert all(row.ingested_at == STALE_SATURDAY_CAPTURE for row in raw.candidates)
+    assert {row.revision_id for row in raw.candidates} == {expected_revision}
+    assert all(
+        row.revision_id.startswith(POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX)
+        for row in raw.candidates
+    )
+
+
+def test_production_indicator_policy_admits_exact_friday_book_after_24h_on_saturday(
+        schema_registry):
+    """Regression for ``pipeline-deep-53410b1b9555``: the adapter-proved
+    retained book remains current while no later exchange session has elapsed."""
+    recipe = production_data_recipe()
+    envelope = _stale_indicator_env(
+        [_stale_tdx_book()], captured_at=STALE_SATURDAY_AFTER_24H)
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope),
+        clock=_FrozenClock(STALE_SATURDAY_AFTER_24H),
+        calendar_dep=recipe.calendar,
+        guard_calendar=recipe.calendar,
+        as_of=STALE_SATURDAY_AFTER_24H,
+    )
+    world.policy = recipe.policy_resolver.resolve_method(
+        world.spec, ctx=world.ctx)
+    assert world.policy.freshness_policy.policy_id == \
+        PRODUCTION_INDICATORS_FRESHNESS_POLICY_ID
+    assert world.policy.freshness_policy.max_trading_sessions == 0
+
+    raw = _precapture_indicator(
+        world,
+        envelope,
+        calendar=recipe.calendar,
+        captured_at=STALE_SATURDAY_AFTER_24H,
+    )
+    latest = STALE_FRIDAY_BOOK_LOCAL.astimezone(UTC)
+    assert (STALE_SATURDAY_AFTER_24H - latest).total_seconds() > 86400
+    gateway = _CompletingGateway(
+        {world.src_ref.id: lambda _request, *, scope: raw}, _audit_sink())
+
+    outcome = _dispatch(world, schema_registry, gateway)
+
+    assert outcome.result.status is DataStatus.OK
+    assert outcome.result.pit_audit.guard_result == "passed"
+    assert outcome.result.pit_audit.latest_available_at == latest
+    assert len(outcome.result.data.rows) == 2
+    assert len(gateway.finalized) == 1
+
+
+def test_production_indicator_policy_still_refuses_friday_book_on_monday_session(
+        schema_registry):
+    """The zero-session policy is defence in depth: even if a retained Friday
+    fetch bypassed the adapter's normal-session refusal, Monday is STALE."""
+    recipe = production_data_recipe()
+    saturday_envelope = _stale_indicator_env(
+        [_stale_tdx_book()], captured_at=STALE_SATURDAY_AFTER_24H)
+    saturday_world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(saturday_envelope),
+        clock=_FrozenClock(STALE_SATURDAY_AFTER_24H),
+        calendar_dep=recipe.calendar,
+        guard_calendar=recipe.calendar,
+        as_of=STALE_SATURDAY_AFTER_24H,
+    )
+    friday_fetch = _precapture_indicator(
+        saturday_world,
+        saturday_envelope,
+        calendar=recipe.calendar,
+        captured_at=STALE_SATURDAY_AFTER_24H,
+    )
+
+    monday_as_of = datetime(
+        2026, 8, 31, 9, 30, tzinfo=_SH).astimezone(UTC)
+    monday_world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(saturday_envelope),
+        clock=_FrozenClock(monday_as_of),
+        calendar_dep=recipe.calendar,
+        guard_calendar=recipe.calendar,
+        as_of=monday_as_of,
+    )
+    monday_world.policy = recipe.policy_resolver.resolve_method(
+        monday_world.spec, ctx=monday_world.ctx)
+    monday_fetch = build_raw_fetch(
+        request_digest=monday_world.req.request_digest,
+        source_ref=monday_world.src_ref,
+        capability_ref=monday_world.spec.capability_ref,
+        candidates=friday_fetch.candidates,
+        subsource="tdx_realtime_quote",
+        fetched_at=STALE_SATURDAY_AFTER_24H,
+        provider_request_id=None,
+    )
+    gateway = _CompletingGateway(
+        {monday_world.src_ref.id: lambda _request, *, scope: monday_fetch},
+        _audit_sink(),
+    )
+
+    outcome = _dispatch(monday_world, schema_registry, gateway)
+
+    assert outcome.result.status is DataStatus.STALE
+    assert outcome.result.data is None
+    assert outcome.result.pit_audit.guard_result == "refused"
+    assert outcome.result.pit_audit.latest_available_at == \
+        STALE_FRIDAY_BOOK_LOCAL.astimezone(UTC)
+    # STALE is a typed, audited data terminal and therefore finalizes the tool
+    # result; it is not a source-integrity rejection.
+    assert len(gateway.finalized) == 1
+    assert gateway.rejects == []
+
+
+def test_holiday_stale_tdx_book_uses_immediately_previous_committed_session(
+        schema_registry):
+    holiday = date(2026, 8, 31)  # Monday deliberately absent from this material
+    holiday_calendar = build_trading_calendar(
+        calendar_id="cn_a_share_holiday_fixture",
+        sessions=tuple(day for day in _weekdays_2026() if day != holiday),
+        material_id="cal.cn.2026.holiday-fixture",
+        material_version="1",
+    )
+    captured_at = datetime(2026, 8, 31, 12, 55, 30, tzinfo=_SH).astimezone(UTC)
+    book = _stale_tdx_book()
+    envelope = _stale_indicator_env([book], captured_at=captured_at)
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope),
+        clock=_FrozenClock(captured_at),
+        calendar_dep=holiday_calendar,
+        as_of=captured_at,
+    )
+
+    raw = _precapture_indicator(
+        world,
+        envelope,
+        calendar=holiday_calendar,
+        captured_at=captured_at,
+    )
+
+    assert len(raw.candidates) == 2
+    assert {row.available_at for row in raw.candidates} == {
+        STALE_FRIDAY_BOOK_LOCAL.astimezone(UTC)}
+    assert all(row.ingested_at == captured_at for row in raw.candidates)
+
+
+@pytest.mark.parametrize(("mutator", "match"), [
+    (lambda item: item.update(pit_certified=False), "not PIT-certified"),
+    (lambda item: item.update(time_source="fetch_fallback"),
+     "item time_source"),
+    (lambda item: item["raw"].pop("quote_time"), "native quote_time"),
+    (lambda item: item["raw"].update(quote_date="2026-08-27"),
+     "quote_date does not match"),
+    (lambda item: item["raw"].update(servertime="15:26:49.999"),
+     "quote_time and servertime disagree"),
+    (lambda item: item["raw"].pop("ask5"), "ask5"),
+])
+def test_non_session_stale_tdx_book_refuses_malformed_provenance_or_depth(
+        schema_registry, mutator, match):
+    book = _stale_tdx_book()
+    mutator(book)
+    envelope = _stale_indicator_env([book])
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope),
+        clock=_FrozenClock(STALE_SATURDAY_CAPTURE),
+        calendar_dep=CALENDAR,
+        as_of=STALE_SATURDAY_CAPTURE,
+    )
+
+    with pytest.raises(SourceBrokenError, match=match):
+        _precapture_indicator(
+            world,
+            envelope,
+            calendar=CALENDAR,
+            captured_at=STALE_SATURDAY_CAPTURE,
+        )
+
+
+def test_non_session_stale_tdx_book_refuses_multiple_rows(schema_registry):
+    books = [_stale_tdx_book(), _stale_tdx_book()]
+    envelope = _stale_indicator_env(books)
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope),
+        clock=_FrozenClock(STALE_SATURDAY_CAPTURE),
+        calendar_dep=CALENDAR,
+        as_of=STALE_SATURDAY_CAPTURE,
+    )
+
+    with pytest.raises(SourceBrokenError, match="exactly one mapping row"):
+        _precapture_indicator(
+            world,
+            envelope,
+            calendar=CALENDAR,
+            captured_at=STALE_SATURDAY_CAPTURE,
+        )
+
+
+def test_non_session_stale_tdx_book_refuses_multi_session_old_row(
+        schema_registry):
+    thursday = datetime(2026, 8, 27, 15, 26, 50, 406000, tzinfo=_SH)
+    book = _stale_tdx_book(quoted_at=thursday)
+    envelope = _stale_indicator_env([book])
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope),
+        clock=_FrozenClock(STALE_SATURDAY_CAPTURE),
+        calendar_dep=CALENDAR,
+        as_of=STALE_SATURDAY_CAPTURE,
+    )
+
+    with pytest.raises(SourceBrokenError, match="immediately preceding"):
+        _precapture_indicator(
+            world,
+            envelope,
+            calendar=CALENDAR,
+            captured_at=STALE_SATURDAY_CAPTURE,
+        )
+
+
+def test_stale_tdx_retained_book_refuses_on_a_normal_session(schema_registry):
+    captured_at = datetime(2026, 8, 28, 15, 27, 0, tzinfo=_SH).astimezone(UTC)
+    book = _stale_tdx_book()
+    envelope = _stale_indicator_env([book], captured_at=captured_at)
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope),
+        clock=_FrozenClock(captured_at),
+        calendar_dep=CALENDAR,
+        as_of=captured_at,
+    )
+
+    with pytest.raises(SourceBrokenError, match="only on a non-session"):
+        _precapture_indicator(
+            world,
+            envelope,
+            calendar=CALENDAR,
+            captured_at=captured_at,
+        )
+
+
+def test_non_session_stale_tdx_current_live_time_is_not_a_retained_book(
+        schema_registry):
+    current_live = datetime(2026, 8, 28, 14, 59, 59, tzinfo=_SH)
+    book = _stale_tdx_book(quoted_at=current_live)
+    envelope = _stale_indicator_env([book])
+    world = _OnlineWorld(
+        schema_registry,
+        method_id="indicators",
+        params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope),
+        clock=_FrozenClock(STALE_SATURDAY_CAPTURE),
+        calendar_dep=CALENDAR,
+        as_of=STALE_SATURDAY_CAPTURE,
+    )
+
+    with pytest.raises(SourceBrokenError, match="retained-close-book window"):
+        _precapture_indicator(
+            world,
+            envelope,
+            calendar=CALENDAR,
+            captured_at=STALE_SATURDAY_CAPTURE,
+        )
+
+
+@pytest.mark.parametrize("server_time", ["15:00:00.001", "15:30:00"])
+def test_indicators_accepts_both_retained_close_book_boundaries(
+        schema_registry, server_time):
+    cutoff = AS_OF + timedelta(hours=5)
+    book = _tdx_book()
+    book["raw"]["servertime"] = server_time
+    world = _OnlineWorld(
+        schema_registry, method_id="indicators", params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(_ok_env(
+            source="tdx_realtime_quote", provider="tdx", items=[book],
+            pulled_at=_pulled(cutoff))),
+        clock=_FrozenClock(cutoff), calendar_dep=CALENDAR, as_of=cutoff)
+
+    raw = world.fetch()
+
+    assert len(raw.candidates) == 2
+    assert all(
+        row.revision_id.startswith(POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX)
+        for row in raw.candidates)
+
+
+def test_indicators_refuses_a_book_stamped_after_close_processing_window(
+        schema_registry):
+    cutoff = AS_OF + timedelta(hours=5)
+    book = _tdx_book()
+    book["raw"]["servertime"] = "15:30:00.001"
+    world = _OnlineWorld(
+        schema_registry, method_id="indicators", params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(_ok_env(
+            source="tdx_realtime_quote", provider="tdx", items=[book],
+            pulled_at=_pulled(cutoff))),
+        clock=_FrozenClock(cutoff), calendar_dep=CALENDAR, as_of=cutoff)
+    with pytest.raises(SourceBrokenError, match="retained-close-book"):
+        world.fetch()
+
+
+def test_retained_close_book_refuses_a_cross_day_capture(schema_registry):
+    cutoff = AS_OF + timedelta(hours=5)
+    captured_next_day = cutoff + timedelta(days=1)
+    book = _tdx_book()
+    book["raw"]["servertime"] = "15:26:50"
+    envelope = _ok_env(
+        source="tdx_realtime_quote", provider="tdx", items=[book],
+        pulled_at=_pulled(captured_next_day))
+    world = _OnlineWorld(
+        schema_registry, method_id="indicators", params=_INDICATOR_PARAMS,
+        probe_stub=_ProbeStub(envelope), clock=_FrozenClock(cutoff),
+        calendar_dep=CALENDAR, as_of=cutoff)
+
+    with pytest.raises(SourceBrokenError, match="not captured on"):
+        build_precaptured_indicator_fetch(
+            world.req,
+            envelope=envelope,
+            canonical_source="tdx_realtime_quote",
+            source_ref=world.src_ref,
+            capability_ref=world.spec.capability_ref,
+            calendar=CALENDAR,
+            captured_at=captured_next_day,
+        )
+
+
+def test_deep_indicator_runtime_reloads_exact_persisted_fetch_without_second_probe(
+        schema_registry):
+    cutoff = AS_OF + timedelta(hours=5)
+    retained = _tdx_book()
+    retained["raw"]["servertime"] = "15:26:50.406"
+    envelope = _ok_env(
+        source="tdx_realtime_quote", provider="tdx",
+        items=[retained], pulled_at=_pulled(cutoff))
+    initial_probe = _ProbeStub(envelope)
+    world = _OnlineWorld(
+        schema_registry, method_id="indicators", params=_INDICATOR_PARAMS,
+        probe_stub=initial_probe, clock=_FrozenClock(cutoff),
+        as_of=cutoff,
+        calendar_dep=CALENDAR, data_snapshot_id="deep-capture-unit")
+    raw = build_precaptured_indicator_fetch(
+        world.req,
+        envelope=envelope,
+        canonical_source="tdx_realtime_quote",
+        source_ref=world.src_ref,
+        capability_ref=world.spec.capability_ref,
+        calendar=CALENDAR,
+        captured_at=cutoff,
+    )
+    ref = PayloadRef(
+        namespace="audit", object_id="raw-deep-unit",
+        content_digest=content_digest(raw))
+    durable = {ref.object_id: raw}
+    register_precaptured_indicator_fetch(
+        request_digest=world.req.request_digest,
+        raw_fetch_ref=ref,
+        loader=lambda stored_ref: durable[stored_ref.object_id],
+    )
+    # Process restart: latency index is gone, production binding rebuilds it
+    # from persisted RawFetch@1 rows by request digest.
+    loader = lambda stored_ref: durable[stored_ref.object_id]
+    bind_precaptured_indicator_store_lookup(
+        lambda digest: (ref, loader)
+        if digest == world.req.request_digest else None)
+
+    later = _tdx_book()
+    later["raw"]["servertime"] = "15:00:01"
+    runtime_probe = _ProbeStub(
+        _ok_env(
+            source="tdx_realtime_quote", provider="tdx",
+            items=[later], pulled_at=_pulled(AS_OF + timedelta(seconds=1))))
+    world.adapter = LiveClientSource(
+        probe_fn=runtime_probe, calendar=CALENDAR)
+    replayed = world.fetch()
+
+    assert runtime_probe.calls == []
+    assert replayed == raw
+    assert replayed.fetch_content_digest == raw.fetch_content_digest
+    assert all(
+        row.revision_id.startswith(POST_CLOSE_RETAINED_BOOK_REVISION_PREFIX)
+        for row in replayed.candidates)
+
+
+def test_deep_indicator_missing_precapture_refuses_before_any_probe(schema_registry):
+    unique_params = dict(_INDICATOR_PARAMS)
+    unique_params["start"] = "2026-07-15T23:59:59+00:00"
+    probe = _ProbeStub(_ok_env(
+        source="tdx_realtime_quote", provider="tdx",
+        items=[_tdx_book()], pulled_at=_pulled(AS_OF)))
+    world = _OnlineWorld(
+        schema_registry, method_id="indicators", params=unique_params,
+        probe_stub=probe, clock=_FrozenClock(AS_OF), calendar_dep=CALENDAR,
+        data_snapshot_id="deep-capture-missing")
+
+    with pytest.raises(SourceBrokenError, match="no persisted pre-capture"):
+        world.fetch()
+    assert probe.calls == []
 
 
 # =========================================================================== #
@@ -1551,7 +2942,9 @@ def _news_item(published: datetime | None, *, title="headline", key="publish_ts"
 
 
 def _news_world(schema_registry, items, *, pulled_at=NEWS_PULL_AFTER_AS_OF):
-    stub = _ProbeStub(_ok_env(items=items, pulled_at=_pulled(pulled_at)))
+    stub = _ProbeStub(_ok_env(
+        source="eastmoney_stock_news", provider="eastmoney",
+        items=items, pulled_at=_pulled(pulled_at)))
     return _OnlineWorld(schema_registry, method_id="news", params=_NEWS_PARAMS,
                         probe_stub=stub, clock=_FrozenClock(AS_OF))
 
@@ -1706,7 +3099,6 @@ def test_visible_ts_is_the_bound_fallback_publication_key(schema_registry):
 
 @pytest.mark.parametrize("method_id,params", [
     ("verified_snapshot", _VERIFIED_SNAPSHOT_PARAMS),
-    ("ohlcv", _OHLCV_PARAMS),
 ])
 def test_publication_stamping_and_exclusion_are_news_only(schema_registry, method_id, params):
     """Scope pin: the quote/tape routes are untouched — every row still forwarded.
@@ -1717,6 +3109,7 @@ def test_publication_stamping_and_exclusion_are_news_only(schema_registry, metho
     still handed to the guard, refusal and all.
     """
     stub = _ProbeStub(_ok_env(
+        source="tencent_realtime_quote", provider="tencent",
         items=[{"publish_ts": PUBLISHED_BEFORE.astimezone(_SH).strftime("%Y-%m-%dT%H:%M:%S"),
                 "visible_ts_reason": "exact_publish_time", "price": 1.0}],
         pulled_at=_pulled(NEWS_PULL_AFTER_AS_OF)))

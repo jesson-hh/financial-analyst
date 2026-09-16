@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from financial_analyst.agent.base import SubAgent
+from financial_analyst.data.pit import PitUnavailableError, is_historical_asof
 
 
 class SectorRanking(BaseModel):
@@ -112,8 +113,22 @@ class SectorRotationAnalyzer(SubAgent[SectorRotationOutput]):
         self._min_n = min_movers_per_sector
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        as_of = inputs.get("asof_date") or datetime.today().strftime("%Y-%m-%d")
         scanner = inputs.get("market-scanner", {}) or {}
+        overseas = inputs.get("overseas-market-scanner", {}) or {}
+        as_of = (
+            inputs.get("asof_date")
+            or scanner.get("asof_date")
+            or scanner.get("as_of")
+            or overseas.get("asof_date")
+            or overseas.get("as_of")
+            or datetime.today().strftime("%Y-%m-%d")
+        )
+        if is_historical_asof(as_of):
+            raise PitUnavailableError(
+                "sector-rotation-analyzer unavailable: current stock_basic cannot "
+                f"prove historical industry membership for {as_of}"
+            )
+
         ind_map = _load_industry_map(self._parquet_root)
 
         # Aggregate all movers (gainers + losers + vol_anomalies, deduped by code)

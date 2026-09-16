@@ -11,9 +11,18 @@
 # Schedule service (powershell.exe and even cmd.exe) freezes at early loader init
 # (0 CPU, only 4 modules mapped, single thread in Executive wait). Verified 2026-06-10.
 # The watchdog's named mutex makes double starts harmless (second instance exits).
-
-$WatchdogPs1 = 'G:\guanlan-v2\scripts\watchdog_9999.ps1'
-$LaunchCmd   = 'C:\Windows\System32\conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File ' + $WatchdogPs1
+param([string]$WatchdogScript = $env:GUANLAN_WATCHDOG_9999_SCRIPT)
+$ErrorActionPreference = 'Stop'
+$WatchdogPs1 = if ([string]::IsNullOrWhiteSpace($WatchdogScript)) {
+    Join-Path $PSScriptRoot 'watchdog_9999.ps1'
+} else {
+    (Resolve-Path -LiteralPath $WatchdogScript).Path
+}
+if (-not (Test-Path -LiteralPath $WatchdogPs1 -PathType Leaf)) {
+    throw "watchdog_9999.ps1 not found: $WatchdogPs1"
+}
+$Conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+$LaunchCmd = '"{0}" --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{1}"' -f $Conhost, $WatchdogPs1
 
 # remove the legacy (broken) scheduled task if an older version of this script created it
 try {

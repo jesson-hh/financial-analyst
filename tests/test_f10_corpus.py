@@ -1,9 +1,19 @@
+import hashlib
+import json
+import os
 import sys, pathlib
+from datetime import datetime
 _ENGINE = pathlib.Path(__file__).resolve().parents[1] / "engine"
 if str(_ENGINE) not in sys.path:
     sys.path.insert(0, str(_ENGINE))
 
 from financial_analyst.data import f10_corpus as fc
+from financial_analyst.data.trusted_receipts import (
+    F10_ACQUISITION_DOMAIN,
+    KEY_ENV,
+    KEY_ID_ENV,
+    sign_payload,
+)
 
 
 def test_num_handles_units_and_missing():
@@ -200,6 +210,9 @@ def test_load_facts_live_assembles_all():
     assert d["asof"] is None
     assert d["honest_note"] == ""
     assert d["provenance"]
+    assert d["snapshot_receipts"]
+    assert all(r["status"] == "available" for r in d["snapshot_receipts"])
+    assert d["unavailable_sources"] == []
 
 
 def test_load_facts_missing_stock_is_honest_empty():
@@ -207,8 +220,124 @@ def test_load_facts_missing_stock_is_honest_empty():
     d = f.to_dict()
     assert d["valuation"] is None and d["events"] == []
     assert "无" in d["honest_note"]
+    assert d["snapshot_receipts"][0]["status"] == "unavailable"
+    assert d["unavailable_sources"][0]["source"] == "f10:corpus"
 
 
 def test_load_facts_code_normalization_and_lowercase_dir():
     assert fc.load_facts("000630", asof=None, root=_fixt_root()).to_dict()["events"]
     assert fc.load_facts("sz000630", asof=None, root=_fixt_root()).to_dict()["events"]
+
+
+def _write_event_snapshot(root, snapshot_date, title):
+    cdir = root / "sz000001"
+    cdir.mkdir(parents=True, exist_ok=True)
+    path = cdir / f"公司大事_{snapshot_date}.txt"
+    path.write_text(f"｜2025-04-30｜{title}｜\n", encoding="utf-8")
+    return path
+
+
+def _seal_event_snapshot(path, monkeypatch):
+    monkeypatch.setenv(KEY_ID_ENV, "f10-corpus-test-key")
+    monkeypatch.setenv(
+        KEY_ENV, "test-only-f10-corpus-hmac-material-over-32-bytes",
+    )
+    day = path.stem.rsplit("_", 1)[1]
+    iso_day = f"{day[:4]}-{day[4:6]}-{day[6:]}"
+    pulled_at = f"{iso_day}T15:00:00+08:00"
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    payload = {
+        "schema_version": "f10-acquisition-receipt/v1",
+        "receipt_id": f"fixture-{digest[:16]}",
+        "source": "f10:公司大事",
+        "code": "SZ000001",
+        "category": "公司大事",
+        "snapshot_file": path.name,
+        "pulled_at": pulled_at,
+        "acquired_at": pulled_at,
+        "snapshot_version": f"fixture:{digest}",
+        "snapshot_asof": iso_day,
+        "snapshot_immutable": True,
+        "content_sha256": digest,
+    }
+    payload.update(sign_payload(F10_ACQUISITION_DOMAIN, payload) or {})
+    receipt_path = path.with_suffix(path.suffix + ".receipt.json")
+    receipt_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    stamp = datetime.fromisoformat(pulled_at).timestamp()
+    os.utime(path, (stamp, stamp))
+    os.utime(receipt_path, (stamp, stamp))
+    return receipt_path
+
+
+def test_load_facts_historical_selects_latest_snapshot_per_category(tmp_path, monkeypatch):
+    _write_event_snapshot(tmp_path, "20250401", "旧快照")
+    selected = _write_event_snapshot(tmp_path, "20250510", "截止日前最新快照")
+    _seal_event_snapshot(selected, monkeypatch)
+    future = _write_event_snapshot(tmp_path, "20250601", "未来快照泄漏")
+
+    original_read_bytes = pathlib.Path.read_bytes
+
+    def guarded_read_bytes(path):
+        assert path != future, "snapshot newer than asof must never be opened"
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", guarded_read_bytes)
+    facts = fc.load_facts("SZ000001", asof="2025-05-15", root=tmp_path)
+
+    assert [event["title"] for event in facts.events] == ["截止日前最新快照"]
+    assert facts.snapshot_date == "20250510"
+    receipt = facts.snapshot_receipts[0]
+    assert receipt["source"] == "f10:公司大事"
+    assert receipt["data_asof"] == "2025-05-10"
+    assert receipt["snapshot_file"] == selected.name
+    assert "snapshot_path" not in receipt
+    assert str(tmp_path) not in json.dumps(receipt, ensure_ascii=False)
+    assert receipt["historical_version_proven"] is True
+    assert receipt["proof"] == "verified_acquisition_sidecar+content_sha256"
+    assert len(receipt["content_sha256"]) == 64
+
+
+def test_load_facts_historical_future_only_snapshot_is_unavailable_without_reading(
+    tmp_path, monkeypatch,
+):
+    future = _write_event_snapshot(tmp_path, "20250601", "不得读取")
+    original_read_bytes = pathlib.Path.read_bytes
+
+    def guarded_read_bytes(path):
+        assert path != future, "future-only snapshot must never be opened"
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", guarded_read_bytes)
+    facts = fc.load_facts("SZ000001", asof="2025-05-15", root=tmp_path)
+
+    assert facts.events == []
+    assert facts.snapshot_date is None
+    assert "无可见 F10 快照" in facts.honest_note
+    receipt = facts.snapshot_receipts[0]
+    required = {
+        "source", "status", "requested_asof", "data_asof", "pulled_at",
+        "cache_key", "historical_version_proven", "proof", "reason",
+    }
+    assert required <= set(receipt)
+    assert receipt["status"] == "unavailable"
+    assert receipt["data_asof"] is None
+    # A future-only inventory is deliberately indistinguishable from an absent
+    # corpus: even its category must not leak into an as-of response.
+    assert facts.unavailable_sources == [{
+        "source": "f10:corpus",
+        "reason": receipt["reason"],
+    }]
+
+
+def test_load_facts_live_still_selects_latest_snapshot(tmp_path):
+    _write_event_snapshot(tmp_path, "20250510", "较旧快照")
+    latest = _write_event_snapshot(tmp_path, "20250601", "当前最新快照")
+
+    facts = fc.load_facts("SZ000001", asof=None, root=tmp_path)
+
+    assert [event["title"] for event in facts.events] == ["当前最新快照"]
+    receipt = facts.snapshot_receipts[0]
+    assert receipt["snapshot_file"] == latest.name
+    assert "snapshot_path" not in receipt
+    assert receipt["proof"] == "current_unversioned_f10_read"
+    assert facts.asof is None

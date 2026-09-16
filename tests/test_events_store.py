@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -111,6 +112,176 @@ def test_read_events_requires_asof(tmp_path):
     conn.close()
 
 
+def _seed_relation_event(conn):
+    store.insert_event(conn, {
+        "event_id": "relation-event", "event_type": "news",
+        "available_at": "2026-08-30T08:00:00", "title": "关联回放",
+    })
+
+
+def test_event_relation_reviews_append_and_replay_at_three_asofs(tmp_path):
+    conn = _open(tmp_path)
+    store.init_db(conn)
+    _seed_relation_event(conn)
+    candidate = {
+        "relation_id": "candidate-1", "event_id": "relation-event",
+        "relation_type": "entity", "target_id": "SH600000",
+        "target_name": "浦发银行", "relation_status": "candidate",
+        "confidence": 0.6, "created_at": "2026-08-30T09:00:00",
+    }
+    confirmed = {
+        "relation_id": "confirmed-1", "event_id": "relation-event",
+        "relation_type": "entity", "target_id": "SH600000",
+        "target_name": "浦发银行", "relation_status": "confirmed",
+        "confidence": 0.99, "created_at": "2026-08-30T09:00:00",
+        "reviewed_by": "analyst-a", "reviewed_at": "2026-08-30T10:00:00",
+    }
+    rejected = {
+        "relation_id": "rejected-1", "event_id": "relation-event",
+        "relation_type": "entity", "target_id": "SH600000",
+        "target_name": "浦发银行", "relation_status": "rejected",
+        "confidence": 0.0, "created_at": "2026-08-30T09:00:00",
+        "reviewed_by": "analyst-b", "reviewed_at": "2026-08-30T11:00:00",
+    }
+    assert store.insert_event_relation(conn, candidate) is True
+    assert store.insert_event_relation(conn, candidate) is False
+    with pytest.raises(ValueError, match="different immutable payload"):
+        store.insert_event_relation(conn, {**candidate, "confidence": 0.7})
+    assert store.insert_event_relation(conn, confirmed) is True
+    assert store.insert_event_relation(conn, rejected) is True
+
+    def status_at(asof):
+        rows = store.read_event_relations(
+            conn, asof, event_id="relation-event",
+        )
+        assert len(rows) == 1
+        return rows[0]["relation_status"], rows[0]["effective_at"]
+
+    assert status_at("2026-08-30T09:30:00") == (
+        "candidate", "2026-08-30T09:00:00",
+    )
+    assert status_at("2026-08-30T10:30:00") == (
+        "confirmed", "2026-08-30T10:00:00",
+    )
+    assert status_at("2026-08-30T11:30:00") == (
+        "rejected", "2026-08-30T11:00:00",
+    )
+    assert len(store.read_event_relations(
+        conn, "2026-08-30T11:30:00", event_id="relation-event", collapse=False,
+    )) == 3
+
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("UPDATE event_relations SET confidence=0.1 WHERE relation_id='candidate-1'")
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("DELETE FROM event_relations WHERE relation_id='candidate-1'")
+    assert conn.execute("SELECT COUNT(*) FROM event_relations").fetchone()[0] == 3
+
+    rootpage = conn.execute(
+        "SELECT rootpage FROM sqlite_master WHERE type='table' AND name='event_relations'"
+    ).fetchone()[0]
+    trigger_sql = list(conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' "
+        "AND tbl_name='event_relations' ORDER BY name"
+    ))
+    relation_rows = list(conn.execute(
+        "SELECT * FROM event_relations ORDER BY relation_id"
+    ))
+    before_changes = conn.total_changes
+    store.init_db(conn)
+    assert conn.execute(
+        "SELECT rootpage FROM sqlite_master WHERE type='table' AND name='event_relations'"
+    ).fetchone()[0] == rootpage
+    assert list(conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' "
+        "AND tbl_name='event_relations' ORDER BY name"
+    )) == trigger_sql
+    assert list(conn.execute(
+        "SELECT * FROM event_relations ORDER BY relation_id"
+    )) == relation_rows
+    assert conn.total_changes == before_changes
+    conn.close()
+
+
+def test_event_relation_rejects_ambiguous_future_and_invalid_review_times(tmp_path):
+    conn = _open(tmp_path)
+    store.init_db(conn)
+    _seed_relation_event(conn)
+    base = {
+        "relation_id": "base", "event_id": "relation-event",
+        "relation_type": "entity", "target_id": "SH600000",
+        "relation_status": "candidate", "created_at": "2026-08-30T09:00:00",
+    }
+    assert store.insert_event_relation(conn, base) is True
+
+    for index, ambiguous in enumerate(("2026-08-30", "2026-08-30Z",
+                                       "2026-08-30+08:00")):
+        with pytest.raises(ValueError, match="include a time"):
+            store.insert_event_relation(conn, {
+                **base, "relation_id": f"date-only-{index}",
+                "created_at": ambiguous,
+            })
+    future = datetime.now(store.HONG_KONG) + timedelta(days=1)
+    with pytest.raises(ValueError, match="future"):
+        store.insert_event_relation(conn, {**base, "relation_id": "future",
+                                            "created_at": future.isoformat()})
+    review = {
+        **base, "relation_id": "review", "relation_status": "confirmed",
+        "reviewed_by": "analyst", "reviewed_at": "2026-08-30T10:00:00",
+    }
+    with pytest.raises(ValueError, match="reviewed_by"):
+        store.insert_event_relation(conn, {**review, "relation_id": "no-reviewer",
+                                            "reviewed_by": None})
+    with pytest.raises(ValueError, match="reviewed_at"):
+        store.insert_event_relation(conn, {**review, "relation_id": "no-time",
+                                            "reviewed_at": None})
+    with pytest.raises(ValueError, match="cannot precede"):
+        store.insert_event_relation(conn, {**review, "relation_id": "backdated",
+                                            "created_at": "2026-08-30T10:30:00"})
+    with pytest.raises(ValueError, match="review metadata"):
+        store.insert_event_relation(conn, {**base, "relation_id": "mutated-base",
+                                            "reviewed_by": "analyst",
+                                            "reviewed_at": "2026-08-30T10:00:00"})
+    with pytest.raises(ValueError, match="existing target"):
+        store.insert_event_relation(conn, {**review, "relation_id": "unknown-target",
+                                            "target_id": "SZ000001"})
+    review_without_created = {**review, "relation_id": "review-default-created"}
+    review_without_created.pop("created_at")
+    assert store.insert_event_relation(conn, review_without_created) is True
+    stored_times = conn.execute(
+        "SELECT created_at,reviewed_at FROM event_relations WHERE relation_id=?",
+        ("review-default-created",),
+    ).fetchone()
+    assert tuple(stored_times) == (
+        "2026-08-30T10:00:00", "2026-08-30T10:00:00",
+    )
+    conn.close()
+
+
+def test_read_event_relations_also_obeys_parent_event_pit_window(tmp_path):
+    conn = _open(tmp_path)
+    store.init_db(conn)
+    store.insert_event(conn, {
+        "event_id": "pit-parent", "event_type": "news",
+        "available_at": "2026-08-30T10:00:00",
+        "invalidated_at": "2026-08-30T11:00:00",
+    })
+    store.insert_event_relation(conn, {
+        "relation_id": "pit-relation", "event_id": "pit-parent",
+        "relation_type": "industry", "target_id": "bank",
+        "relation_status": "source_asserted", "created_at": "2026-08-30T09:00:00",
+    })
+    assert store.read_event_relations(
+        conn, "2026-08-30T09:30:00", event_id="pit-parent",
+    ) == []
+    assert [row["relation_id"] for row in store.read_event_relations(
+        conn, "2026-08-30T10:30:00", event_id="pit-parent",
+    )] == ["pit-relation"]
+    assert store.read_event_relations(
+        conn, "2026-08-30T11:00:00", event_id="pit-parent",
+    ) == []
+    conn.close()
+
+
 # ───────────────────────── Task 4: jieba 预分词 FTS5 检索 ─────────────────────────
 
 def _seed_fts(conn):
@@ -121,6 +292,44 @@ def _seed_fts(conn):
                                   available_at="2026-07-18T09:00:00",
                                   title="某公司发布人工智能芯片", summary="性能大幅提升"))
     conn.commit()
+
+
+def test_backfill_fts_repairs_duplicate_and_orphan_balanced_gaps(tmp_path):
+    conn = _open(tmp_path)
+    store.init_db(conn)
+    if not store._fts_exists(conn):
+        pytest.skip("SQLite build has no FTS5")
+    store.insert_event(conn, {
+        "event_id": "fts-a", "event_type": "news",
+        "available_at": "2026-08-30T09:00:00", "title": "甲事件",
+    })
+    store.insert_event(conn, {
+        "event_id": "fts-b", "event_type": "news",
+        "available_at": "2026-08-30T09:01:00", "title": "乙事件",
+    })
+
+    # Equal raw counts used to look healthy even though one base id was absent.
+    conn.execute("DELETE FROM events_fts")
+    conn.executemany(
+        "INSERT INTO events_fts(tokens,event_id) VALUES(?,?)",
+        (("甲", "fts-a"), ("重复甲", "fts-a")),
+    )
+    store.backfill_fts(conn)
+    assert [tuple(row) for row in conn.execute(
+        "SELECT event_id,count(*) FROM events_fts GROUP BY event_id ORDER BY event_id"
+    )] == [("fts-a", 1), ("fts-b", 1)]
+
+    # DISTINCT count alone is also insufficient when an orphan replaces a base id.
+    conn.execute("DELETE FROM events_fts")
+    conn.executemany(
+        "INSERT INTO events_fts(tokens,event_id) VALUES(?,?)",
+        (("甲", "fts-a"), ("幽灵", "ghost")),
+    )
+    store.backfill_fts(conn)
+    assert [row[0] for row in conn.execute(
+        "SELECT event_id FROM events_fts ORDER BY event_id"
+    )] == ["fts-a", "fts-b"]
+    conn.close()
 
 
 def test_search_chinese_subword_hit(tmp_path):
@@ -141,6 +350,18 @@ def test_search_requires_asof(tmp_path):
     with pytest.raises((ValueError, TypeError)):
         store.search_events("降准", asof=None, conn=conn)        # asof 缺则炸(前视温床)
     conn.close()
+
+
+def test_jieba_query_first_use_does_not_create_temp_cache(monkeypatch):
+    import jieba
+
+    store._memory_jieba_tokenizer.cache_clear()
+
+    def forbidden_mkstemp(*_args, **_kwargs):
+        raise AssertionError("read-only query attempted a jieba temp cache write")
+
+    monkeypatch.setattr(jieba.tempfile, "mkstemp", forbidden_mkstemp)
+    assert "降准" in store._jieba_query("央行降准")
 
 
 def test_search_pit_asof_filter(tmp_path):

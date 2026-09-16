@@ -17,7 +17,9 @@ from pathlib import Path
 
 from . import sources
 
-_SNAP_DEFAULT = Path(__file__).resolve().parents[2] / "var" / "fundflow"
+_SNAP_DEFAULT = Path(os.environ.get("GUANLAN_FUNDFLOW_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var" / "fundflow"
+))
 _LIVE_CACHE_DEFAULT = Path(__file__).resolve().parents[2] / "var" / "live"
 _LIVE_TTL_S = int(os.environ.get("GUANLAN_FUNDFLOW_TTL_S", "180"))
 _live_lock = threading.Lock()
@@ -226,17 +228,30 @@ def _trigger_live_refresh(kind: str, cache_dir=None,
 
 
 def read_live(kind: str = "concept", refresh: bool = False,
-              cache_dir=None, ttl_s=None, now=None, sector_fn=None, build_fn=None) -> dict:
+              cache_dir=None, ttl_s=None, now=None, sector_fn=None, build_fn=None,
+              *, allow_refresh: bool = True) -> dict:
     """SWR 只读门户(/fundflow/live 走它):缓存新鲜→秒回;缺失→阻塞首拉(一次性);过期→返旧值
     +触发后台单飞刷新。refresh=True 显式强拉绕缓存。TTL 内重复读绝不反复打东财。纯展示不回写。"""
     k = _norm_kind(kind)
     ttl = _LIVE_TTL_S if ttl_s is None else int(ttl_s)
     ref_now = now or datetime.now()
+    if refresh and not allow_refresh:
+        return {"ok": False, "kind": k, "pulled_at": None,
+                "market": {}, "breadth": {}, "boards": [],
+                "freshness": {"age_s": None, "stale": True,
+                              "ttl_s": ttl, "frozen": not _is_trading(ref_now)},
+                "notes": ["只读模式拒绝显式资金流刷新"]}
     if refresh:
         data = _refresh_live(k, refresh=True, cache_dir=cache_dir,
                              sector_fn=sector_fn, now=now, build_fn=build_fn)
         return _annotate_live(data, ref_now, ttl)
     cached = _load_live_cache(k, cache_dir)
+    if not cached and not allow_refresh:
+        return {"ok": False, "kind": k, "pulled_at": None,
+                "market": {}, "breadth": {}, "boards": [],
+                "freshness": {"age_s": None, "stale": True,
+                              "ttl_s": ttl, "frozen": not _is_trading(ref_now)},
+                "notes": ["只读模式无资金流缓存;未启动刷新"]}
     if not cached:                       # 冷启动:阻塞首拉,落缓存
         # 2026-07-28 评审修:首拉也过单飞旗——预热线程与页面请求并发抵达同一 kind 时
         # 只放一个真拉东财,其余有界等缓存(拉取方失败则等窗尽头自拉兜底,返回契约不变)。
@@ -264,7 +279,7 @@ def read_live(kind: str = "concept", refresh: bool = False,
     # 非交易时段:当天数据定格,秒回缓存,绝不后台重拉(省得白打东财 + 用户无感)。
     triggered = False
     age = _live_age_s(cached, ref_now)
-    if _is_trading(ref_now) and (age is None or age > ttl):
+    if allow_refresh and _is_trading(ref_now) and (age is None or age > ttl):
         triggered = _trigger_live_refresh(k, cache_dir, sector_fn, build_fn)
     return _annotate_live(cached, ref_now, ttl, triggered=triggered)
 

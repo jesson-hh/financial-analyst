@@ -1,8 +1,27 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "guanlan-v2"
-version = "0.0.1"
+version = "0.1.0"
 description = "观澜 V2 — A 股研究闭环工作台 (5 模块共享档案库, 自包含引擎)"
+readme = { file = "README.md", content-type = "text/markdown" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [
+    { name = "jesson-hh" },
+]
 requires-python = ">=3.11"
+keywords = ["a-share", "quantitative-research", "financial-research", "multi-agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 # 引擎 (financial_analyst) 已 fork 进本仓库 engine/ —— guanlan-v2 自包含。
 # 下列依赖 = 引擎 (原 financial-analyst 包) 的运行时依赖, 不再依赖外部 financial-analyst 包。
 # 数据仍外部: 经引擎 get_data_paths → config/loaders.yaml → G:/stocks (见 docs/data_contract.md)。
@@ -30,10 +49,35 @@ dependencies = [
     "hf-transfer>=0.1.6",
     "pypdf>=4",                # /upload PDF 抽取
     "Pillow>=10",              # 帷幄量化图生成与受控图片校验/交付
+    "matplotlib>=3.8",         # 通用分析统计图（无界面 Agg 后端）
+    "openpyxl>=3.1",           # 通用分析 XLSX 产物
+    "python-docx>=1.1",        # 通用分析 DOCX 产物
     "python-multipart>=0.0.9", # /upload multipart
     "jieba>=0.42",             # 事件库 FTS 中文预分词(缺席时 LIKE 诚实降级)
     "psutil>=5.9",             # 研究空间代码任务的进程树/内存/子进程硬闸
+    "pywin32>=306; sys_platform == 'win32'", # Telegram Token: Windows CurrentUser DPAPI
 ]
+
+[project.urls]
+Homepage = "https://github.com/jesson-hh/financial-analyst"
+Repository = "https://github.com/jesson-hh/financial-analyst"
+Issues = "https://github.com/jesson-hh/financial-analyst/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["guanlan_v2*", "engine.financial_analyst*"]
+namespaces = true
+
+[tool.setuptools]
+# The supported deployment is an editable install from a full source checkout.
+# Python packages are explicit so unrelated top-level source/resource directories
+# (ui, config, memories) are never mistaken for import packages.  Those directories
+# intentionally remain source-deployment resources and are not promised in wheels.
+include-package-data = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not realdata'"
 
 [tool.guanlan]
 # 引擎源默认 = 仓库内 vendored 包 engine/ (见 guanlan_v2/server.py _FA_SRC_DEFAULT);

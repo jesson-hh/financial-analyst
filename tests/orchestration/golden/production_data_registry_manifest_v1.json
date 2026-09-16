@@ -1,7 +1,7 @@
 {
   "algorithm": "sha256+cjson-v1",
   "registry_version": "prod-data-v1",
-  "source_registry_digest": "bb81979af8824a99574c67b9ef6176720568745a8e58772afce9ea755d915aca",
+  "source_registry_digest": "1db2fa94d44d35dce66bb08fe253d9a260734573fa143916671b5617291348de",
   "methods": [
     {
       "method_id": "fundamentals",

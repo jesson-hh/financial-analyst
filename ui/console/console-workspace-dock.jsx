@@ -295,24 +295,271 @@ function WwWorkspaceWatch({ workspace, data, loading, onOpenStage }) {
   </div>;
 }
 
-function WwWorkspaceResearch({ data, loading, onOpenStage }) {
+const WW_DOCK_DOCUMENT_TYPES = Object.freeze({
+  'application/pdf': ['.pdf', 'PDF'],
+  'text/markdown': ['.md|.markdown', 'Markdown'],
+  'text/plain': ['.txt', '文本'],
+  'text/csv': ['.csv', 'CSV'],
+  'text/tab-separated-values': ['.tsv', 'TSV'],
+  'application/json': ['.json', 'JSON'],
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx', 'Excel'],
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx', 'Word'],
+});
+const WW_DOCK_IMAGE_TYPES = Object.freeze({
+  'image/png': true, 'image/jpeg': true, 'image/webp': true,
+});
+
+function wwDockAssetText(value, fallback, limit) {
+  const text = String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  return (text || fallback || '').slice(0, limit);
+}
+
+function wwDockAttachmentName(value, fallback) {
+  if (typeof value !== 'string' || !value || /[\u0000-\u001f\u007f\\/:]/.test(value)) return '';
+  return wwDockAssetText(value, fallback, 160);
+}
+
+function wwDockHasRawAddress(row) {
+  return ['path', 'url', 'src', 'href', 'file', 'blob_name'].some(key => Object.prototype.hasOwnProperty.call(row, key));
+}
+
+// 重新打开报告时只消费后端签发的 opaque 附件 ID；图片只进入 <img>，
+// 文件只进入 download 链接，任何 path/url/src 均直接拦截。
+function wwNormalizeDockReportAsset(response, workspaceId, requestedAssetId) {
+  const envelope = response && typeof response === 'object' ? response : {};
+  const asset = envelope.asset && typeof envelope.asset === 'object' ? envelope.asset : null;
+  if (envelope.ok === false || !asset) return { ok: false, reason: envelope.reason || '研究资产读取失败' };
+  if (!/^wa_[0-9a-f]{16}$/.test(String(requestedAssetId || ''))
+      || asset.id !== requestedAssetId || asset.workspace_id !== workspaceId
+      || asset.scope !== 'workspace' || !['report', 'analysis'].includes(String(asset.kind || ''))) {
+    return { ok: false, reason: '研究资产范围校验失败，内容未展示' };
+  }
+  const attachments = asset.attachments && typeof asset.attachments === 'object'
+    && !Array.isArray(asset.attachments) ? asset.attachments : {};
+  const rawImages = Array.isArray(attachments.images) ? attachments.images.slice(0, 12) : [];
+  const rawDocuments = Array.isArray(attachments.documents) ? attachments.documents.slice(0, 12) : [];
+  const images = rawImages.map(row => {
+    if (!row || typeof row !== 'object' || Array.isArray(row) || wwDockHasRawAddress(row)) return null;
+    const mediaId = String(row.media_id || '');
+    const mime = String(row.mime || '').trim().toLowerCase();
+    const name = wwDockAttachmentName(row.name, '分析图片');
+    if (!/^mi_[0-9a-f]{32}$/.test(mediaId) || row.workspace_id !== workspaceId
+        || !WW_DOCK_IMAGE_TYPES[mime] || !name) return null;
+    const dimension = value => {
+      const n = Number(value);
+      return Number.isInteger(n) && n > 0 && n <= 100000 ? n : null;
+    };
+    return {
+      mediaId, mime, name, alt: wwDockAssetText(row.alt, name, 300),
+      width: dimension(row.width), height: dimension(row.height),
+    };
+  }).filter(Boolean);
+  const documents = rawDocuments.map(row => {
+    if (!row || typeof row !== 'object' || Array.isArray(row) || wwDockHasRawAddress(row)) return null;
+    const documentId = String(row.document_id || '');
+    const mime = String(row.mime || '').trim().toLowerCase();
+    const spec = WW_DOCK_DOCUMENT_TYPES[mime];
+    const name = wwDockAttachmentName(row.name, '分析文件');
+    const size = Number(row.size);
+    const suffix = name.includes('.') ? name.slice(name.lastIndexOf('.')).toLowerCase() : '';
+    if (!/^do_[0-9a-f]{32}$/.test(documentId) || row.workspace_id !== workspaceId
+        || !spec || spec[0].split('|').indexOf(suffix) < 0 || !Number.isInteger(size) || size <= 0
+        || size > 10 * 1024 * 1024) return null;
+    return {
+      documentId, mime, name, size, typeLabel: spec[1],
+      title: wwDockAssetText(row.title, name, 300),
+    };
+  }).filter(Boolean);
+  return {
+    ok: true,
+    id: asset.id,
+    title: wwDockAssetText(asset.name, '分析报告', 160),
+    status: wwDockAssetText(asset.status, 'unknown', 40),
+    summary: wwDockAssetText(asset.summary, '', 600),
+    updated: wwDockAssetText(asset.updated || asset.created, '', 40),
+    codeSha256: /^[0-9a-f]{64}$/.test(String(asset.code_sha256 || '')) ? asset.code_sha256 : '',
+    inputSha256: /^[0-9a-f]{64}$/.test(String(asset.input_sha256 || '')) ? asset.input_sha256 : '',
+    images,
+    documents,
+    rejected: (rawImages.length - images.length) + (rawDocuments.length - documents.length),
+  };
+}
+
+function wwDockFileSize(value) {
+  if (value < 1024) return value + ' B';
+  if (value < 1024 * 1024) return (value / 1024).toFixed(value < 10 * 1024 ? 1 : 0) + ' KB';
+  return (value / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function WwWorkspaceReportAsset({ workspaceId, assetId, onBack }) {
+  const [view, setView] = React.useState(null);
+  React.useEffect(() => {
+    let dead = false;
+    setView(null);
+    if (!/^wa_[0-9a-f]{16}$/.test(String(assetId || ''))) {
+      setView({ ok: false, reason: '研究资产编号无效' });
+      return () => { dead = true; };
+    }
+    Promise.resolve().then(() => window.WW.workspaceAsset(workspaceId, assetId))
+      .then(result => { if (!dead) setView(wwNormalizeDockReportAsset(result, workspaceId, assetId)); })
+      .catch(error => { if (!dead) setView({ ok: false, reason: (error && error.message) || '研究资产读取失败' }); });
+    return () => { dead = true; };
+  }, [workspaceId, assetId]);
+  const images = view && view.ok ? view.images : [];
+  const documents = view && view.ok ? view.documents : [];
+  return <div style={{ height: '100%', overflowY: 'auto', padding: '12px 13px 22px', boxSizing: 'border-box' }}>
+    <button type="button" onClick={onBack} style={{ border: 0, background: 'transparent', color: 'var(--ink)', cursor: 'pointer', padding: '2px 0 9px', fontFamily: 'var(--serif)' }}>← 返回研究资产</button>
+    {!view && <WwDockEmpty title="读取分析产物…" note="正在按当前研究空间重新校验历史附件。" />}
+    {view && !view.ok && <WwDockEmpty title="无法打开研究资产" note={view.reason || '历史附件不可用。'} />}
+    {view && view.ok && <React.Fragment>
+      <div style={{ borderTop: '1px solid var(--line)', paddingTop: 12 }}>
+        <div style={{ fontFamily: 'var(--serif)', fontSize: 16, fontWeight: 600, lineHeight: 1.4, overflowWrap: 'anywhere' }}>{view.title}</div>
+        <div className="mono" style={{ color: 'var(--ink-3)', fontSize: 9, marginTop: 5 }}>{view.id}{view.updated ? ' · ' + view.updated.slice(0, 16) : ''}</div>
+        <div role="status" data-report-status={view.status} style={{ color: 'var(--yin)', fontSize: 11, lineHeight: 1.6, marginTop: 7 }}>资产状态：{view.status} · 文件已归档不代表质量门通过</div>
+        {view.summary && <div style={{ color: 'var(--ink-2)', fontSize: 10.5, lineHeight: 1.6, marginTop: 4 }}>{view.summary}</div>}
+        {(view.codeSha256 || view.inputSha256) && <div className="mono" style={{ color: 'var(--ink-3)', fontSize: 8.5, lineHeight: 1.5, marginTop: 5, overflowWrap: 'anywhere' }}>{view.codeSha256 && '代码 ' + view.codeSha256.slice(0, 12)}{view.codeSha256 && view.inputSha256 ? ' · ' : ''}{view.inputSha256 && '输入 ' + view.inputSha256.slice(0, 12)}</div>}
+      </div>
+      {!!images.length && <section aria-label="报告图片" style={{ marginTop: 15 }}>
+        <div style={{ color: 'var(--ink-3)', fontSize: 9.5, letterSpacing: 1.8, marginBottom: 7 }}>图片 · {images.length}</div>
+        {images.map(image => {
+          const url = window.WW.mediaUrl(image.mediaId);
+          return <figure key={image.mediaId} style={{ margin: '0 0 9px', padding: 7, border: '1px solid var(--line-soft)', background: 'var(--paper-2)' }}>
+            <img src={url} alt={image.alt} width={image.width || undefined} height={image.height || undefined} loading="lazy" style={{ display: 'block', maxWidth: '100%', width: 'auto', height: 'auto', maxHeight: 320, objectFit: 'contain', margin: '0 auto', background: 'var(--paper)' }} />
+            <figcaption style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 7, fontSize: 10.5 }}><span style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>{image.name}</span><a href={url} download={image.name} style={{ color: 'var(--yin)', textDecoration: 'none', flexShrink: 0 }}>下载 ↓</a></figcaption>
+          </figure>;
+        })}
+      </section>}
+      {!!documents.length && <section aria-label="报告文件" style={{ marginTop: 15 }}>
+        <div style={{ color: 'var(--ink-3)', fontSize: 9.5, letterSpacing: 1.8, marginBottom: 7 }}>文件 · {documents.length} · 仅下载</div>
+        {documents.map(document => {
+          const url = window.WW.documentUrl(document.documentId);
+          return <a key={document.documentId} href={url} download={document.name} aria-label={'下载文件：' + document.title} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 8px', borderBottom: '1px solid var(--line-soft)', color: 'var(--ink)', textDecoration: 'none' }}>
+            <span className="serif" style={{ flex: '0 0 42px', color: 'var(--yin)', fontSize: 10 }}>{document.typeLabel}</span>
+            <span style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere', fontSize: 11.5 }}>{document.title}</span>
+            <span className="mono" style={{ color: 'var(--ink-3)', fontSize: 8.5, whiteSpace: 'nowrap' }}>{wwDockFileSize(document.size)} ↓</span>
+          </a>;
+        })}
+      </section>}
+      {!images.length && !documents.length && <WwDockEmpty title="历史附件不可用" note="报告记录仍在，但没有通过当前安全校验的图片或文件。" />}
+      {view.rejected > 0 && <div role="status" style={{ marginTop: 10, color: 'var(--yin)', fontSize: 9.5, lineHeight: 1.5 }}>已拦截 {view.rejected} 个不合规或跨空间附件。</div>}
+    </React.Fragment>}
+  </div>;
+}
+
+function wwNormalizeIndustryReviewPayload(raw, workspaceId, assetId) {
+  if (!raw || raw.ok === false) return { ok: false, reason: (raw && (raw.reason || raw.content)) || '行业资讯候选读取失败', reasonCode: raw && raw.reason_code, httpStatus: raw && raw.http_status };
+  const asset = raw.asset && typeof raw.asset === 'object' ? raw.asset : {};
+  if (asset.id !== assetId || asset.workspace_id !== workspaceId || asset.dataset_id !== 'research.newsradar.live') {
+    return { ok: false, reason: '行业资讯审核快照范围校验失败' };
+  }
+  const state = raw.review_state && typeof raw.review_state === 'object' ? raw.review_state : {};
+  const revision = Number(state.revision);
+  if (!Number.isInteger(revision) || revision < 0) return { ok: false, reason: '行业资讯审核 revision 无效' };
+  const candidates = (Array.isArray(raw.candidates) ? raw.candidates : []).map(row => {
+    if (!row || typeof row !== 'object' || !/^INC-[0-9A-F]{16}$/.test(String(row.candidate_id || ''))) return null;
+    const current = ['related', 'unrelated', 'uncertain'].includes(String(row.decision || '')) ? row.decision : 'unreviewed';
+    return {
+      id: String(row.candidate_id), title: wwDockAssetText(row.title, '未命名资讯', 260),
+      source: wwDockAssetText(row.source, '未知来源', 100), sector: wwDockAssetText(row.sector, '', 40),
+      sourceTime: wwDockAssetText(row.source_time, '', 64), decision: current,
+      reportEligible: row.report_eligible === true, issuerFact: row.issuer_fact === true,
+    };
+  }).filter(row => row && !row.issuerFact);
+  return { ok: true, revision, candidates, counts: raw.counts || {} };
+}
+
+function WwIndustryReviewPanel({ workspaceId, sessionId, assets }) {
+  const snapshot = (Array.isArray(assets) ? assets : []).find(row => row && row.kind === 'data' && row.dataset_id === 'research.newsradar.live');
+  const assetId = snapshot && /^wa_[0-9a-f]{16}$/.test(String(snapshot.id || '')) ? String(snapshot.id) : '';
+  const [view, setView] = React.useState(null);
+  const [selected, setSelected] = React.useState({});
+  const [decision, setDecision] = React.useState('related');
+  const [busy, setBusy] = React.useState(false);
+  const [notice, setNotice] = React.useState(null);
+  const [reload, setReload] = React.useState(0);
+  React.useEffect(() => {
+    let dead = false;
+    setView(null); setSelected({}); setNotice(null);
+    if (!assetId || !sessionId) return () => { dead = true; };
+    Promise.resolve(window.WW.workspaceIndustryReviews(workspaceId, sessionId, assetId, 100))
+      .then(raw => { if (!dead) setView(wwNormalizeIndustryReviewPayload(raw, workspaceId, assetId)); })
+      .catch(error => { if (!dead) setView({ ok: false, reason: (error && error.message) || '行业资讯候选读取失败' }); });
+    return () => { dead = true; };
+  }, [workspaceId, sessionId, assetId, reload]);
+  if (!assetId) return null;
+  const chosen = view && view.ok ? view.candidates.filter(row => selected[row.id]) : [];
+  const submit = async () => {
+    if (!chosen.length || busy) return;
+    const label = decision === 'related' ? '相关' : decision === 'unrelated' ? '不相关' : '不确定';
+    if (!window.confirm('确认将选中的 ' + chosen.length + ' 条行业资讯标记为“' + label + '”？\n仅 related 可作为行业背景，始终不会升级为公司事实。')) return;
+    setBusy(true); setNotice(null);
+    const key = 'dock-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+    const raw = await window.WW.workspaceIndustryReviewSubmit(workspaceId, {
+      session_id: sessionId, snapshot_asset_id: assetId, expected_revision: view.revision,
+      idempotency_key: key, reviews: chosen.map(row => ({ candidate_id: row.id, decision })),
+      confirmed: true,
+    });
+    if (!raw || raw.ok === false) {
+      const conflict = raw && (raw.http_status === 409 || raw.reason_code === 'industry_review_revision_conflict');
+      setNotice({ ok: false, conflict, text: conflict ? '审核版本冲突：其他会话已更新账本。当前选择未提交，请重新加载后再确认。' : ((raw && (raw.reason || raw.content)) || '批量审核失败') });
+      setBusy(false); return;
+    }
+    const endRevision = raw.review_state && Number(raw.review_state.revision);
+    setNotice({ ok: true, text: '已原子提交 ' + chosen.length + ' 条' + (Number.isInteger(endRevision) ? ' · revision ' + endRevision : '') });
+    setBusy(false); setReload(value => value + 1);
+  };
+  return <section aria-label="行业资讯批量审核" style={{ margin: '0 0 13px', padding: 10, border: '1px solid var(--line)', background: 'var(--paper-2)' }}>
+    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}><strong className="serif" style={{ flex: 1, fontSize: 12 }}>行业资讯审核</strong><span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>{view && view.ok ? 'revision ' + view.revision : ''}</span><button type="button" disabled={busy} onClick={() => setReload(value => value + 1)} style={{ border: 0, background: 'transparent', color: 'var(--yin)', cursor: 'pointer', fontSize: 10 }}>重新加载</button></div>
+    <div style={{ color: 'var(--ink-3)', fontSize: 9.5, lineHeight: 1.5, marginTop: 4 }}>同赛道资讯仅为行业候选。多选后统一标记；只有“相关”进入下一份研报的行业背景。</div>
+    {!view && <div className="mono" style={{ padding: '9px 0', fontSize: 9.5 }}>读取候选…</div>}
+    {view && !view.ok && <div role="alert" style={{ padding: '8px 0 2px', color: 'var(--yin)', fontSize: 10 }}>{view.reason}</div>}
+    {view && view.ok && <React.Fragment>
+      <div style={{ display: 'flex', gap: 5, marginTop: 8 }}>{[['related', '相关'], ['unrelated', '不相关'], ['uncertain', '不确定']].map(pair => <button type="button" key={pair[0]} aria-pressed={decision === pair[0]} onClick={() => setDecision(pair[0])} style={{ border: '1px solid ' + (decision === pair[0] ? 'var(--yin)' : 'var(--line)'), color: decision === pair[0] ? 'var(--yin)' : 'var(--ink-2)', background: 'var(--paper)', padding: '4px 7px', cursor: 'pointer', fontSize: 9.5 }}>{pair[1]}</button>)}</div>
+      <div style={{ maxHeight: 250, overflowY: 'auto', marginTop: 7, borderTop: '1px solid var(--line-soft)' }}>{view.candidates.map(row => <label key={row.id} style={{ display: 'grid', gridTemplateColumns: '18px 1fr auto', gap: 5, alignItems: 'start', padding: '7px 2px', borderBottom: '1px solid var(--line-soft)', cursor: 'pointer' }}>
+        <input type="checkbox" checked={!!selected[row.id]} onChange={event => setSelected(old => ({ ...old, [row.id]: event.target.checked }))} />
+        <span style={{ minWidth: 0 }}><span style={{ display: 'block', fontSize: 10.5, lineHeight: 1.4, overflowWrap: 'anywhere' }}>{row.title}</span><span className="mono" style={{ display: 'block', color: 'var(--ink-3)', fontSize: 8.5, marginTop: 2 }}>{row.source}{row.sector ? ' · ' + row.sector : ''}{row.sourceTime ? ' · ' + row.sourceTime : ''}</span></span>
+        <span className="mono" style={{ fontSize: 8.5, color: row.decision === 'related' ? 'var(--dai)' : 'var(--ink-3)' }}>{row.decision}</span>
+      </label>)}</div>
+      {!view.candidates.length && <div className="mono" style={{ padding: '9px 0', color: 'var(--ink-3)', fontSize: 9.5 }}>该快照没有可审核候选</div>}
+      <button type="button" disabled={!chosen.length || busy} onClick={submit} style={{ width: '100%', marginTop: 8, border: 0, padding: '7px 9px', background: chosen.length && !busy ? 'var(--ink)' : 'var(--line)', color: 'var(--paper)', cursor: chosen.length && !busy ? 'pointer' : 'default', fontSize: 10 }}>{busy ? '提交中…' : '提交 ' + chosen.length + ' 条原子审核'}</button>
+      {notice && <div role={notice.ok ? 'status' : 'alert'} data-review-conflict={notice.conflict ? 'true' : 'false'} style={{ marginTop: 7, color: notice.ok ? 'var(--dai)' : 'var(--yin)', fontSize: 9.5, lineHeight: 1.5 }}>{notice.text}</div>}
+    </React.Fragment>}
+  </section>;
+}
+
+function WwWorkspaceResearch({ workspaceId, sessionId, data, loading, onOpenStage }) {
+  const [reportAsset, setReportAsset] = React.useState(null);
+  const reportAssetId = reportAsset && reportAsset.workspaceId === workspaceId ? reportAsset.id : '';
+  if (reportAssetId) return <WwWorkspaceReportAsset workspaceId={workspaceId} assetId={reportAssetId} onBack={() => setReportAsset(null)} />;
   if (loading) return <WwDockEmpty title="读取研究资产…" note="正在查询该空间的真实产物索引。" />;
   if (!data || data.available === false) return <WwDockEmpty title="研究资产索引尚未接入" note="当前会话与已有工作台仍可正常使用；这里不会用演示数据填充。" action="打开选股研究" onAction={() => onOpenStage('screen')} />;
   if (data.ok === false) return <WwDockEmpty title="研究资产读取失败" note={data.reason || '服务未返回可用结果。'} />;
   const rows = data.assets || data.items || [];
   if (!rows.length) return <WwDockEmpty title="这个空间还没有研究资产" note="从对话发起研报、选股或工作流后，真实产物会归入这里。" action="打开因子 / 工作流" onAction={() => onOpenStage('factor')} />;
-  return <div style={{ padding: 15, overflowY: 'auto', height: '100%', boxSizing: 'border-box' }}>{rows.map((a, i) => {
+  return <div style={{ padding: 15, overflowY: 'auto', height: '100%', boxSizing: 'border-box' }}><WwIndustryReviewPanel workspaceId={workspaceId} sessionId={sessionId} assets={rows} />{rows.map((a, i) => {
+    const availability = window.WW.dataAvailability(a);
+    const sourceAvailability = window.WW.sourceAvailability(a);
+    const reportId = ['report', 'analysis'].includes(String(a.kind || ''))
+      && /^wa_[0-9a-f]{16}$/.test(String(a.id || '')) ? String(a.id) : '';
     const page = a.kind === 'workflow' ? 'factor' : (a.open_page || (a.kind === 'factor' ? 'factor' : ''));
     const canOpen = page && window.WW.PAGES[page];
+    const canOpenReport = !!reportId;
     const stage = a.kind === 'workflow' && a.ref
       ? { page: 'factor', load: String(a.ref) }
       : a.kind === 'factor' && (a.ref || a.id)
         ? { page: 'factor', asset: String(a.ref || a.id) }
         : { page };
-    return <div key={a.id || a.path || i} onClick={() => canOpen && onOpenStage(stage)} style={{ padding: '10px 8px', borderBottom: '1px solid var(--line-soft)', cursor: canOpen ? 'pointer' : 'default' }}>
-      <div style={{ display: 'flex', gap: 8, fontFamily: 'var(--serif)', fontSize: 12.5 }}><span style={{ flex: 1 }}>{a.title || a.name || a.path || ('研究资产 ' + (i + 1))}</span>{canOpen && <span style={{ color: 'var(--yin)', fontSize: 10.5 }}>打开 ↗</span>}</div>
+    return <div key={a.id || a.path || i} onClick={() => canOpenReport ? setReportAsset({ workspaceId, id: reportId }) : canOpen && onOpenStage(stage)} style={{ padding: '10px 8px', borderBottom: '1px solid var(--line-soft)', cursor: canOpenReport || canOpen ? 'pointer' : 'default' }}>
+      <div style={{ display: 'flex', gap: 8, fontFamily: 'var(--serif)', fontSize: 12.5 }}><span style={{ flex: 1 }}>{a.title || a.name || a.path || ('研究资产 ' + (i + 1))}</span>{(canOpenReport || canOpen) && <span style={{ color: 'var(--yin)', fontSize: 10.5 }}>打开 ↗</span>}</div>
+      {availability && <div role="status" data-source-availability={availability.state} style={{ marginTop: 6, lineHeight: 1.6, fontSize: 10.5 }}>
+        {a.dataset_id === 'diagnostic.control_lists' && <div style={{ color: 'var(--ink-2)' }}>有限连通性观测摘录 · 非研究证据。以下是观测时状态；修复后的源未重新抓取，不按预期结果标绿。</div>}
+        <strong style={{ color: availability.state === 'available' ? 'var(--dai)' : 'var(--yin)' }}>{availability.label}</strong>
+        <div style={{ color: 'var(--ink-2)' }}>{availability.note}</div>
+        {sourceAvailability.length > 0 && <ul aria-label="名单来源可用性" style={{ margin: '5px 0', paddingLeft: 16 }}>{sourceAvailability.map((source, j) => <li key={source.id + j} data-list-source-status={source.status} style={{ color: source.status === 'ok' ? 'var(--dai)' : 'var(--yin)' }}>{source.label}：{source.labelStatus}{source.reason ? ' · ' + source.reason : ''}</li>)}</ul>}
+        {(a.as_of || a.pulled_at) && <div className="mono" style={{ color: 'var(--ink-3)', fontSize: 9 }}>观测日期 {a.as_of || '未提供'} · 抓取 {a.pulled_at || '未提供'}</div>}
+      </div>}
       {a.summary && <div style={{ color: 'var(--ink-2)', fontSize: 10.5, lineHeight: 1.5, marginTop: 4 }}>{a.summary}</div>}
-      <div className="mono" style={{ color: 'var(--ink-3)', fontSize: 9.5, marginTop: 4 }}>{a.kind || a.type || 'asset'}{a.status ? ' · ' + a.status : ''}{a.updated || a.ts ? ' · ' + String(a.updated || a.ts).slice(0, 16) : ''}</div>
+      <div className="mono" style={{ color: 'var(--ink-3)', fontSize: 9.5, marginTop: 4 }}>{a.kind || a.type || 'asset'}{a.status ? ' · ' + (a.kind === 'data' && a.status === 'saved' ? '快照已保存（非数据可用结论）' : a.status) : ''}{a.updated || a.ts ? ' · ' + String(a.updated || a.ts).slice(0, 16) : ''}</div>
     </div>;
   })}</div>;
 }
@@ -497,7 +744,7 @@ function WwWorkspaceDock({ workspace, sessions, sessionId, open, narrow, onToggl
   if (!open) return <button onClick={onToggle} title="展开研究空间与记忆中心" style={{ position: 'fixed', right: 9, top: 50, zIndex: 20, border: '1px solid var(--ink)', background: 'var(--paper)', color: 'var(--ink)', padding: '7px 8px', cursor: 'pointer', writingMode: 'vertical-rl', letterSpacing: 2, fontFamily: 'var(--serif)' }}>研究 · 记忆</button>;
   const switchTab = (nextTab) => { if (nextTab !== 'files') invalidateFilePreview(); setTab(nextTab); };
   const body = tab === 'overview' ? <WwWorkspaceOverview workspace={workspace} sessions={sessions} onOpenStage={onOpenStage} onBindFolder={bindFolder} folderNote={folderNote} />
-    : tab === 'research' ? <WwWorkspaceResearch data={assets} loading={loading.research} onOpenStage={onOpenStage} />
+    : tab === 'research' ? <WwWorkspaceResearch workspaceId={wid} sessionId={sessionId} data={assets} loading={loading.research} onOpenStage={onOpenStage} />
     : tab === 'files' ? <WwWorkspaceFiles workspace={workspace} data={files} loading={loading.files} path={filePath} onOpenPath={openFilePath} onOpenFile={openFile} preview={filePreview} previewLoading={fileLoading} onCloseFile={invalidateFilePreview} />
     : tab === 'agent' ? <WwWorkspaceAgent workspace={workspace} data={runs} loading={loading.agent} onAgentMode={setAgentMode} modeNote={agentModeNote} />
     : tab === 'watch' ? <WwWorkspaceWatch workspace={workspace} data={watch} loading={loading.watch} onOpenStage={onOpenStage} />

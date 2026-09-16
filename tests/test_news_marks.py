@@ -168,6 +168,7 @@ def test_live_single_source_failure_degrades():
     out = nm.assemble_news_marks("SZ000630", mode="live", stock_news_fn=sn, kuaixun_fn=kx,
                                  parquet_path="Z:/__none__.parquet", limit=5)
     assert out["ok"] is True and [it["title"] for it in out["items"]] == ["快讯B"]
+    assert out["coverage"]["partial"] is True
     assert "个股新闻" in out["coverage"]["note"]
 
 
@@ -177,7 +178,28 @@ def test_live_parquet_absent_rich_unavailable():
                                  kuaixun_fn=lambda limit=200: [],
                                  parquet_path="Z:/__none__.parquet", limit=5)
     assert out["ok"] is True and out["items"] == []
+    assert out["coverage"]["partial"] is True
     assert out["freshness"]["rich_available"] is False and out["freshness"]["pulled_at"]
+
+
+def test_live_empty_kuaixun_leg_is_reported_partial_even_when_other_legs_work(tmp_path):
+    from datetime import datetime
+
+    day = datetime.now().strftime("%Y-%m-%d")
+    pq = tmp_path / "news_events.parquet"
+    pd.DataFrame([{
+        "publish_ts": f"{day} 09:00:00", "title": "公告A", "content": "x",
+        "source": "announcement", "stock_codes": "SZ000630", "is_policy": False,
+    }]).to_parquet(pq)
+    out = nm.assemble_news_marks(
+        "SZ000630", mode="live",
+        stock_news_fn=lambda code, limit=20: [{
+            "time": f"{day} 10:00", "title": "个股新闻A", "summary": "", "source": "stock",
+        }],
+        kuaixun_fn=lambda limit=200: [], parquet_path=pq, limit=5,
+    )
+    assert out["items"] and out["coverage"]["partial"] is True
+    assert "快讯源" in out["coverage"]["note"]
 
 
 def test_live_default_kuaixun_fn_uses_portal(monkeypatch):

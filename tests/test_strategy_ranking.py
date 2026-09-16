@@ -4,6 +4,7 @@
 import re
 
 import pandas as pd
+import pytest
 
 from guanlan_v2.strategy import (
     V4_COLUMNS,
@@ -14,6 +15,7 @@ from guanlan_v2.strategy import (
 )
 
 
+@pytest.mark.realdata
 def test_load_v4_ranking_columns():
     df = load_v4_ranking()
     assert isinstance(df, pd.DataFrame)
@@ -22,11 +24,13 @@ def test_load_v4_ranking_columns():
         assert c in df.columns, f"v4 排名缺列 {c}(产物 schema 变了)"
 
 
+@pytest.mark.realdata
 def test_ranking_date_format():
     d = ranking_date()
     assert re.match(r"^\d{4}-\d{2}-\d{2}$", d), f"排名日期格式异常: {d!r}"
 
 
+@pytest.mark.realdata
 def test_v4_rated_subset_present():
     df = load_v4_ranking()
     assert df["v4_total"].notna().sum() >= 50   # 顶200 含五维评级(v4_total/v4_layer)
@@ -40,7 +44,6 @@ def test_ts_to_qlib():
 
 def test_v4_pct_map_column_and_scale_compat():
     """单一列名/量纲归一入口(rescore.v4_pool 与 industry.aggregate 收拢至此)。"""
-    import pytest
     from guanlan_v2.strategy.ranking import v4_pct_map
     # lgb_pct(0-1)→×100
     df1 = pd.DataFrame({"code": ["SH600519", "SZ000001"], "lgb_pct": [0.99, 0.10]})
@@ -53,6 +56,7 @@ def test_v4_pct_map_column_and_scale_compat():
         v4_pct_map(pd.DataFrame({"foo": [1]}))
 
 
+@pytest.mark.realdata
 def test_name_industry_map_structure():
     m = name_industry_map()
     assert len(m) > 1000

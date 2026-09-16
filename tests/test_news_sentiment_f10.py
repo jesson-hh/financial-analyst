@@ -1,5 +1,6 @@
 # tests/test_news_sentiment_f10.py
 import sys, pathlib, asyncio
+from datetime import date
 _ENGINE = pathlib.Path(__file__).resolve().parents[1] / "engine"
 if str(_ENGINE) not in sys.path:
     sys.path.insert(0, str(_ENGINE))
@@ -23,7 +24,9 @@ def test_news_sentiment_folds_f10_into_by_code(monkeypatch, tmp_path):
     monkeypatch.setattr(ns.news_pulse, "judge_sentiment", fake_judge)
 
     agent = ns.NewsSentiment(memory_root=tmp_path)
-    out = asyncio.run(agent._execute({"code": "SZ000630", "asof_date": "2026-06-01"}))
+    out = asyncio.run(agent._execute({
+        "code": "SZ000630", "asof_date": date.today().isoformat(),
+    }))
     folded = captured["by_code"]["SZ000630"]
     assert any("权益分派" in it["title"] for it in folded)   # F10 事件已折入
     assert out["covered"] is True

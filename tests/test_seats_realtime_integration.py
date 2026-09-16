@@ -202,6 +202,10 @@ def test_decide_uses_pit_durable_snapshot_and_persists_provenance(
         "quality_flagged_n": expected["quality_flagged_n"],
         "complete_n": expected["complete_n"],
         "n": expected["n"],
+        "effective_n": expected["n"],
+        "effective_freq": evidence_tf,
+        "first_asof": start,
+        "last_asof": anchor,
     }
     receipt = store.receipt(result["data_digest"])
     assert receipt is not None and receipt["data_ref"] == result["data_ref"]

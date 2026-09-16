@@ -5739,11 +5739,13 @@ def _factor_relstat(body: "FactorRelstatIn") -> JSONResponse:
     fac_c = fac.index.get_level_values("code")
     rows: List[Dict[str, Any]] = []
     for code in [str(c) for c in panel.codes()]:
-        s = fac[fac_c == code].dropna()
+        s = fac[fac_c == code].replace([np.inf, -np.inf], np.nan).dropna()
         s.index = s.index.get_level_values("datetime")
         s = s.sort_index()
+        sample_dates = {"sample_start": s.index.min().date().isoformat() if len(s) else None,
+                        "sample_end": s.index.max().date().isoformat() if len(s) else None}
         if len(s) < 20:
-            rows.append({"code": code, "level": None, "n": int(len(s))})
+            rows.append({"code": code, "level": None, "n": int(len(s)), **sample_dates})
             continue
         ac = s.autocorr(lag=1)
         rows.append({
@@ -5753,6 +5755,7 @@ def _factor_relstat(body: "FactorRelstatIn") -> JSONResponse:
             "stickiness": _num(float(ac) if ac == ac else float("nan")),  # lag-1 自相关=粘性
             "pos_ratio": _num(float((s > 0).mean())),
             "n": int(len(s)),
+            **sample_dates,
         })
     valid = [r for r in rows if r.get("level") is not None]
     if not valid:
@@ -5769,9 +5772,18 @@ def _factor_relstat(body: "FactorRelstatIn") -> JSONResponse:
     warnings.append("关系稳定度=该关系因子时序的描述统计(均值水平/波动/lag1自相关粘性/正占比);"
                     "是 tsic 预测力的描述性补充,不衡量预测收益的能力。")
     out: Dict[str, Any] = {
-        "ok": True, "universe": universe, "method": "relstat",
+        # An explicit codes list is the effective selector; the default pool
+        # was not resolved or intersected with it. Keep configuration separately
+        # so result metadata cannot label a single stock as the quick pool.
+        "ok": True, "universe": "custom" if custom else universe, "method": "relstat",
+        "configured_universe": universe,
+        "selection_mode": "explicit_codes" if custom else "universe",
+        "start": start, "end": end, "requested_codes": codes,
+        "sample_start": min(r["sample_start"] for r in valid),
+        "sample_end": max(r["sample_end"] for r in valid),
         "expr_or_name": expr, "codes_relstat": rows_sorted, "summary": summary,
-        "warnings": warnings, "status": "ok", "_label": expr, "_universe": universe,
+        "warnings": warnings, "status": "ok", "_label": expr,
+        "_universe": ", ".join(custom) if custom else universe,
     }
     return JSONResponse(out)
 
@@ -6492,6 +6504,12 @@ def validate_graph(
     overfit_ids = [nid for nid, ntype in id_to_type.items() if ntype == "overfit"]
     for nid, node in node_by_id.items():
         params = node.get("params") or {}
+        if node.get("type") == "source" and isinstance(params, dict):
+            from guanlan_v2.workflow.source_scope import source_codes
+            try:
+                source_codes(params)
+            except ValueError as exc:
+                errors.append(f"节点 {nid}: {exc}")
         ref = params.get("context_source_id") if isinstance(params, dict) else None
         if ref is not None and (not isinstance(ref, str) or id_to_type.get(ref) != "source"):
             errors.append(f"节点 {nid} context_source_id 必须引用现有 source 节点")
@@ -7560,7 +7578,7 @@ def build_workflow_router(
         if override_error:
             return JSONResponse({"ok": False, "reason": override_error})
         try:
-            return JSONResponse(_wex.run_graph(g, overrides=(ov or None)))
+            return JSONResponse(_wex.run_graph(g, overrides=(ov or None), allow_diagnostic_result=True))
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}"})
 
@@ -7585,6 +7603,7 @@ def build_workflow_router(
                     graph, overrides={**(overrides or {}), "_workflow_run_id": run_id,
                                       "_workspace_id": workspace_id},
                     on_node=on_node,
+                    allow_diagnostic_result=True,
                 )
                 ended = int(_time.time() * 1000)
                 ok = bool(isinstance(outcome, dict) and outcome.get("ok"))

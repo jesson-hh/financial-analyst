@@ -4,18 +4,29 @@
 温度只由 themes.yaml 显式标注方向的锚定市场合成(50+50·Σ(w·dir·(prob-0.5))/Σw,
 clamp 0-100,高=risk-on);其余市场只展示——不自动猜方向。快照 append-only jsonl,
 每次真拉成功顺手落一行,Δ24h/历史曲线全部从快照读,无历史诚实 None。
+
+存储按月轮转:snapshots.jsonl 恒为「当月文件」,写入时把非本月行按月归档到
+snapshots-YYYYMM.jsonl(同目录)。当月文件末行永远是最新快照,market_temp/
+data_health 等尾读消费方的契约不变。Δ24h 只读当月(月初补最新一份归档),
+历史曲线则跨月全量合并。
 """
 from __future__ import annotations
 
 import json
+import os
+import threading
 from datetime import datetime
 from pathlib import Path
 
 from . import sources
 
-_SNAP_DEFAULT = Path(__file__).resolve().parents[2] / "var" / "macro_pulse" / "snapshots.jsonl"
+_MACRO_ROOT = Path(os.environ.get("GUANLAN_MACRO_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var" / "macro_pulse"
+))
+_SNAP_DEFAULT = _MACRO_ROOT / "snapshots.jsonl"
 _STALE_MAX_MIN = 24 * 60      # 非 refresh 时快照可用窗
 _DELTA_MIN_AGE_H = 20         # Δ24h:取最近一条 ≥20h 前的记录
+_LOCK = threading.Lock()      # 追加+轮转互斥(当前服务为单进程)
 
 
 def _now() -> datetime:
@@ -91,6 +102,75 @@ def _read_snapshots(path: Path):
     return out
 
 
+def _row_month(row: dict) -> str:
+    """返回行的归档月键 YYYYMM;ts 不可解析时不归档。"""
+    try:
+        return datetime.strptime(str(row.get("ts")), "%Y-%m-%dT%H:%M:%S").strftime("%Y%m")
+    except (TypeError, ValueError):
+        return ""
+
+
+def _archives(path: Path) -> list[Path]:
+    """返回同目录下的月归档,文件名顺序即月份顺序。"""
+    try:
+        return sorted(path.parent.glob(f"{path.stem}-*{path.suffix}"))
+    except OSError:
+        return []
+
+
+def _read_recent(path: Path, now: datetime) -> list:
+    """有界读取Δ24h所需快照:当月文件,必要时再补最新月归档。"""
+    rows = _read_snapshots(path)
+    has_old = False
+    for row in rows:
+        try:
+            ts = datetime.strptime(row["ts"], "%Y-%m-%dT%H:%M:%S")
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (now - ts).total_seconds() >= _DELTA_MIN_AGE_H * 3600:
+            has_old = True
+            break
+    if not has_old:
+        archives = _archives(path)
+        if archives:
+            rows = _read_snapshots(archives[-1]) + rows
+    rows.sort(key=lambda row: str(row.get("ts") or ""))
+    return rows
+
+
+def _rotate_stale_months(path: Path, now: datetime) -> None:
+    """将主文件中非当月行幂等归档,再原子改写主文件。"""
+    rows = _read_snapshots(path)
+    current_month = now.strftime("%Y%m")
+    by_month: dict[str, list[dict]] = {}
+    for row in rows:
+        month = _row_month(row)
+        if month and month != current_month:
+            by_month.setdefault(month, []).append(row)
+    if not by_month:
+        return
+
+    try:
+        for month, group in sorted(by_month.items()):
+            target = path.parent / f"{path.stem}-{month}{path.suffix}"
+            existing_ts = {row.get("ts") for row in _read_snapshots(target)}
+            fresh = [row for row in group if row.get("ts") not in existing_ts]
+            if fresh:
+                with open(target, "a", encoding="utf-8") as handle:
+                    for row in fresh:
+                        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+        keep = [row for row in rows if _row_month(row) in ("", current_month)]
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            for row in keep:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        # 归档追加按 ts 去重,改写失败可在下次落盘时安全重试。
+        return
+
+
 def _delta24h(market_id: str, prob: float, snapshots, now: datetime):
     """Δ24h=当前概率-最近一条 ≥20h 前同 id 概率;无历史 None。"""
     best = None
@@ -139,7 +219,7 @@ def build_pulse(refresh: bool = False, snapshot_path=None, astock_fn=None, http=
     cfg = sources.load_themes()
     path = Path(snapshot_path) if snapshot_path else _SNAP_DEFAULT
     now = _now()
-    snapshots = _read_snapshots(path)
+    snapshots = _read_recent(path, now)
 
     if not refresh and snapshots:
         latest = snapshots[-1]
@@ -225,18 +305,24 @@ def build_pulse(refresh: bool = False, snapshot_path=None, astock_fn=None, http=
                 "astock_temp": astock_temp, "astock": astock}
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+            with _LOCK:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(line, ensure_ascii=False) + "\n")
+                _rotate_stale_months(path, now)
         except OSError as e:
             payload["notes"] = notes + [f"快照落盘失败: {e}"]
     return payload
 
 
 def load_history(market_id: str = "", theme: str = "", snapshot_path=None) -> list:
-    """概率/温度时间序列(供前端曲线);market_id 与 theme 二选一。"""
+    """概率/温度时间序列;跨月归档与当月快照全量合并。"""
     path = Path(snapshot_path) if snapshot_path else _SNAP_DEFAULT
+    rows = []
+    for candidate in _archives(path) + [path]:
+        rows.extend(_read_snapshots(candidate))
+    rows.sort(key=lambda row: str(row.get("ts") or ""))
     out = []
-    for snap in _read_snapshots(path):
+    for snap in rows:
         if market_id:
             for m in snap.get("markets") or []:
                 if m.get("id") == market_id:

@@ -432,7 +432,12 @@ _PV_ROWS: tuple[_PVWorkerRow, ...] = (
     _PVWorkerRow(
         worker_id="pv.technical", persona="Technical indicator reader",
         tier=Tier.READER, exec_kind=ExecutionKind.LLM,
-        model_tier="reasoner", thinking_budget=0,
+        # 2026-08-29 live-contract correction: three independent deep runs
+        # produced six thinking/high completions containing reasoning bytes but
+        # no final JSON.  ``fast`` is the same reviewed V4-Flash provider/model
+        # with thinking disabled, so this one extraction seat can satisfy its
+        # strict TechnicalReport envelope without changing any other reasoner.
+        model_tier="fast", thinking_budget=0,
         handler_id=None, prompt_id="prompt.pv.technical",
         skill_id="skill.pv.technical",
         guardrail_ids=("guardrail.number_provenance", "guardrail.untrusted_input_isolation",
@@ -965,9 +970,13 @@ def build_xcut_worker_specs(
 #   upstream artifacts, never calls a tool), require_input_refs=True, allow_unsourced_numbers
 #   =False. Every shipped seat's ``lint_skill_supply(...) == ()`` trivially (no ww_ promise, no
 #   capability). Debate seats use only ``fast``/``reasoner`` tiers (invariant 5).
-# * The 2 PILOT updates (``dec.research_mgr`` / ``dec.pm``) are clause-(d) surgical model_copies
-#   of the FROZEN Phase-7 baseline — they change ONLY the WorkerSpec fields the reviewed update
-#   names, never the pilot's evidence policy, capability allowlist, execution or persona. The
+# * The 2 PILOT updates (``dec.research_mgr`` / ``dec.pm``) began as clause-(d) surgical
+#   model_copies of the FROZEN Phase-7 baseline.  The one later execution exception is the
+#   2026-08-29 live-contract correction for ``dec.research_mgr``: two completions consumed
+#   4,177 / 18,637 reasoning characters but emitted no final JSON, so that structured synthesis
+#   seat is transparently rebound from the thinking/high ``reasoner`` alias to the same reviewed
+#   V4-Flash provider/model under non-thinking ``fast``.  Its evidence policy, capability
+#   allowlist and persona remain frozen. The
 #   roster's design-intent columns (e.g. research_mgr's 2-col read_categories) are NOT
 #   retro-applied. ``dec.pm`` keeps its ``cap.ashare_constraint_check`` allowlist + optional tool
 #   policy (clause d freezes them); the "every Lane-D spec FORBIDDEN" wording describes the 4 NEW
@@ -997,7 +1006,9 @@ _BEAR_CASE_D = SchemaRef(name="BearCase", version="1")
 _RISK_STANCE = SchemaRef(name="RiskDebateStance", version="1")
 _RISK_PARAMS = SchemaRef(name="RiskDebateParams", version="1")
 _FUNDAMENTALS_D = SchemaRef(name="FundamentalsReport", version="1")
+_PRICE_ACTION_D = SchemaRef(name="PriceActionFeatureReport", version="1")
 _TECHNICAL_D = SchemaRef(name="TechnicalReport", version="1")
+_MICROSTRUCTURE_D = SchemaRef(name="MicrostructureReport", version="1")
 _SENTIMENT_D = SchemaRef(name="SentimentReport", version="1")
 _NEWS_DIGEST_D = SchemaRef(name="NewsDigestReport", version="1")
 _RESEARCH_PLAN_D = SchemaRef(name="ResearchPlan", version="1")
@@ -1097,7 +1108,12 @@ _DEC_NEW_ROWS: tuple[_DecWorkerRow, ...] = (
     _DecWorkerRow(
         worker_id="dec.bear",
         persona="Bear advocate (bounded debate seat, 晚一波) — zero trading authority",
-        tier=Tier.CRITIC, model_tier="reasoner", thinking_budget=4096,
+        # 2026-08-29 live-contract correction: the late-speaking bear has the
+        # largest debate prompt.  V4-Flash thinking twice consumed the final
+        # channel (reasoning-only, then a length-truncated JSON fragment).  Keep
+        # the same reviewed provider/model through the non-thinking alias; the
+        # final PM remains the sole deep-reasoning decision seat.
+        tier=Tier.CRITIC, model_tier="fast", thinking_budget=0,
         prompt_id="prompt.dec.bear", skill_id="skill.dec.bear",
         guardrail_ids=("guardrail.debate_rounds", "guardrail.vf_anchor_dict",
                        "guardrail.untrusted_input_isolation", "guardrail.number_provenance"),
@@ -1161,7 +1177,8 @@ def build_decision_worker_specs(
     (skills rebind to the 交付物③ tree install; ``guardrail.debate_rounds`` appended; the
     reviewed optional inputs added; ``dec.pm`` also gains the ``memory`` read category and is
     asserted ``reasoner_deep``). Every other pilot field — evidence policy, capability allowlist,
-    execution, persona, tier, output — is preserved verbatim. Order-stable (sorted by worker id).
+    persona, tier and output — is preserved verbatim.  ``dec.research_mgr`` has the single
+    documented live execution correction above. Order-stable (sorted by worker id).
     """
     dec_ix = _dec_index(materials)
 
@@ -1207,9 +1224,35 @@ def build_decision_worker_specs(
 
     rm = baseline["dec.research_mgr"]
     specs.append(rm.model_copy(update=dict(
+        # 2026-08-29 live-contract correction: the full seven-face synthesis
+        # twice returned reasoning bytes with no final ResearchPlan JSON.  The
+        # fast alias is the same reviewed V4-Flash provider/model with thinking
+        # disabled, matching the structured report-writer role without changing
+        # authority, prompt, evidence, output schema or capability semantics.
+        execution=rm.execution.model_copy(update=dict(
+            model_tier="fast", thinking_budget=0)),
         skills=(SkillBinding(skill_ref=_content("skill.dec.research_mgr")),),
         guardrail_refs=tuple(rm.guardrail_refs) + (debate_rounds,),
         inputs=tuple(rm.inputs) + (
+            # These six newly-added direct, typed faces plus the inherited
+            # ``sentiment`` input are the full deep preset's seven-face evidence
+            # spine.  They stay optional on the reusable WorkerSpec so
+            # the independently sealed reduced preset remains structurally
+            # valid; the full preset makes every edge blocking.  In other
+            # words, optionality belongs to the catalog, completeness belongs
+            # to the selected graph -- no reducer-only "decorative" evidence.
+            InputBinding(name="price_action", schema_ref=_PRICE_ACTION_D,
+                         required=False, cardinality="one"),
+            InputBinding(name="technical", schema_ref=_TECHNICAL_D,
+                         required=False, cardinality="one"),
+            InputBinding(name="microstructure", schema_ref=_MICROSTRUCTURE_D,
+                         required=False, cardinality="one"),
+            InputBinding(name="news_digest", schema_ref=_NEWS_DIGEST_D,
+                         required=False, cardinality="one"),
+            InputBinding(name="bull_case", schema_ref=_BULL_CASE_D,
+                         required=False, cardinality="one"),
+            InputBinding(name="bear_case", schema_ref=_BEAR_CASE_D,
+                         required=False, cardinality="one"),
             InputBinding(name="bullbear_transcript", schema_ref=_DEBATE_TRANSCRIPT,
                          required=False, cardinality="one"),
             InputBinding(name="upstream_ratings", schema_ref=_UPSTREAM_RATINGS,

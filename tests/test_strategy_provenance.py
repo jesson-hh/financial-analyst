@@ -5,6 +5,8 @@
 import hashlib
 import json
 
+import pytest
+
 from guanlan_v2.strategy.paths import PROVENANCE_JSON
 
 
@@ -18,6 +20,7 @@ def test_provenance_file_exists():
     assert PROVENANCE_JSON.exists(), "缺 _provenance.json(版本戳)"
 
 
+@pytest.mark.realdata
 def test_vendored_hashes_match():
     rows = json.loads(PROVENANCE_JSON.read_text(encoding="utf-8-sig"))
     assert rows, "provenance 为空"

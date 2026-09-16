@@ -2,212 +2,243 @@
 const { useState, useEffect, useCallback } = React;
 
 const YI = 1e8;
-const fmtYi = (v) => (v == null ? "—" : (v / YI).toFixed(2) + "亿");
-const flowColor = (v) => (v == null ? "var(--ink-3)" : v >= 0 ? "var(--zhu)" : "var(--dai)");
+const fmtYi = (v) => (v == null || !Number.isFinite(Number(v)) ? "—" : `${(Number(v) / YI).toFixed(2)}亿`);
+const signedYi = (v) => (v == null || !Number.isFinite(Number(v)) ? "—" : `${Number(v) >= 0 ? "+" : ""}${fmtYi(v)}`);
+const flowTone = (v) => (v == null ? "muted" : Number(v) >= 0 ? "up" : "down");
+const lastValue = (series) => (series || []).reduce((acc, v) => (v != null ? Number(v) : acc), null);
 
-/* 涨跌头条 */
-function BreadthStrip({ b }) {
-  const cell = (label, up, down) => (
-    <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginRight: 22 }}>
-      <span style={{ fontSize: 12, color: "var(--ink-2)" }}>{label}</span>
-      <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--zhu)" }}>涨 {up == null ? "—" : up}</span>
-      <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--dai)" }}>跌 {down == null ? "—" : down}</span>
-    </div>
-  );
-  const a = (b && b.allA) || {}, i = (b && b.industry) || {}, c = (b && b.concept) || {};
+function SectionHeading({ eyebrow, title, detail, aside }) {
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", padding: "8px 12px", background: "var(--paper-1)",
-                  border: "1px solid var(--line-2)", borderRadius: 6, marginBottom: 12 }}>
-      {cell("全A", a.up, a.down)}{cell("行业", i.up, i.down)}{cell("概念", c.up, c.down)}
-    </div>
-  );
-}
-
-/* 大盘五档分解(水平条) */
-function MarketFlowBars({ m }) {
-  const items = [["超大单", m && m.super_net], ["大单", m && m.large_net],
-                 ["中单", m && m.mid_net], ["小单", m && m.small_net], ["主力", m && m.main_net]];
-  const max = Math.max(1, ...items.map(([, v]) => Math.abs(v || 0)));
-  return (
-    <div style={{ background: "var(--paper-1)", border: "1px solid var(--line-2)", borderRadius: 6,
-                  padding: "10px 14px", marginBottom: 12 }}>
-      <div style={{ fontSize: 12, color: "var(--ink-2)", marginBottom: 6 }}>
-        大盘资金
-        {m && m.date && (
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--ink-3)", marginLeft: 8 }}>
-            {m.date} · 沪深合计</span>
-        )}
-        {m && m.src_host && String(m.src_host).indexOf("delay") >= 0 && (
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--jin)", marginLeft: 8 }}>
-            延时源</span>
-        )}
-        {(!m || m.main_net == null) && (
-          <span style={{ fontSize: 10, color: "var(--ink-3)", marginLeft: 8 }}>· 源不可用,不编造</span>
-        )}
-      </div>
-      {items.map(([label, v]) => (
-        <div key={label} style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0" }}>
-          <span style={{ width: 44, fontSize: 12, color: "var(--ink-2)" }}>{label}</span>
-          <div style={{ flex: 1, height: 12, position: "relative", background: "var(--paper-sink)", borderRadius: 3 }}>
-            <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "var(--line-3)" }} />
-            <div style={{ position: "absolute", top: 1, bottom: 1, borderRadius: 2, background: flowColor(v),
-                          width: `${(Math.abs(v || 0) / max) * 50}%`,
-                          left: (v || 0) >= 0 ? "50%" : undefined,
-                          right: (v || 0) < 0 ? "50%" : undefined }} />
-          </div>
-          <span style={{ width: 74, textAlign: "right", fontFamily: "var(--font-mono)", fontSize: 12,
-                         color: flowColor(v) }}>{fmtYi(v)}</span>
+    <div className="ff-section-heading">
+      <div>
+        <div className="ff-section-eyebrow">{eyebrow}</div>
+        <div className="ff-section-title-row">
+          <h2>{title}</h2>
+          {detail && <span>{detail}</span>}
         </div>
-      ))}
+      </div>
+      {aside && <div className="ff-section-aside">{aside}</div>}
     </div>
   );
 }
 
-/* y 轴取整到「好看的」刻度步长(1/2/2.5/3/4/5/10 × 10^n 亿)——档位太粗会把曲线压扁 */
+function BreadthMetric({ label, data }) {
+  const up = data && Number.isFinite(Number(data.up)) ? Number(data.up) : null;
+  const down = data && Number.isFinite(Number(data.down)) ? Number(data.down) : null;
+  const total = up == null || down == null ? 0 : up + down;
+  const upPct = total > 0 ? (up / total) * 100 : 0;
+  const dominant = total === 0 ? "等待独立源" : up >= down ? "上涨占优" : "下跌占优";
+  return (
+    <article className={`ff-metric-card ${total === 0 ? "is-muted" : ""}`}>
+      <div className="ff-metric-label">{label}<span>{dominant}</span></div>
+      <div className="ff-breadth-numbers">
+        <strong className="is-up">{up == null ? "—" : up}</strong>
+        <i>/</i>
+        <strong className="is-down">{down == null ? "—" : down}</strong>
+      </div>
+      <div className="ff-breadth-caption"><span>上涨</span><span>下跌</span></div>
+      <div className="ff-ratio-track" aria-label={`${label}上涨比例`}>
+        <span className="is-up" style={{ width: `${upPct}%` }} />
+        <span className="is-down" style={{ width: `${100 - upPct}%` }} />
+      </div>
+    </article>
+  );
+}
+
+function OverviewGrid({ live, fromMemory }) {
+  const market = (live && live.market) || {};
+  const breadth = (live && live.breadth) || {};
+  const main = market.main_net;
+  const delayed = String(market.src_host || "").includes("delay");
+  const archived = !live || !live.trading;
+  return (
+    <section className="ff-overview-grid" aria-label="资金流摘要">
+      <article className={`ff-metric-card ff-main-card is-${flowTone(main)}`}>
+        <div className="ff-metric-label">大盘主力<span>{main == null ? "数据不可用" : Number(main) >= 0 ? "净流入" : "净流出"}</span></div>
+        <div className={`ff-main-value is-${flowTone(main)}`}>{signedYi(main)}</div>
+        <div className="ff-main-helper">超大单与大单合计 · 沪深市场</div>
+      </article>
+      <BreadthMetric label="行业广度" data={breadth.industry} />
+      <BreadthMetric label="概念广度" data={breadth.concept} />
+      <article className="ff-metric-card ff-status-card">
+        <div className="ff-metric-label">数据状态<span className={delayed ? "is-caution" : "is-ready"}>{delayed ? "延时源" : "主源"}</span></div>
+        <div className="ff-status-value"><span className={archived ? "is-archive" : "is-live"} />{archived ? "盘后存档" : "盘中更新"}</div>
+        <div className="ff-main-helper">{fromMemory ? "浏览器本地记忆" : "服务端最新快照"}</div>
+      </article>
+    </section>
+  );
+}
+
+function MarketFlowBars({ m }) {
+  const items = [
+    ["超大单", "机构级大额成交", m && m.super_net],
+    ["大单", "主动性大额成交", m && m.large_net],
+    ["中单", "中等规模成交", m && m.mid_net],
+    ["小单", "个人投资者成交", m && m.small_net],
+    ["主力", "超大单 + 大单", m && m.main_net],
+  ];
+  const max = Math.max(1, ...items.map(([, , v]) => Math.abs(Number(v) || 0)));
+  return (
+    <section className="ff-panel ff-market-panel">
+      <SectionHeading
+        eyebrow="MARKET STRUCTURE"
+        title="大盘资金分层"
+        detail={m && m.date ? `${m.date} · 沪深合计` : "源不可用，不编造"}
+        aside={m && m.src_host && String(m.src_host).includes("delay") ? <span className="ff-source-pill">延时源</span> : null}
+      />
+      <div className="ff-flow-list">
+        {items.map(([label, desc, v]) => {
+          const width = `${(Math.abs(Number(v) || 0) / max) * 50}%`;
+          return (
+            <div className={`ff-flow-row ${label === "主力" ? "is-primary" : ""}`} key={label}>
+              <div className="ff-flow-name"><strong>{label}</strong><span>{desc}</span></div>
+              <div className="ff-flow-track">
+                <span className="ff-flow-zero" />
+                <span className={`ff-flow-fill is-${flowTone(v)}`} style={{ width, left: (Number(v) || 0) >= 0 ? "50%" : "auto", right: (Number(v) || 0) < 0 ? "50%" : "auto" }} />
+              </div>
+              <strong className={`ff-flow-value is-${flowTone(v)}`}>{signedYi(v)}</strong>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function niceStep(maxAbsYi) {
-  const raw = maxAbsYi / 2;                      // 目标:0 线两侧各约 2 格
+  const raw = maxAbsYi / 2;
   const pow = Math.pow(10, Math.floor(Math.log10(Math.max(raw, 1))));
   const n = raw / pow;
   const mult = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 3 ? 3 : n <= 4 ? 4 : n <= 5 ? 5 : 10;
   return mult * pow;
 }
 
-/* 标签防重叠:按 y 排序后强制最小行距,再回推防越界 */
-function spreadLabels(items, top, bottom, gap) {
-  const s = items.slice().sort((a, b) => a.y - b.y);
-  for (let i = 1; i < s.length; i++)
-    if (s[i].y - s[i - 1].y < gap) s[i].y = s[i - 1].y + gap;
-  const overflow = s.length ? s[s.length - 1].y - bottom : 0;
-  if (overflow > 0) for (let i = s.length - 1; i >= 0; i--) {
-    s[i].y -= overflow;
-    if (i > 0 && s[i].y - s[i - 1].y >= gap) break;
-  }
-  if (s.length && s[0].y < top) {
-    const d = top - s[0].y;
-    for (let i = 0; i < s.length; i++) s[i].y += d;
-  }
-  return s;
+function focusSeries(boards) {
+  const rows = (boards || []).map((b) => ({ ...b, _last: lastValue(b.series) })).filter((b) => b._last != null);
+  const inflow = rows.filter((b) => b._last >= 0).sort((a, b) => b._last - a._last).slice(0, 4);
+  const outflow = rows.filter((b) => b._last < 0).sort((a, b) => a._last - b._last).slice(0, 4);
+  const red = ["#8F2D22", "#B23A2B", "#C75A47", "#D77C68"];
+  const green = ["#294B3D", "#3E6152", "#58796A", "#789286"];
+  return inflow.map((b, i) => ({ ...b, _color: red[i] })).concat(outflow.map((b, i) => ({ ...b, _color: green[i] })));
 }
 
-/* 盘中分钟多线图(纯 SVG)—— 数据为东财当日 09:31→15:00 分钟累计线 */
 function IntradayChart({ hist }) {
-  const boards = (hist && hist.boards) || [];
   const ticks = (hist && hist.ticks) || [];
+  const boards = focusSeries((hist && hist.boards) || []);
   const mkt = ((hist && hist.market_series) || {}).main_net || [];
-  if (ticks.length < 2 || !boards.length)
-    return <div style={{ padding: 24, fontSize: 12, color: "var(--ink-3)", background: "var(--paper-1)",
-                         border: "1px solid var(--line-2)", borderRadius: 6, marginBottom: 12 }}>
-      {hist && hist.warming
-        ? "首次拉取当日分钟线(20 条板块 + 大盘,约 25 秒),完成后自动出图…"
-        : "暂无当日分钟线(非交易日 / 盘前 / 上游源降级)。开盘后自动出全天曲线。"}</div>;
+  if (ticks.length < 2 || !boards.length) {
+    return (
+      <section className="ff-panel ff-chart-empty">
+        <span className={hist && hist.warming ? "ff-spinner" : "ff-empty-mark"}>{hist && hist.warming ? "" : "∿"}</span>
+        <strong>{hist && hist.warming ? "正在构建分钟资金轨迹" : "暂无当日分钟线"}</strong>
+        <p>{hist && hist.warming ? "首次拉取约需 25 秒，完成后自动出图。" : "非交易日、盘前或上游源降级时不会合成虚假曲线。"}</p>
+      </section>
+    );
+  }
 
-  const W = 980, H = 420, PL = 52, PR = 150, PT = 14, PB = 26;
+  const W = 920, H = 380, PL = 58, PR = 18, PT = 18, PB = 34;
   const all = boards.flatMap((b) => b.series).concat(mkt).filter((v) => v != null);
-  const maxAbs = Math.max(1, ...all.map((v) => Math.abs(v)));
+  const maxAbs = Math.max(1, ...all.map((v) => Math.abs(Number(v))));
   const stepYi = niceStep(maxAbs / YI);
   const spanYi = Math.max(stepYi, Math.ceil((maxAbs / YI) / stepYi) * stepYi);
   const x = (i) => PL + (i * (W - PL - PR)) / (ticks.length - 1);
-  const y = (v) => PT + (H - PT - PB) * (0.5 - (v / (spanYi * YI)) * 0.5);
-
-  const seg = (series) => {
-    const parts = []; let cur = [];
-    series.forEach((v, i) => {
-      if (v == null) { if (cur.length > 1) parts.push(cur); cur = []; }
-      else cur.push(`${x(i)},${y(v)}`);
+  const y = (v) => PT + (H - PT - PB) * (0.5 - (Number(v) / (spanYi * YI)) * 0.5);
+  const segments = (series) => {
+    const parts = []; let current = [];
+    (series || []).forEach((v, i) => {
+      if (v == null) { if (current.length > 1) parts.push(current); current = []; }
+      else current.push(`${x(i)},${y(v)}`);
     });
-    if (cur.length > 1) parts.push(cur);
+    if (current.length > 1) parts.push(current);
     return parts;
   };
-  const lastIdx = (s) => s.reduce((acc, v, i) => (v != null ? i : acc), null);
-
-  // y 轴刻度
   const gridYi = [];
   for (let v = -spanYi; v <= spanYi + 1e-9; v += stepYi) gridYi.push(Math.round(v * 100) / 100);
-  // x 轴刻度:等距取 6 个真实时刻
   const xIdx = [];
   const nx = Math.min(6, ticks.length);
   for (let i = 0; i < nx; i++) xIdx.push(Math.round((i * (ticks.length - 1)) / (nx - 1)));
 
-  const labels = spreadLabels(
-    boards.map((b) => {
-      const li = lastIdx(b.series);
-      return li == null ? null : { name: b.name, v: b.series[li], x: x(li), y: y(b.series[li]) };
-    }).filter(Boolean),
-    PT + 6, H - PB - 2, 12
-  );
-
   return (
-    <div style={{ background: "var(--paper-1)", border: "1px solid var(--line-2)", borderRadius: 6,
-                  padding: 10, marginBottom: 12, overflowX: "auto" }}>
-      <svg width={W} height={H} style={{ display: "block" }}>
-        {gridYi.map((g) => (
-          <g key={g}>
-            <line x1={PL} y1={y(g * YI)} x2={W - PR} y2={y(g * YI)}
-                  stroke={g === 0 ? "var(--line-3)" : "var(--line-1)"} strokeWidth={g === 0 ? 1 : 0.5} />
-            <text x={PL - 6} y={y(g * YI) + 3} fontSize="9" textAnchor="end" fill="var(--ink-3)"
-                  style={{ fontFamily: "var(--font-mono)" }}>{g > 0 ? "+" : ""}{g}亿</text>
-          </g>
-        ))}
-        {xIdx.map((i) => (
-          <g key={i}>
-            <line x1={x(i)} y1={PT} x2={x(i)} y2={H - PB} stroke="var(--line-1)" strokeWidth="0.5" />
-            <text x={x(i)} y={H - PB + 13} fontSize="9" textAnchor="middle" fill="var(--ink-3)"
-                  style={{ fontFamily: "var(--font-mono)" }}>{ticks[i]}</text>
-          </g>
-        ))}
+    <section className="ff-panel ff-chart-panel">
+      <SectionHeading
+        eyebrow="INTRADAY TRACE"
+        title="盘中资金轨迹"
+        detail="仅展示流入、流出各前四名，减少曲线干扰"
+        aside={hist && hist.date ? <span className="ff-date-tag">{hist.date}</span> : null}
+      />
+      <div className="ff-chart-layout">
+        <div className="ff-chart-canvas">
+          <svg className="ff-chart-svg" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="板块盘中资金流向曲线">
+            <defs>
+              <linearGradient id="ffZeroGlow" x1="0" x2="1"><stop offset="0" stopColor="#B3A582" stopOpacity=".15" /><stop offset=".5" stopColor="#B3A582" stopOpacity=".55" /><stop offset="1" stopColor="#B3A582" stopOpacity=".15" /></linearGradient>
+            </defs>
+            {gridYi.map((g) => (
+              <g key={g}>
+                <line x1={PL} y1={y(g * YI)} x2={W - PR} y2={y(g * YI)} className={g === 0 ? "ff-grid-zero" : "ff-grid-line"} />
+                <text x={PL - 9} y={y(g * YI) + 4} textAnchor="end" className="ff-axis-label">{g > 0 ? "+" : ""}{g}亿</text>
+              </g>
+            ))}
+            {xIdx.map((i) => (
+              <g key={i}>
+                <line x1={x(i)} y1={PT} x2={x(i)} y2={H - PB} className="ff-grid-line is-vertical" />
+                <text x={x(i)} y={H - 10} textAnchor="middle" className="ff-axis-label">{ticks[i]}</text>
+              </g>
+            ))}
+            {mkt.some((v) => v != null) && segments(mkt).map((pts, pi) => (
+              <polyline key={`market-${pi}`} points={pts.join(" ")} fill="none" stroke="var(--qing)" strokeWidth="2.2" strokeDasharray="7 5" opacity=".68" />
+            ))}
+            {boards.map((b) => (
+              <g key={b.name}>{segments(b.series).map((pts, pi) => <polyline key={pi} points={pts.join(" ")} fill="none" stroke={b._color} strokeWidth="2.15" opacity=".9" />)}</g>
+            ))}
+          </svg>
+        </div>
+        <aside className="ff-chart-legend">
+          <div className="ff-legend-group-label is-up">净流入领先</div>
+          {boards.filter((b) => b._last >= 0).map((b, i) => (
+            <div className="ff-legend-row" key={b.name}><i style={{ background: b._color }} /><span><b>{i + 1}</b>{b.name}</span><strong className="is-up">{signedYi(b._last)}</strong></div>
+          ))}
+          <div className="ff-legend-group-label is-down">净流出领先</div>
+          {boards.filter((b) => b._last < 0).map((b, i) => (
+            <div className="ff-legend-row" key={b.name}><i style={{ background: b._color }} /><span><b>{i + 1}</b>{b.name}</span><strong className="is-down">{signedYi(b._last)}</strong></div>
+          ))}
+          {mkt.some((v) => v != null) && <div className="ff-market-legend"><i />大盘主力 <strong>{signedYi(lastValue(mkt))}</strong></div>}
+        </aside>
+      </div>
+    </section>
+  );
+}
 
-        {/* 大盘主力:加粗虚线基准 */}
-        {mkt.some((v) => v != null) && seg(mkt).map((pts, pi) => (
-          <polyline key={"m" + pi} points={pts.join(" ")} fill="none" stroke="var(--ink-2)"
-                    strokeWidth="1.8" strokeDasharray="5 3" opacity="0.55" />
+function RankColumn({ title, subtitle, rows, tone }) {
+  const max = Math.max(1, ...rows.map((b) => Math.abs(Number(b.main_net) || 0)));
+  return (
+    <div className="ff-rank-column">
+      <div className={`ff-rank-column-title is-${tone}`}><div><span>{title}</span><small>{subtitle}</small></div><b>{rows.length}</b></div>
+      <div className="ff-rank-rows">
+        {rows.map((b, i) => (
+          <div className="ff-rank-row" data-hv="row" key={b.code || b.name}>
+            <span className="ff-rank-no">{String(i + 1).padStart(2, "0")}</span>
+            <div className="ff-rank-name"><strong>{b.name}</strong><span className="ff-rank-bar"><i className={`is-${tone}`} style={{ width: `${(Math.abs(Number(b.main_net) || 0) / max) * 100}%` }} /></span></div>
+            <span className={`ff-rank-pct is-${flowTone(b.change_pct)}`}>{Number(b.change_pct) >= 0 ? "+" : ""}{Number(b.change_pct || 0).toFixed(2)}%</span>
+            <strong className={`ff-rank-value is-${tone}`}>{signedYi(b.main_net)}</strong>
+          </div>
         ))}
-
-        {boards.map((b) => {
-          const li = lastIdx(b.series);
-          const col = flowColor(li != null ? b.series[li] : null);
-          return (
-            <g key={b.name}>
-              {seg(b.series).map((pts, pi) => (
-                <polyline key={pi} points={pts.join(" ")} fill="none" stroke={col}
-                          strokeWidth="1.3" opacity="0.85" />
-              ))}
-            </g>
-          );
-        })}
-
-        {/* 右缘标签:错开后用引导线连回曲线末点 */}
-        {labels.map((L) => (
-          <g key={L.name}>
-            <line x1={L.x} y1={y(L.v)} x2={W - PR + 2} y2={L.y - 3} stroke={flowColor(L.v)}
-                  strokeWidth="0.5" opacity="0.35" />
-            <text x={W - PR + 5} y={L.y} fontSize="10" fill={flowColor(L.v)}
-                  style={{ fontFamily: "var(--font-mono)" }}>{L.name} {fmtYi(L.v)}</text>
-          </g>
-        ))}
-        <text x={W - PR + 5} y={H - 4} fontSize="9" fill="var(--ink-3)">— — 大盘主力</text>
-      </svg>
+      </div>
     </div>
   );
 }
 
-/* 板块排行榜 */
 function BoardRankTable({ boards }) {
-  const top = (boards || []).slice(0, 20);
+  const rows = (boards || []).filter((b) => b && b.main_net != null);
+  const inflow = rows.filter((b) => Number(b.main_net) >= 0).sort((a, b) => b.main_net - a.main_net).slice(0, 10);
+  const outflow = rows.filter((b) => Number(b.main_net) < 0).sort((a, b) => a.main_net - b.main_net).slice(0, 10);
   return (
-    <div style={{ background: "var(--paper-1)", border: "1px solid var(--line-2)", borderRadius: 6, padding: "6px 12px" }}>
-      <div style={{ fontSize: 12, color: "var(--ink-2)", padding: "4px 0 6px" }}>板块净流入排行(前 20)</div>
-      {top.map((b) => (
-        <div key={b.code || b.name} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0",
-                                             borderTop: "1px solid var(--line-1)", fontSize: 12 }}>
-          <span style={{ width: 20, fontFamily: "var(--font-mono)", color: "var(--ink-3)" }}>{b.rank}</span>
-          <span style={{ flex: 1, color: "var(--ink-1)" }}>{b.name}</span>
-          <span style={{ fontFamily: "var(--font-mono)", color: flowColor(b.change_pct) }}>
-            {b.change_pct >= 0 ? "+" : ""}{Number(b.change_pct).toFixed(2)}%</span>
-          <span style={{ width: 82, textAlign: "right", fontFamily: "var(--font-mono)", fontWeight: 700,
-                         color: flowColor(b.main_net) }}>{fmtYi(b.main_net)}</span>
-        </div>
-      ))}
-    </div>
+    <section className="ff-panel ff-ranking-panel">
+      <SectionHeading eyebrow="CAPITAL RANKING" title="板块资金榜" detail="净流入与净流出双向对照 · 各前十" />
+      <div className="ff-rank-grid">
+        <RankColumn title="净流入" subtitle="资金正在聚集" rows={inflow} tone="up" />
+        <RankColumn title="净流出" subtitle="资金正在撤离" rows={outflow} tone="down" />
+      </div>
+    </section>
   );
 }
 
@@ -216,88 +247,70 @@ function App() {
   const [live, setLive] = useState(null);
   const [hist, setHist] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [fromMemory, setFromMemory] = useState(false);   // 当前展示是否来自本地记忆(未手动更新)
+  const [fromMemory, setFromMemory] = useState(false);
 
-  // 手动更新:强拉最新 live+hist,成功后写浏览器本地记忆(hist 若 warming 由下方轮询补齐再存)。
   const update = useCallback(async (k) => {
     setLoading(true); setFromMemory(false);
-    const [lv, hs] = await Promise.all([window.glFetchFundflowLive(k, true),
-                                        window.glFetchFundflowHistory(k, "")]);
+    const [lv, hs] = await Promise.all([window.glFetchFundflowLive(k, true), window.glFetchFundflowHistory(k, "")]);
     setLive(lv); setHist(hs); setLoading(false);
-    if (lv && lv.ok !== false && !(hs && hs.warming))
-      window.glSaveFundflowMemory(k, { live: lv, hist: hs });
+    if (lv && lv.ok !== false && !(hs && hs.warming)) window.glSaveFundflowMemory(k, { live: lv, hist: hs });
   }, []);
 
-  // 打开/切档:优先从浏览器本地记忆**秒恢复**(0 拉取,连后端请求都不发);
-  // 只有从未拉过(无记忆)才自动首拉一次。想要最新数据点「更新数据」按钮。
   useEffect(() => {
     const mem = window.glLoadFundflowMemory(kind);
     if (mem && mem.live) {
       setLive(mem.live); setHist(mem.hist || null); setFromMemory(true); setLoading(false);
-    } else {
-      update(kind);
-    }
+    } else update(kind);
   }, [kind, update]);
 
-  // 分钟线首拉 warming(约 25s):轮询直到出图,拿到后连同 live 存进本地记忆。
   useEffect(() => {
     if (!hist || !hist.warming) return;
-    const t = setTimeout(async () => {
+    const timer = setTimeout(async () => {
       const hs = await window.glFetchFundflowHistory(kind, "");
       setHist(hs);
-      if (hs && hs.ticks && hs.ticks.length && live && live.ok !== false)
-        window.glSaveFundflowMemory(kind, { live, hist: hs });
+      if (hs && hs.ticks && hs.ticks.length && live && live.ok !== false) window.glSaveFundflowMemory(kind, { live, hist: hs });
     }, 5000);
-    return () => clearTimeout(t);
+    return () => clearTimeout(timer);
   }, [hist, kind, live]);
 
-  if (live && live.ok === false)
-    return <div style={{ padding: 40, fontFamily: "var(--font-serif)", color: "var(--ink-2)" }}>
-      资金流向断供:{live.reason || (live.notes || []).join("；") || "数据源不可用"}</div>;
+  if (live && live.ok === false) {
+    return <main className="ff-page"><section className="ff-error-card"><span>!</span><div><h1>资金流向暂时断供</h1><p>{live.reason || (live.notes || []).join("；") || "数据源不可用"}</p><small>系统不会用估算值补齐真实资金流。</small></div></section></main>;
+  }
 
   const notes = (live && live.notes) || [];
-  const tab = (k, label) => (
-    <button onClick={() => setKind(k)} data-hv="zhu"
-      style={{ fontFamily: "var(--font-serif)", fontSize: 13, padding: "4px 14px", cursor: "pointer",
-               background: kind === k ? "var(--zhu)" : "var(--paper-0)",
-               color: kind === k ? "var(--text-on-ink)" : "var(--ink-1)",
-               border: "1px solid var(--line-3)", borderRadius: 4 }}>{label}</button>
-  );
+  const pulledAt = live ? String(live.pulled_at || "").slice(0, 16).replace("T", " ").replaceAll("/", "-") : "";
   return (
-    <div style={{ maxWidth: 1180, margin: "0 auto", padding: "18px 22px 40px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
-        <h1 style={{ fontFamily: "var(--font-serif)", fontSize: 22, fontWeight: 700, color: "var(--ink-0)", margin: 0 }}>
-          板块资金流向</h1>
-        <span style={{ fontSize: 11, color: "var(--ink-3)" }}>盘中主力净流入 · 纯展示参考,非交易信号</span>
-        <span style={{ display: "flex", gap: 6, marginLeft: 8 }}>{tab("concept", "概念")}{tab("industry", "行业")}</span>
-        <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
-          {live && <span style={{ fontFamily: "var(--font-mono)", fontSize: 10,
-                                  color: live.trading ? "var(--zhu)" : "var(--ink-3)" }}>
-            数据 {String(live.pulled_at || "").slice(0, 16).replace("T", " ")}
-            {fromMemory ? " · 本地记忆" : (live.freshness && live.freshness.frozen ? " · 已存档" : "")}</span>}
-          <button onClick={() => update(kind)} disabled={loading} data-hv="zhu"
-            style={{ fontFamily: "var(--font-serif)", fontSize: 12, padding: "5px 16px", cursor: "pointer",
-                     background: loading ? "var(--paper-0)" : "var(--zhu)",
-                     color: loading ? "var(--ink-2)" : "var(--text-on-ink)",
-                     border: "1px solid var(--line-3)", borderRadius: 4 }}>
-            {loading ? "更新中…" : "更新数据"}</button>
-        </span>
-      </div>
+    <main className="ff-page">
+      <header className="ff-hero" data-testid="fundflow-hero">
+        <div className="ff-hero-copy">
+          <div className="ff-kicker"><span /> FUND FLOW MONITOR</div>
+          <div className="ff-title-line"><h1>资金流向</h1><span>板块主力资金全景</span></div>
+          <p>观察资金正在流向哪里，以及哪些方向正在失血。纯展示参考，不构成交易信号。</p>
+        </div>
+        <div className="ff-hero-controls">
+          <div className="ff-segmented" role="group" aria-label="板块类型">
+            <button aria-pressed={kind === "concept"} onClick={() => setKind("concept")}>概念板块</button>
+            <button aria-pressed={kind === "industry"} onClick={() => setKind("industry")}>行业板块</button>
+          </div>
+          <div className="ff-update-line">
+            <div className="ff-data-time"><span className={live && live.trading ? "is-live" : "is-archive"} /><div><small>{fromMemory ? "本地记忆" : live && live.trading ? "盘中数据" : "盘后存档"}</small><strong>{pulledAt || "等待数据"}</strong></div></div>
+            <button className="ff-refresh" onClick={() => update(kind)} disabled={loading}><span className={loading ? "is-spinning" : ""}>↻</span>{loading ? "更新中" : "更新数据"}</button>
+          </div>
+        </div>
+      </header>
 
-      <BreadthStrip b={live && live.breadth} />
+      <OverviewGrid live={live} fromMemory={fromMemory} />
       <MarketFlowBars m={(live && live.market) || {}} />
       <IntradayChart hist={hist} />
       <BoardRankTable boards={(live && live.boards) || []} />
 
       {notes.length > 0 && (
-        <div style={{ marginTop: 14, padding: "8px 12px", background: "var(--paper-sink)",
-                      border: "1px solid var(--line-2)", borderRadius: 4 }}>
-          {notes.map((n, i) => (
-            <div key={i} style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--ink-2)", padding: "1px 0" }}>⚠ {n}</div>
-          ))}
-        </div>
+        <details className="ff-notes">
+          <summary><span>i</span>数据口径与当前降级说明 <b>{notes.length}</b></summary>
+          <div>{notes.map((n, i) => <p key={i}>{n}</p>)}</div>
+        </details>
       )}
-    </div>
+    </main>
   );
 }
 

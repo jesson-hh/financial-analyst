@@ -412,7 +412,10 @@ def audit(live: Path, baseline_path: Path, receipt_path: Path, design_path: Path
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--live-root", type=Path, default=Path("G:/guanlan-v2"))
+    parser.add_argument(
+        "--live-root", type=Path, default=CHECKOUT,
+        help="Guanlan source checkout to audit (default: this checkout)",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--receipts", type=Path)

@@ -354,6 +354,53 @@ def test_read_live_stale_serves_prev_and_triggers(tmp_path, monkeypatch):
     assert triggered and len(calls) == 1        # 秒回旧值+触发后台单飞;本次读未同步再拉
 
 
+def test_read_live_query_only_missing_cache_never_fetches(tmp_path):
+    from guanlan_v2.fundflow import pulse
+    calls = []
+    out = pulse.read_live(
+        "concept", cache_dir=str(tmp_path), ttl_s=180,
+        now=datetime(2026, 7, 8, 10, 0, 0), build_fn=_mk_build(calls),
+        allow_refresh=False,
+    )
+    assert out["ok"] is False and calls == []
+    assert "未启动刷新" in " ".join(out["notes"])
+    assert not (Path(tmp_path) / "fundflow_live_concept.json").exists()
+
+
+def test_read_live_query_only_stale_cache_never_triggers(tmp_path, monkeypatch):
+    from guanlan_v2.fundflow import pulse
+    calls = []
+    b = _mk_build(calls)
+    pulse.read_live(
+        "concept", cache_dir=str(tmp_path), ttl_s=180,
+        now=datetime(2026, 7, 8, 10, 0, 0), build_fn=b,
+    )
+    triggered = []
+    monkeypatch.setattr(
+        pulse, "_trigger_live_refresh",
+        lambda *a, **k: (triggered.append(a), True)[1],
+    )
+    out = pulse.read_live(
+        "concept", cache_dir=str(tmp_path), ttl_s=180,
+        now=datetime(2026, 7, 8, 10, 5, 0), build_fn=b,
+        allow_refresh=False,
+    )
+    assert triggered == [] and len(calls) == 1
+    assert out["freshness"]["stale"] is True
+
+
+def test_read_live_query_only_rejects_explicit_refresh(tmp_path):
+    from guanlan_v2.fundflow import pulse
+    calls = []
+    out = pulse.read_live(
+        "concept", refresh=True, cache_dir=str(tmp_path),
+        now=datetime(2026, 7, 8, 10, 0, 0), build_fn=_mk_build(calls),
+        allow_refresh=False,
+    )
+    assert out["ok"] is False and calls == []
+    assert "拒绝显式" in " ".join(out["notes"])
+
+
 def test_read_live_offhours_serves_cache_without_trigger(tmp_path, monkeypatch):
     """收盘后:缓存视为定格,秒回且绝不后台重拉(当天数据不变,省得白打东财)。"""
     from guanlan_v2.fundflow import pulse

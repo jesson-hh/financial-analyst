@@ -1,0 +1,485 @@
+{
+  "schema_version": "company-mapping-reviewed-table@1",
+  "table_version": "2026-08-30.1",
+  "reviewer": "Codex source audit (exact-source import; research context only)",
+  "reviewed_at": "2026-08-30T13:30:00Z",
+  "source_policy": "Only exact A-share identities and source-pinned relationships are admitted. Industry thermometers remain context, not issuer facts. A missing row is unmapped; no fuzzy name, keyword-only, or LLM fallback is permitted.",
+  "subjects": [
+    {
+      "entity_id": "issuer-sz000636",
+      "security_code": "SZ000636",
+      "canonical_name": "广东风华高新科技股份有限公司",
+      "jurisdiction": "CN",
+      "aliases": [
+        "000636",
+        "风华高科",
+        "Guangdong Fenghua Advanced Technology (Holding) Co., Ltd."
+      ],
+      "identifiers": {
+        "security_code": "SZ000636",
+        "cninfo_code": "000636"
+      },
+      "metadata": {
+        "official_profile_industry": "计算机、通信和其他电子设备制造业"
+      },
+      "mappings": [
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "control_lists",
+          "target_key": "Guangdong Fenghua Advanced Technology (Holding) Co., Ltd.",
+          "target_entity": {
+            "entity_id": "legal-guangdong-fenghua-advanced-technology-holding",
+            "entity_type": "legal_entity",
+            "canonical_name": "Guangdong Fenghua Advanced Technology (Holding) Co., Ltd.",
+            "jurisdiction": "CN",
+            "identifiers": {
+              "security_code": "SZ000636"
+            },
+            "metadata": {}
+          },
+          "relationship": "official_legal_english_name",
+          "context": {
+            "scope": "context",
+            "purpose": "official-list exact-name search",
+            "guard": "empty/partial search results do not prove the entity is absent from every control regime"
+          },
+          "confidence": 1.0,
+          "evidence": [
+            {
+              "source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=000636",
+              "authority": "巨潮资讯",
+              "field": "F001V",
+              "snapshot_sha256": "a0f86eee9ab6d579c9a889bb8057f7eada77111c5fbd7c3004de3a33c1c00ada"
+            }
+          ],
+          "reviewer": "Codex source audit (exact F001V extraction)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Exact official English legal name from the issuer overview; no alias inference.",
+          "metadata": {
+            "research_only": true,
+            "not_a_compliance_determination": true
+          }
+        }
+      ]
+    },
+    {
+      "entity_id": "issuer-sh600667",
+      "security_code": "SH600667",
+      "canonical_name": "无锡市太极实业股份有限公司",
+      "jurisdiction": "CN",
+      "aliases": [
+        "600667",
+        "太极实业",
+        "Wuxi Taiji Industry Limited Corporation"
+      ],
+      "identifiers": {
+        "security_code": "SH600667",
+        "cninfo_code": "600667"
+      },
+      "metadata": {
+        "official_profile_industry": "土木工程建筑业"
+      },
+      "mappings": [
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "control_lists",
+          "target_key": "Wuxi Taiji Industry Limited Corporation",
+          "target_entity": {
+            "entity_id": "legal-wuxi-taiji-industry-limited-corporation",
+            "entity_type": "legal_entity",
+            "canonical_name": "Wuxi Taiji Industry Limited Corporation",
+            "jurisdiction": "CN",
+            "identifiers": {
+              "security_code": "SH600667"
+            },
+            "metadata": {}
+          },
+          "relationship": "official_legal_english_name",
+          "context": {
+            "scope": "context",
+            "purpose": "official-list exact-name search",
+            "guard": "empty/partial search results do not prove the entity is absent from every control regime"
+          },
+          "confidence": 1.0,
+          "evidence": [
+            {
+              "source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=600667",
+              "authority": "巨潮资讯",
+              "field": "F001V",
+              "snapshot_sha256": "4b8db22bd07102681d374178619743446da4ef670c63fc328efe5358e4108b63"
+            }
+          ],
+          "reviewer": "Codex source audit (exact F001V extraction)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Exact official English legal name from the issuer overview; no alias inference.",
+          "metadata": {
+            "research_only": true,
+            "not_a_compliance_determination": true
+          }
+        }
+      ]
+    },
+    {
+      "entity_id": "issuer-sh603929",
+      "security_code": "SH603929",
+      "canonical_name": "亚翔系统集成科技(苏州)股份有限公司",
+      "jurisdiction": "CN",
+      "aliases": [
+        "603929",
+        "亚翔集成",
+        "L and K Engineering (Suzhou) Co., Ltd."
+      ],
+      "identifiers": {
+        "security_code": "SH603929",
+        "cninfo_code": "603929"
+      },
+      "metadata": {
+        "official_profile_industry": "建筑安装业"
+      },
+      "mappings": [
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "control_lists",
+          "target_key": "L and K Engineering (Suzhou) Co., Ltd.",
+          "target_entity": {
+            "entity_id": "legal-l-and-k-engineering-suzhou",
+            "entity_type": "legal_entity",
+            "canonical_name": "L and K Engineering (Suzhou) Co., Ltd.",
+            "jurisdiction": "CN",
+            "identifiers": {
+              "security_code": "SH603929"
+            },
+            "metadata": {}
+          },
+          "relationship": "official_legal_english_name",
+          "context": {
+            "scope": "context",
+            "purpose": "official-list exact-name search",
+            "guard": "empty/partial search results do not prove the entity is absent from every control regime"
+          },
+          "confidence": 1.0,
+          "evidence": [
+            {
+              "source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=603929",
+              "authority": "巨潮资讯",
+              "field": "F001V",
+              "snapshot_sha256": "47704799c62c203c9fb4c243476d1d3aeeb984f37fc5fb1b9c9a5a7373f17b83"
+            }
+          ],
+          "reviewer": "Codex source audit (exact F001V extraction)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Exact official English legal name from the issuer overview; no alias inference.",
+          "metadata": {
+            "research_only": true,
+            "not_a_compliance_determination": true
+          }
+        }
+      ]
+    },
+    {
+      "entity_id": "issuer-sz300308",
+      "security_code": "SZ300308",
+      "canonical_name": "中际旭创股份有限公司",
+      "jurisdiction": "CN",
+      "aliases": [
+        "300308",
+        "中际旭创",
+        "Zhongji Innolight Co., Ltd."
+      ],
+      "identifiers": {
+        "security_code": "SZ300308",
+        "cninfo_code": "300308"
+      },
+      "metadata": {
+        "official_profile_industry": "计算机、通信和其他电子设备制造业",
+        "reviewed_industry_tag": "ai_compute"
+      },
+      "mappings": [
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "control_lists",
+          "target_key": "Zhongji Innolight Co., Ltd.",
+          "target_entity": {
+            "entity_id": "legal-zhongji-innolight",
+            "entity_type": "legal_entity",
+            "canonical_name": "Zhongji Innolight Co., Ltd.",
+            "jurisdiction": "CN",
+            "identifiers": {
+              "security_code": "SZ300308"
+            },
+            "metadata": {}
+          },
+          "relationship": "official_legal_english_name",
+          "context": {
+            "scope": "context",
+            "purpose": "official-list exact-name search",
+            "guard": "empty/partial search results do not prove the entity is absent from every control regime"
+          },
+          "confidence": 1.0,
+          "evidence": [
+            {
+              "source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=300308",
+              "authority": "巨潮资讯",
+              "field": "F001V",
+              "snapshot_sha256": "42e93f0a7534deb315e6f5a6941cce685af87ca2e67ee1d8f85223e1bb68287b"
+            }
+          ],
+          "reviewer": "Codex source audit (exact F001V extraction)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Exact official English legal name from the issuer overview; no alias inference.",
+          "metadata": {
+            "research_only": true,
+            "not_a_compliance_determination": true
+          }
+        },
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "tw_monthly_revenue",
+          "target_key": "2383",
+          "target_entity": {
+            "entity_id": "tw-2383",
+            "entity_type": "listed_issuer",
+            "canonical_name": "台光电子",
+            "jurisdiction": "TW",
+            "identifiers": {"company_id": "2383"},
+            "metadata": {"role": "CCL; Nvidia and AWS Trainium context"}
+          },
+          "relationship": "industry_thermometer_peer",
+          "context": {
+            "scope": "context",
+            "industry_tag": "ai_compute",
+            "reason": "reviewed optical-compute-chain monthly-revenue thermometer",
+            "guard": "Taiwan peer revenue is not the A-share issuer's revenue; compare 2383 with 2368 before attribution"
+          },
+          "confidence": 0.9,
+          "evidence": [
+            {
+              "source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=300308",
+              "authority": "巨潮资讯",
+              "field": "F015V",
+              "snapshot_sha256": "42e93f0a7534deb315e6f5a6941cce685af87ca2e67ee1d8f85223e1bb68287b"
+            },
+            {
+              "source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/datasources/industry_tags.json",
+              "source_sha256": "a2521f792ca8ed7182e44c1713723d831dd865effb9dba6b9467926cfb33f4fd",
+              "claim": "ai_compute strong keyword 光通信 mounts tw_monthly_revenue"
+            },
+            {
+              "source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/.agents/skills/data-access/scripts/sources/industry.py",
+              "source_sha256": "98668841b50101f6c8469c4a499ceabd255b4c2f033bc30926d064a232abd283",
+              "claim": "reviewed TW_DEFAULT and role table"
+            }
+          ],
+          "reviewer": "Codex source audit (pinned Vibe Research rule import)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Official issuer profile exactly matches the pinned ai_compute strong keyword; target set is pinned upstream.",
+          "metadata": {"research_only": true, "upstream_commit": "7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd"}
+        },
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "tw_monthly_revenue",
+          "target_key": "6274",
+          "target_entity": {
+            "entity_id": "tw-6274",
+            "entity_type": "listed_issuer",
+            "canonical_name": "台燿",
+            "jurisdiction": "TW",
+            "identifiers": {"company_id": "6274"},
+            "metadata": {"role": "CCL; switch context"}
+          },
+          "relationship": "industry_thermometer_peer",
+          "context": {"scope": "context", "industry_tag": "ai_compute", "reason": "reviewed optical-compute-chain monthly-revenue thermometer", "guard": "Taiwan peer revenue is not the A-share issuer's revenue"},
+          "confidence": 0.9,
+          "evidence": [
+            {"source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=300308", "authority": "巨潮资讯", "field": "F015V", "snapshot_sha256": "42e93f0a7534deb315e6f5a6941cce685af87ca2e67ee1d8f85223e1bb68287b"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/datasources/industry_tags.json", "source_sha256": "a2521f792ca8ed7182e44c1713723d831dd865effb9dba6b9467926cfb33f4fd", "claim": "ai_compute mounts tw_monthly_revenue"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/.agents/skills/data-access/scripts/sources/industry.py", "source_sha256": "98668841b50101f6c8469c4a499ceabd255b4c2f033bc30926d064a232abd283", "claim": "reviewed TW_DEFAULT and role table"}
+          ],
+          "reviewer": "Codex source audit (pinned Vibe Research rule import)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Official issuer profile exactly matches the pinned ai_compute strong keyword; target set is pinned upstream.",
+          "metadata": {"research_only": true, "upstream_commit": "7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd"}
+        },
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "tw_monthly_revenue",
+          "target_key": "2368",
+          "target_entity": {
+            "entity_id": "tw-2368",
+            "entity_type": "listed_issuer",
+            "canonical_name": "金像电子",
+            "jurisdiction": "TW",
+            "identifiers": {"company_id": "2368"},
+            "metadata": {"role": "PCB; ASIC and Trainium context"}
+          },
+          "relationship": "industry_thermometer_peer",
+          "context": {"scope": "context", "industry_tag": "ai_compute", "reason": "reviewed optical-compute-chain monthly-revenue thermometer", "guard": "Use as the required differential peer for 2383; neither is the A-share issuer's revenue"},
+          "confidence": 0.9,
+          "evidence": [
+            {"source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=300308", "authority": "巨潮资讯", "field": "F015V", "snapshot_sha256": "42e93f0a7534deb315e6f5a6941cce685af87ca2e67ee1d8f85223e1bb68287b"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/datasources/industry_tags.json", "source_sha256": "a2521f792ca8ed7182e44c1713723d831dd865effb9dba6b9467926cfb33f4fd", "claim": "ai_compute mounts tw_monthly_revenue"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/.agents/skills/data-access/scripts/sources/industry.py", "source_sha256": "98668841b50101f6c8469c4a499ceabd255b4c2f033bc30926d064a232abd283", "claim": "reviewed TW_DEFAULT and required differential role"}
+          ],
+          "reviewer": "Codex source audit (pinned Vibe Research rule import)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Official issuer profile exactly matches the pinned ai_compute strong keyword; target set is pinned upstream.",
+          "metadata": {"research_only": true, "upstream_commit": "7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd"}
+        },
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "tw_monthly_revenue",
+          "target_key": "3081",
+          "target_entity": {
+            "entity_id": "tw-3081",
+            "entity_type": "listed_issuer",
+            "canonical_name": "联亚光电",
+            "jurisdiction": "TW",
+            "identifiers": {"company_id": "3081"},
+            "metadata": {"role": "InP epitaxy; optical-chip upstream context"}
+          },
+          "relationship": "industry_thermometer_peer",
+          "context": {"scope": "context", "industry_tag": "ai_compute", "reason": "reviewed optical-compute-chain monthly-revenue thermometer", "guard": "Taiwan peer revenue is not the A-share issuer's revenue"},
+          "confidence": 0.9,
+          "evidence": [
+            {"source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=300308", "authority": "巨潮资讯", "field": "F015V", "snapshot_sha256": "42e93f0a7534deb315e6f5a6941cce685af87ca2e67ee1d8f85223e1bb68287b"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/datasources/industry_tags.json", "source_sha256": "a2521f792ca8ed7182e44c1713723d831dd865effb9dba6b9467926cfb33f4fd", "claim": "ai_compute mounts tw_monthly_revenue"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/.agents/skills/data-access/scripts/sources/industry.py", "source_sha256": "98668841b50101f6c8469c4a499ceabd255b4c2f033bc30926d064a232abd283", "claim": "reviewed TW_DEFAULT and role table"}
+          ],
+          "reviewer": "Codex source audit (pinned Vibe Research rule import)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Official issuer profile exactly matches the pinned ai_compute strong keyword; target set is pinned upstream.",
+          "metadata": {"research_only": true, "upstream_commit": "7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd"}
+        },
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "cn_commodity_futures",
+          "target_key": "CU0",
+          "target_entity": {"entity_id": "commodity-cu0", "entity_type": "commodity_contract", "canonical_name": "沪铜连续合约", "jurisdiction": "CN", "identifiers": {"symbol": "CU0"}, "metadata": {"use": "PCB copper foil / copper cable / cooling pipe / power cable"}},
+          "relationship": "industry_input_thermometer",
+          "context": {"scope": "context", "industry_tag": "ai_compute", "reason": "reviewed upstream commodity thermometer", "guard": "futures price is market pricing, not the issuer's purchase price; transmission can lag and be hedged"},
+          "confidence": 0.9,
+          "evidence": [
+            {"source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=300308", "authority": "巨潮资讯", "field": "F015V", "snapshot_sha256": "42e93f0a7534deb315e6f5a6941cce685af87ca2e67ee1d8f85223e1bb68287b"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/datasources/industry_tags.json", "source_sha256": "a2521f792ca8ed7182e44c1713723d831dd865effb9dba6b9467926cfb33f4fd", "claim": "ai_compute mounts cn_commodity_futures"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/.agents/skills/data-access/scripts/sources/commodity.py", "source_sha256": "cd5363524f8ee5c91c6d9047d41d525cb06f3ae86982da78b086ac3a4b756690", "claim": "reviewed FUTURES contract and use table"}
+          ],
+          "reviewer": "Codex source audit (pinned Vibe Research rule import)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Pinned ai_compute thermometer contract from upstream reviewed source.",
+          "metadata": {"research_only": true, "upstream_commit": "7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd"}
+        },
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "cn_commodity_futures",
+          "target_key": "SN0",
+          "target_entity": {"entity_id": "commodity-sn0", "entity_type": "commodity_contract", "canonical_name": "沪锡连续合约", "jurisdiction": "CN", "identifiers": {"symbol": "SN0"}, "metadata": {"use": "solder bumps and BGA balls"}},
+          "relationship": "industry_input_thermometer",
+          "context": {"scope": "context", "industry_tag": "ai_compute", "reason": "reviewed upstream commodity thermometer", "guard": "futures price is market pricing, not the issuer's purchase price; transmission can lag and be hedged"},
+          "confidence": 0.9,
+          "evidence": [
+            {"source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=300308", "authority": "巨潮资讯", "field": "F015V", "snapshot_sha256": "42e93f0a7534deb315e6f5a6941cce685af87ca2e67ee1d8f85223e1bb68287b"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/datasources/industry_tags.json", "source_sha256": "a2521f792ca8ed7182e44c1713723d831dd865effb9dba6b9467926cfb33f4fd", "claim": "ai_compute mounts cn_commodity_futures"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/.agents/skills/data-access/scripts/sources/commodity.py", "source_sha256": "cd5363524f8ee5c91c6d9047d41d525cb06f3ae86982da78b086ac3a4b756690", "claim": "reviewed FUTURES contract and use table"}
+          ],
+          "reviewer": "Codex source audit (pinned Vibe Research rule import)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Pinned ai_compute thermometer contract from upstream reviewed source.",
+          "metadata": {"research_only": true, "upstream_commit": "7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd"}
+        },
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "cn_commodity_futures",
+          "target_key": "AL0",
+          "target_entity": {"entity_id": "commodity-al0", "entity_type": "commodity_contract", "canonical_name": "沪铝连续合约", "jurisdiction": "CN", "identifiers": {"symbol": "AL0"}, "metadata": {"use": "cooling structures / chassis"}},
+          "relationship": "industry_input_thermometer",
+          "context": {"scope": "context", "industry_tag": "ai_compute", "reason": "reviewed upstream commodity thermometer", "guard": "futures price is market pricing, not the issuer's purchase price; transmission can lag and be hedged"},
+          "confidence": 0.9,
+          "evidence": [
+            {"source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=300308", "authority": "巨潮资讯", "field": "F015V", "snapshot_sha256": "42e93f0a7534deb315e6f5a6941cce685af87ca2e67ee1d8f85223e1bb68287b"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/datasources/industry_tags.json", "source_sha256": "a2521f792ca8ed7182e44c1713723d831dd865effb9dba6b9467926cfb33f4fd", "claim": "ai_compute mounts cn_commodity_futures"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/.agents/skills/data-access/scripts/sources/commodity.py", "source_sha256": "cd5363524f8ee5c91c6d9047d41d525cb06f3ae86982da78b086ac3a4b756690", "claim": "reviewed FUTURES contract and use table"}
+          ],
+          "reviewer": "Codex source audit (pinned Vibe Research rule import)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Pinned ai_compute thermometer contract from upstream reviewed source.",
+          "metadata": {"research_only": true, "upstream_commit": "7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd"}
+        },
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "cn_commodity_futures",
+          "target_key": "NI0",
+          "target_entity": {"entity_id": "commodity-ni0", "entity_type": "commodity_contract", "canonical_name": "沪镍连续合约", "jurisdiction": "CN", "identifiers": {"symbol": "NI0"}, "metadata": {"use": "MLCC electrode paste / alloy"}},
+          "relationship": "industry_input_thermometer",
+          "context": {"scope": "context", "industry_tag": "ai_compute", "reason": "reviewed upstream commodity thermometer", "guard": "futures price is market pricing, not the issuer's purchase price; transmission can lag and be hedged"},
+          "confidence": 0.9,
+          "evidence": [
+            {"source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=300308", "authority": "巨潮资讯", "field": "F015V", "snapshot_sha256": "42e93f0a7534deb315e6f5a6941cce685af87ca2e67ee1d8f85223e1bb68287b"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/datasources/industry_tags.json", "source_sha256": "a2521f792ca8ed7182e44c1713723d831dd865effb9dba6b9467926cfb33f4fd", "claim": "ai_compute mounts cn_commodity_futures"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/.agents/skills/data-access/scripts/sources/commodity.py", "source_sha256": "cd5363524f8ee5c91c6d9047d41d525cb06f3ae86982da78b086ac3a4b756690", "claim": "reviewed FUTURES contract and use table"}
+          ],
+          "reviewer": "Codex source audit (pinned Vibe Research rule import)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Pinned ai_compute thermometer contract from upstream reviewed source.",
+          "metadata": {"research_only": true, "upstream_commit": "7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd"}
+        },
+        {
+          "status": "approved",
+          "version": 1,
+          "target_dataset": "cn_commodity_futures",
+          "target_key": "SI0",
+          "target_entity": {"entity_id": "commodity-si0", "entity_type": "commodity_contract", "canonical_name": "工业硅连续合约", "jurisdiction": "CN", "identifiers": {"symbol": "SI0"}, "metadata": {"use": "silicon source; weak semiconductor signal because photovoltaic demand dominates"}},
+          "relationship": "industry_input_thermometer",
+          "context": {"scope": "context", "industry_tag": "ai_compute", "reason": "reviewed upstream commodity thermometer", "guard": "futures price is market pricing, not the issuer's purchase price; industrial silicon is a weak semiconductor signal"},
+          "confidence": 0.8,
+          "evidence": [
+            {"source_ref": "http://www.cninfo.com.cn/data20/companyOverview/getCompanyIntroduction?scode=300308", "authority": "巨潮资讯", "field": "F015V", "snapshot_sha256": "42e93f0a7534deb315e6f5a6941cce685af87ca2e67ee1d8f85223e1bb68287b"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/datasources/industry_tags.json", "source_sha256": "a2521f792ca8ed7182e44c1713723d831dd865effb9dba6b9467926cfb33f4fd", "claim": "ai_compute mounts cn_commodity_futures"},
+            {"source_ref": "https://github.com/simonlin1212/Vibe-Research/blob/7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd/.agents/skills/data-access/scripts/sources/commodity.py", "source_sha256": "cd5363524f8ee5c91c6d9047d41d525cb06f3ae86982da78b086ac3a4b756690", "claim": "reviewed FUTURES contract, weak-signal warning and use table"}
+          ],
+          "reviewer": "Codex source audit (pinned Vibe Research rule import)",
+          "reviewed_at": "2026-08-30T13:30:00Z",
+          "valid_from": "2026-08-30",
+          "valid_to": null,
+          "reason": "Pinned ai_compute thermometer contract from upstream reviewed source.",
+          "metadata": {"research_only": true, "upstream_commit": "7b0ba9c7021f974623ef9bc2fcba4de4dffa1dfd"}
+        }
+      ]
+    }
+  ]
+}

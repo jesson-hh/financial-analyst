@@ -9,8 +9,11 @@ import os
 from pathlib import Path
 from typing import Optional
 
-CS_IC_PARQUET = Path(__file__).resolve().parents[2] / "var" / "factor_vintage_cs_ic.parquet"
-TSIC_PARQUET = Path(__file__).resolve().parents[2] / "var" / "factor_vintage_tsic.parquet"
+_SCREEN_ROOT = Path(os.environ.get("GUANLAN_SCREEN_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var"
+))
+CS_IC_PARQUET = _SCREEN_ROOT / "factor_vintage_cs_ic.parquet"
+TSIC_PARQUET = _SCREEN_ROOT / "factor_vintage_tsic.parquet"
 
 # tsic 单票口径范围(落子固定盘;后续任务用)
 SEATS_POOL_CODES = ["SZ300750", "SH600519", "SZ002594", "SZ300308",

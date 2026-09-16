@@ -56,9 +56,9 @@ CATALOG_GOLDEN = GOLDEN_DIR / "phase8_catalog_manifest_v1.json"
 #: sha256 pins of the immediate upstream goldens — Phase 8 never regenerates them.
 UPSTREAM_GOLDEN_SHA256 = {
     "phase7_schema_manifest_v1.json":
-        "dd2dce36b05cb5a02673bf87347bbd4c98e741d6e8655054131c0b55f4fe935d",
+        "60b8fa38c2838b998d35c94f70422a4b31296714f6e7f4bf38910cd2abe2781b",
     "phase7_catalog_manifest_v1.json":
-        "a8bd45e06757e3101ea591b29025d88ae4d32ab310cbefb8b659f2db10fcc7f0",
+        "788466e8e708179bedd515f76b13d69b2fd59488e2b352b04482891b2540a369",
 }
 
 #: the nine Phase-8 contract modules the completeness firewall governs (mirrors

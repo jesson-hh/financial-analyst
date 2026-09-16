@@ -5,9 +5,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
-_CACHE_DEFAULT = Path(__file__).resolve().parents[2] / "var" / "macro_pulse" / "zh_cache.json"
+_MACRO_ROOT = Path(os.environ.get("GUANLAN_MACRO_ROOT") or (
+    Path(__file__).resolve().parents[2] / "var" / "macro_pulse"
+))
+_CACHE_DEFAULT = _MACRO_ROOT / "zh_cache.json"
 _SYSTEM = (
     "你是金融翻译。把预测市场(Polymarket/Kalshi)的英文问题逐条翻成简洁中文,"
     "保留机构名/日期/数字/币种语义(Fed=美联储,bps=基点)。"

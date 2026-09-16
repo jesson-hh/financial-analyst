@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 from financial_analyst.agent.base import SubAgent
 from financial_analyst.agent.schemas import EventItem
+from financial_analyst.data.pit import PitUnavailableError, is_historical_asof
 from financial_analyst.llm.client import LLMClient
 
 
@@ -47,6 +48,12 @@ class NewsReader(SubAgent[NewsOutput]):
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         code, asof = inputs["code"], inputs["asof_date"]
+        if is_historical_asof(asof):
+            raise PitUnavailableError(
+                "news-reader unavailable: current news files/NewsDB cannot "
+                f"prove a point-in-time snapshot for {asof}"
+            )
+
         if self.news_root is None:
             return {"code": code, "asof_date": asof, "events": [], "numbers": []}
 

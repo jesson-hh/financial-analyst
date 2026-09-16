@@ -45,8 +45,6 @@ def consolidate_memory(mem_path: Path, archive_path: Path, max_lines: int = 120,
         if len(lines) <= max_lines:
             return {"ok": True, "archived": 0, "kept": len(lines)}
         protected = {str(ln).strip() for ln in protected_lines if str(ln).strip()}
-        # UI pin 与主题 key 是两个概念，但二者都属于“不可被自动收敛”的常驻集合。
-        # protected_lines 来自治理 sidecar；sidecar 不可用时仍退化为原有 keyed 规则。
         archiveable_idx = [
             i for i, ln in enumerate(lines)
             if not is_keyed_line(ln) and ln.strip() not in protected

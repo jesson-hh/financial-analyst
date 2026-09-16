@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """落子五档盘口/逐笔/报价failover 单测(全离线,桩 live_fn)。"""
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from guanlan_v2.seats import live_book as lb
 
 
@@ -7,6 +9,9 @@ def _fn(payload):
     def _f(source, code="", limit=30):
         return payload
     return _f
+
+
+_STAMP = datetime(2026, 8, 31, 14, 0, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
 
 
 def test_read_orderbook_normalizes_five_levels():
@@ -54,6 +59,18 @@ def test_read_orderbook_empty_levels_degrades():
     assert out["ok"] is False and out["levels"] == [] and "无挂单档" in out["note"]
 
 
+def test_read_orderbook_all_zero_shell_degrades():
+    # 开盘前 pytdx 会给五档结构但价量全 0；这不是连续竞价盘口，必须 fail honest。
+    book = {"code": "600613", "price": 0, "last_close": 11.61,
+            **{f"bid{i}": 0 for i in range(1, 6)},
+            **{f"bid_vol{i}": 0 for i in range(1, 6)},
+            **{f"ask{i}": 0 for i in range(1, 6)},
+            **{f"ask_vol{i}": 0 for i in range(1, 6)}}
+    out = lb.read_orderbook("SH600613", live_fn=_fn({"ok": True, "rows": [book], "n": 1, "note": ""}))
+    assert out["ok"] is False and out["levels"] == []
+    assert "全为 0" in out["note"] and "连续竞价" in out["note"]
+
+
 def test_read_ticks_slices_to_limit_newest():
     # 满窗口反转后只返最新 lim 笔,n 与返回条数一致(不报满窗口大小)
     rows = [{"time": f"14:0{i}", "price": 10 + i * 0.01, "vol": i, "buyorsell": 0} for i in range(5)]  # 升序
@@ -67,11 +84,24 @@ def test_read_ticks_empty_is_honest():
     assert out["ok"] is False and out["ticks"] == [] and "无逐笔" in out["note"]
 
 
+def test_live_book_envelopes_have_stable_source_and_completion_stamp():
+    """Success, empty and adapter failure all carry an auditable read time."""
+    empty = lb.read_orderbook("000630", live_fn=_fn({"ok": True, "rows": [], "note": ""}),
+                              now_fn=lambda: _STAMP)
+    failed = lb.read_ticks("000630", live_fn=lambda *_a, **_k: (_ for _ in ()).throw(OSError()),
+                           now_fn=lambda: _STAMP)
+    assert empty["source"] == "tdx_orderbook" and empty["captured_at"] == _STAMP.isoformat()
+    assert failed["source"] == "tdx_transaction" and failed["captured_at"] == _STAMP.isoformat()
+
+
 def test_read_quote_failover_computes_change():
     q = {"code": "000630", "price": 10.5, "last_close": 10.0, "open": 10.1,
          "high": 10.8, "low": 9.9, "vol": 123456, "amount": 1.3e6}
-    out = lb.read_quote_failover("SZ000630", live_fn=_fn({"ok": True, "rows": [q], "n": 1, "note": ""}))
+    out = lb.read_quote_failover(
+        "SZ000630", live_fn=_fn({"ok": True, "rows": [q], "n": 1, "note": ""}),
+        now_fn=lambda: _STAMP)
     assert out["ok"] and out["source"] == "tdx" and out["price"] == 10.5
+    assert "asof" not in out and out["captured_at"] == _STAMP.isoformat()
     assert out["prevClose"] == 10.0 and out["change"] == 0.5 and out["changePercent"] == 5.0
     assert "failover" in out["note"] and "诚实降级" in out["note"]
 
@@ -79,6 +109,16 @@ def test_read_quote_failover_computes_change():
 def test_read_quote_failover_unavailable_is_honest():
     out = lb.read_quote_failover("000630", live_fn=_fn({"ok": False, "rows": [], "n": 0, "note": "tdx down"}))
     assert out["ok"] is False and out["source"] == "tdx"
+
+
+def test_read_quote_failover_exception_is_honest_and_time_bounded():
+    out = lb.read_quote_failover(
+        "000630",
+        live_fn=lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError()),
+        now_fn=lambda: _STAMP,
+    )
+    assert out["ok"] is False and out["source"] == "tdx"
+    assert out["captured_at"] == _STAMP.isoformat() and "TimeoutError" in out["note"]
 
 
 # ── 路由接线(TestClient,桩 live_book 只验端点归一/降级,不重测取数逻辑)────────────
